@@ -1,0 +1,85 @@
+# Read-only example for `euboulia optimize plan`. Replace the repository,
+# revision, patch, tests, benchmark harness, and baseline value before active use.
+schema_version: 2
+name: vllm-evidence-loop
+framework: vllm
+
+workload:
+  name: fixed-serving-shape
+  model: your-org/your-model
+  input_tokens: 1024
+  output_tokens: 256
+  concurrency: 32
+  num_prompts: 320
+  endpoint: http://127.0.0.1:8000
+  dataset: random
+
+benchmark:
+  mode: serve
+  base_args: []
+  result_filename: result.json
+  parameters: {}
+
+baseline:
+  id: baseline
+  source_revision: REPLACE_WITH_PINNED_COMMIT
+  target_parameters: {}
+
+optimization:
+  profiles:
+    provider: imported
+    artifacts:
+      - path: profiles/vllm-compute.ncu.csv
+        source: ncu_csv
+
+  planner:
+    provider: rules
+    patch_catalog: catalogs/vllm-patches.yaml
+    max_proposals_per_iteration: 1
+    reject_duplicate_diffs: true
+
+  workspace:
+    repository: /path/to/vllm
+    root_dir: ../.euboulia-worktrees
+    timeout_seconds: 120
+    max_patch_bytes: 262144
+    max_changed_files: 8
+    max_changed_lines: 400
+
+  evaluation:
+    metric: output_throughput
+    direction: maximize
+    baseline_value: 100.0
+    metrics_path: euboulia-result.json
+    min_relative_improvement: 0.03
+    max_regression: 0.0
+    noise_tolerance: 0.01
+    tiers:
+      - kind: correctness
+        warmups: 0
+        repetitions: 1
+        timeout_seconds: 600
+        required_metrics: []
+        commands:
+          - name: kernel-correctness
+            argv: [python, -m, pytest, tests/kernels]
+      - kind: performance
+        warmups: 2
+        repetitions: 5
+        timeout_seconds: 1800
+        required_metrics: [output_throughput]
+        commands:
+          - name: unprofiled-serving-benchmark
+            # The finite harness must write euboulia-result.json in its worktree.
+            # It must not rely on profiler-derived throughput for promotion.
+            argv: [python, your_finite_benchmark_harness.py]
+
+  budget:
+    max_iterations: 10
+    max_wall_time_seconds: 14400
+    max_consecutive_failures: 3
+    no_improvement_patience: 5
+    max_profile_bytes: 2147483648
+
+execution:
+  artifacts_dir: ../experiments/optimization-vllm

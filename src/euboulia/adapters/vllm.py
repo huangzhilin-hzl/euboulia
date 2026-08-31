@@ -120,6 +120,7 @@ class VLLMAdapter(BaseAdapter):
     ) -> AdapterCommand:
         """Describe a load benchmark against an already-running HTTP endpoint."""
 
+        _reject_profile_controls(base_args, parameters)
         result = _result_path(result_path)
         argv = [
             self.executable,
@@ -208,6 +209,7 @@ class VLLMAdapter(BaseAdapter):
     ) -> AdapterCommand:
         """Build the stable offline latency benchmark command."""
 
+        _reject_profile_controls(base_args, parameters)
         result = _result_path(result_path)
         argv = [
             self.executable,
@@ -256,6 +258,7 @@ class VLLMAdapter(BaseAdapter):
     ) -> AdapterCommand:
         """Build the stable offline throughput benchmark command."""
 
+        _reject_profile_controls(base_args, parameters)
         result = _result_path(result_path)
         argv = [
             self.executable,
@@ -397,6 +400,35 @@ def _result_path(path: str | Path) -> Path:
     if not str(result):
         raise AdapterError("result_path must not be empty")
     return result
+
+
+def _reject_profile_controls(
+    base_args: Sequence[str], parameters: Mapping[str, object] | None
+) -> None:
+    """Keep instrumented runs out of serving/latency/throughput rewards."""
+
+    if not isinstance(base_args, str | bytes):
+        for arg in base_args:
+            if isinstance(arg, str) and _is_profile_control(arg):
+                raise AdapterError(
+                    "serving profile controls are disabled; use offline profile import"
+                )
+    if isinstance(parameters, Mapping):
+        for name in parameters:
+            if isinstance(name, str) and _is_profile_parameter(name):
+                raise AdapterError(
+                    "serving profile controls are disabled; use offline profile import"
+                )
+
+
+def _is_profile_control(arg: str) -> bool:
+    option = arg.partition("=")[0]
+    return option == "--profile" or option.startswith("--profile-")
+
+
+def _is_profile_parameter(name: str) -> bool:
+    normalized = name.replace("-", "_")
+    return normalized == "profile" or normalized.startswith("profile_")
 
 
 def _nested_command(value: object, name: str) -> str | Sequence[str]:

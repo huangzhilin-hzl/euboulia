@@ -1,0 +1,4 @@
+"ID","Kernel Name","Metric Name","Metric Unit","Metric Value"
+1,"paged_attention_example","gpu__time_duration.sum","nsecond",20000
+,,"sm__throughput.avg.pct_of_peak_sustained_elapsed","percent",92
+,,"gpu__compute_memory_throughput.avg.pct_of_peak_sustained_elapsed","percent",40

@@ -264,3 +264,57 @@ def test_parameter_names_and_nested_values_fail_closed() -> None:
             result_path="result.json",
             parameters={"extra_request_body": {"bad": object()}},
         )
+
+
+@pytest.mark.parametrize("adapter", [SGLangAdapter(), VLLMAdapter()])
+@pytest.mark.parametrize(
+    "base_args",
+    [
+        ("--profile",),
+        ("--profile-output-dir=/tmp/profile",),
+    ],
+)
+def test_serving_profile_control_base_args_fail_closed(
+    adapter: SGLangAdapter | VLLMAdapter, base_args: tuple[str, ...]
+) -> None:
+    with pytest.raises(AdapterError, match="offline profile import"):
+        adapter.build_serve_command(
+            model="m",
+            result_path="result.json",
+            base_args=base_args,
+        )
+
+
+@pytest.mark.parametrize("adapter", [SGLangAdapter(), VLLMAdapter()])
+@pytest.mark.parametrize("parameter", ["profile", "profile_output_dir", "profile-steps"])
+def test_serving_profile_control_parameters_fail_closed(
+    adapter: SGLangAdapter | VLLMAdapter, parameter: str
+) -> None:
+    with pytest.raises(AdapterError, match="offline profile import"):
+        adapter.build_serve_command(
+            model="m",
+            result_path="result.json",
+            parameters={parameter: True},
+        )
+
+
+@pytest.mark.parametrize("mode", [BenchmarkType.LATENCY, BenchmarkType.THROUGHPUT])
+def test_vllm_offline_benchmark_profile_controls_fail_closed(
+    mode: BenchmarkType, tmp_path: Path
+) -> None:
+    workload = {
+        "model": "m",
+        "input_tokens": 8,
+        "output_tokens": 8,
+        "concurrency": 1,
+        "num_prompts": 2,
+    }
+
+    with pytest.raises(AdapterError, match="offline profile import"):
+        VLLMAdapter().build_command(
+            mode,
+            workload,
+            {"profile": True},
+            (),
+            tmp_path / "result.json",
+        )

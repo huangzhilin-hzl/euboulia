@@ -6,12 +6,16 @@ acceptance gates into reproducible benchmark evidence. A person remains in
 control of execution and of every operational decision that follows.
 
 > [!IMPORTANT]
-> Euboulia is early-stage software. The MVP plans and evaluates experiments; it
-> does not edit source or configuration, apply patches, launch, restart, kill,
-> deploy, or promote an SGLang/vLLM service. `run` is non-executing unless
-> `--execute` is supplied.
+> Euboulia is early-stage software. The schema-v1 `run` command remains
+> non-executing unless `--execute` is supplied and never applies its `patch`
+> metadata. The schema-v2 `optimize` runtime can apply an exact, reviewed catalog
+> patch only inside a fresh detached Git worktree, and only when both
+> `--apply-patches` and `--run-evaluations` are supplied. Neither path launches,
+> restarts, kills, deploys, or promotes an SGLang/vLLM service.
 
 ## What it does
+
+The schema-v1 campaign path:
 
 - validates a versioned YAML campaign containing one baseline and one or more
   candidates;
@@ -21,6 +25,20 @@ control of execution and of every operational decision that follows.
   experiment evidence;
 - checks correctness before deciding whether a performance result passes; and
 - records rejected and failed experiments instead of hiding inconvenient data.
+
+The iterative runtime adds a second, separately authorized loop:
+
+- imports PyTorch Chrome traces, Nsight Systems CSV, and Nsight Compute CSV as
+  diagnostic-only evidence;
+- classifies compute, memory, occupancy, launch, synchronization, transfer,
+  communication, CPU-submission, and underutilization signals with explainable
+  rules;
+- maps findings to a reviewed patch catalog while deduplicating prior outcomes;
+- checks and applies exact patches in per-trial detached worktrees;
+- evaluates preflight, correctness, and unprofiled performance in fail-fast
+  order; and
+- records typed events plus positive and negative outcomes in a rebuildable
+  SQLite memory index.
 
 Euboulia does not claim that a faster single run is a production-safe tuning.
 The operator owns the test environment, the running inference service, the
@@ -103,6 +121,46 @@ uv run euboulia history --ledger experiments/ledger.jsonl
 Use paths produced by your campaign rather than the illustrative result paths
 above.
 
+## Iterative optimization: profile to memory
+
+The schema-v2 example is safe to inspect as checked in:
+
+```console
+uv run euboulia optimize plan --config examples/optimization-vllm.yaml
+```
+
+`optimize plan` reads the declared trace and patch catalog, runs the rule
+analyzer, and prints proposals. It creates no artifact directory, event log,
+memory database, worktree, or subprocess. The included patch and commands are
+illustrative; replace them and pin `baseline.source_revision` before active use.
+
+An active run first executes the same deliberation and pauses at the capability
+boundary by default:
+
+```console
+uv run euboulia optimize run --config your-optimization.yaml
+```
+
+After reviewing the proposal, repository, exact patch digest, path/line budgets,
+correctness commands, finite benchmark harness, baseline, metric, and resource
+budget, both active capabilities must be granted explicitly:
+
+```console
+uv run euboulia optimize run \
+  --config your-optimization.yaml \
+  --apply-patches \
+  --run-evaluations
+```
+
+These flags authorize only detached-worktree mutation and finite evaluator
+commands. They do not authorize a persistent service lifecycle. Inspect the
+append-only trajectory with:
+
+```console
+uv run euboulia optimize events \
+  --events experiments/optimization-vllm/events.jsonl
+```
+
 ## Campaign shape
 
 Each campaign declares:
@@ -113,9 +171,11 @@ Each campaign declares:
 - a correctness gate plus a directional performance gate; and
 - scoped artifact, ledger, timeout, and environment settings.
 
-Candidate `parameters` are benchmark-client knobs. They are not instructions to
-mutate server flags. The optional `patch` field is evidence metadata in the MVP
-and is never applied. See the annotated example files for the complete schema.
+In schema v1, candidate `parameters` are benchmark-client knobs. They are not
+instructions to mutate server flags, and the optional `patch` field remains inert
+evidence metadata. Schema v2 uses separate `profiles`, `planner`, `workspace`,
+`evaluation`, and `budget` sections; it never reinterprets a v1 patch as active
+input. See the annotated example files for both schemas.
 Changing request rate, concurrency, token lengths, or another load dimension is
 a **capacity-search experiment**, not evidence of a code speedup. A code or
 server-tuning claim must hold model, workload, hardware, and measurement policy
@@ -145,7 +205,7 @@ workspace for source changes.
 
 ## Architecture
 
-The core flow is intentionally narrow:
+The original campaign flow remains intentionally narrow:
 
 ```text
 YAML/JSON config -> validation and plan -> framework adapter -> reviewed argv
@@ -154,9 +214,24 @@ YAML/JSON config -> validation and plan -> framework adapter -> reviewed argv
 ```
 
 Adapters contain framework CLI differences. The planner, data model, ledger,
-and gate evaluator remain framework-neutral. Read
+and gate evaluator remain framework-neutral. The iterative flow is:
+
+```text
+Profiler -> Analyzer -> Planner -> approval -> Patch Workspace -> Evaluator
+    ^                                                               |
+    +---------------- Event Ledger + Memory -------------------------+
+```
+
+The event stream is independent of the existing experiment ledger. Profiled
+values can diagnose a bottleneck but are structurally ineligible for a promotion
+gate; the evaluator requires a separate unprofiled result. Read
 [Architecture](docs/architecture.md) for component and data-flow details and
-[Safety](docs/safety.md) for the execution boundary.
+[Safety](docs/safety.md) for the execution boundary. The exact mechanisms
+borrowed from OpenHands, SWE-agent, Aider, Optuna, MLflow, and LangGraph are
+documented in [Design inspirations](docs/design-inspirations.md).
+
+The end-to-end schema-v2 lifecycle and configuration are covered in
+[Iterative optimization runtime](docs/optimization.md).
 
 ## Evidence discipline
 
@@ -172,21 +247,23 @@ A credible campaign should:
    tolerance; and
 6. retain failures and raw results alongside accepted results.
 
-The MVP provides the ledger and gate mechanics. It does not turn an
-underpowered benchmark into a statistically valid conclusion.
+The runtime provides evidence, lifecycle, and gate mechanics. It does not turn
+an underpowered benchmark into a statistically valid conclusion.
 
 ## Roadmap
 
-The initial scope is YAML validation, environment diagnostics, plan/dry-run,
-explicit benchmark execution, SGLang/vLLM adapters, normalized metrics,
-correctness/performance gates, and experiment history.
+Implemented now: static SGLang/vLLM campaigns; imported profiler normalization;
+rule-backed bottleneck analysis and patch planning; an append-only optimization
+event stream; explicit state and resource budgets; exact patch validation in a
+detached worktree; fail-fast correctness/performance evaluation; and structured
+long-term memory.
 
-Likely follow-on work includes repeated-trial statistics and confidence
-intervals, profiler and trace ingestion, evidence-backed candidate generation,
-and optional integrations for approved canary or rollout workflows. Any future
-patch proposal or service-control integration must add a separate approval,
-threat model, rollback story, and audit trail; silent service mutation is not a
-roadmap goal.
+Likely follow-on work includes an owned-service `TargetController`, repeated
+interleaved GPU trials, confidence intervals and statistical pruning,
+container/remote workspaces, LLM planner/editor adapters, Optuna search-policy
+and MLflow tracking adapters, crash-safe resume, and approved canary workflows.
+Service control will require its own capability, ownership proof, rollback, and
+audit trail; silent service mutation is not a roadmap goal.
 
 ## Development
 
@@ -196,6 +273,7 @@ uv run ruff check .
 uv run mypy src/euboulia
 uv run pytest
 uv run euboulia plan --config examples/vllm.yaml
+uv run euboulia optimize plan --config examples/optimization-vllm.yaml
 ```
 
 Contributions should include the evidence needed to evaluate performance claims.

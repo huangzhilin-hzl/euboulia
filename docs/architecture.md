@@ -15,6 +15,9 @@ act on that recommendation.
 5. Baselines, failures, raw outputs, normalized metrics, and verdicts remain
    available for audit.
 6. Framework CLI churn is contained inside adapters.
+7. Profile-derived values are diagnostic-only and cannot promote a candidate.
+8. Schema-v2 workspace writes and evaluator execution are separate capabilities.
+9. Every active candidate starts from a pinned revision in a detached worktree.
 
 ## Data flow
 
@@ -36,6 +39,26 @@ The service is an external prerequisite, not a child of Euboulia. The benchmark
 executor sends the declared workload to its configured endpoint and writes only
 experiment evidence.
 
+The schema-v2 runtime is a sidecar rather than a rewrite of that path:
+
+```mermaid
+flowchart LR
+    P["Imported profiler artifacts"] --> A["Rule analyzer"]
+    A --> H["Hypothesis planner"]
+    H --> Q{"Explicit capabilities?"}
+    Q -->|"no"| W["Waiting for approval"]
+    Q -->|"yes"| G["Detached Git worktree"]
+    G --> C["Exact patch check and apply"]
+    C --> E["Preflight -> correctness -> unprofiled benchmark"]
+    E --> V["Verdict and champion decision"]
+    V --> M["Event ledger and memory index"]
+    M --> A
+```
+
+Profiler, analyzer, planner, patch workspace, evaluator, and memory communicate
+through frozen typed records. The explicit runner state machine is the only
+orchestrator. A general agent framework is not a dependency.
+
 ## Components
 
 | Component | Responsibility | Boundary |
@@ -49,6 +72,13 @@ experiment evidence.
 | Artifact store and ledger | Stores run evidence and append-only experiment records | Never doubles as a source-editing workspace |
 | Gate evaluator | Applies correctness, direction, improvement, and regression rules | Produces a verdict, not an operational rollout |
 | Human control | Reviews commands and decides what follows a verdict | Remains the final authority |
+| Optimization event ledger | Stores typed, append-only stage transitions and artifact digests | Remains separate from the experiment-only ledger |
+| Imported profiler | Normalizes Torch, NSYS, and NCU exports | Never starts server profiling and never emits promotion metrics |
+| Rule analyzer | Produces ranked findings with confidence, evidence, and caveats | Findings are hypotheses, not causal proof |
+| Hypothesis planner | Selects a reviewed patch catalog entry and deduplicates memory | Does not edit files or emit shell commands |
+| Patch workspace | Creates a detached worktree and strictly checks/applies one patch | Never edits or commits the user's branch; retains failed evidence |
+| Tiered evaluator | Runs finite argv commands in fail-fast order | Cannot manage a persistent service or promote a profiler trial |
+| SQLite memory | Indexes accepted, rejected, invalid, and failed outcomes by context | Derived and rebuildable; not the audit source of truth |
 
 ## Experiment lifecycle
 
@@ -74,7 +104,11 @@ experiment evidence.
 A campaign contains a `Workload`, benchmark mode, ordered `Candidate` values,
 gates, and execution settings. The first candidate is always the baseline.
 Candidate parameters belong to the benchmark client; they are not server flags.
-An optional `patch` is descriptive metadata in the MVP and is never applied.
+An optional schema-v1 `patch` is descriptive metadata and is never applied.
+Schema v2 instead refers to an explicit reviewed patch catalog. Its planner
+selects a catalog entry, and the workspace independently validates its bytes,
+paths, modes, symlink traversal, changed-file count, changed-line count, base
+revision, and `git apply --check` result before a separately authorized write.
 When a candidate changes concurrency, request rate, token lengths, or another
 load dimension, its result describes a capacity search and must not be labeled a
 code speedup. Code or server-tuning comparisons keep the model, workload,
@@ -133,6 +167,20 @@ raw evidence, normalized metrics, status, and verdict. Completed evidence should
 be treated as immutable; later analysis produces a new record rather than
 rewriting history.
 
+A schema-v2 run additionally uses:
+
+```text
+<optimization-artifacts>/
+├── events.jsonl                 # canonical stage trajectory
+├── memory.sqlite3               # rebuildable query index
+└── <run-id>/
+    └── evaluations/<trial-id>/  # command logs, metrics, and verdict
+
+<workspace-root>/<run-id>/<iteration-id>/
+├── evidence/                    # manifest, checked patch, diff, command logs
+└── worktree/                    # detached candidate; never auto-deleted
+```
+
 ## Reproducibility
 
 The ledger is necessary but not sufficient. Meaningful comparisons also pin or
@@ -152,10 +200,12 @@ plane dependency between the projects.
 ## Extension points and limits
 
 New benchmark modes and native result formats belong in adapters. New statistical
-tests and gates belong after evidence normalization. Profiler and trace importers
-should attach evidence without weakening raw-data retention.
+tests and gates belong after evidence normalization. New profiler formats belong
+in offline importers without weakening raw-data retention.
 
-The MVP does not generate or apply code changes, tune a live server in place,
-control deployment, or prove causality from a single trial. Adding any active
-operational capability requires a new threat model, explicit approval boundary,
-least-privilege executor, rollback mechanism, and audit record.
+The current rules runtime selects only pre-reviewed exact patches; it does not
+generate free-form code, tune a live server in place, control deployment, resume
+an interrupted side effect, or prove causality from a single trial. Persistent
+service lifecycle, external model calls, containers, remote GPUs, and deployment
+each require a new capability, threat model, least-privilege executor, rollback
+mechanism, and audit record.

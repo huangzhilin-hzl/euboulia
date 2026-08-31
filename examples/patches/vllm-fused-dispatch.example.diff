@@ -1,0 +1,6 @@
+diff --git a/vllm/example_target.py b/vllm/example_target.py
+--- a/vllm/example_target.py
++++ b/vllm/example_target.py
+@@ -1 +1 @@
+-DISPATCH_BATCH = 1
++DISPATCH_BATCH = 2

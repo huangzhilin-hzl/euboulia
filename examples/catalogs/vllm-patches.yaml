@@ -1,0 +1,12 @@
+schema_version: 1
+entries:
+  - id: example-fused-dispatch
+    title: Test a larger fused dispatch batch
+    rationale: >-
+      The imported NCU export shows compute pressure. This reviewed example patch
+      represents a bounded fusion hypothesis; replace it with a real patch for
+      the pinned vLLM revision before active evaluation.
+    triggers: [compute]
+    patch: ../patches/vllm-fused-dispatch.example.diff
+    predicted_metric: output_throughput
+    risk: medium

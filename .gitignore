@@ -27,6 +27,8 @@ profiles/
 traces/
 *.nsys-rep
 *.sqlite
+!examples/profiles/
+!examples/profiles/vllm-compute.ncu.csv
 
 # Editors and operating systems
 .idea/

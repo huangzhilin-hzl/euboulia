@@ -2,36 +2,46 @@
 
 Euboulia is designed to help an operator reason about inference performance
 without quietly becoming an infrastructure controller. Its central safety
-property is simple: **inspection is the default, benchmark execution is explicit,
-and service mutation is outside the MVP.**
+property is simple: **inspection is the default, every side-effect class is
+explicit, and service mutation remains outside the runtime.**
 
 ## Action boundary
 
-| Action | Default / `--dry-run` | Explicit `--execute` | MVP status |
+| Action | Inspection default | Narrow authorization | Status |
 | --- | --- | --- | --- |
-| Validate configuration and gates | Allowed | Allowed | Supported |
-| Inspect local tool availability and versions | Allowed | Allowed | Supported |
-| Render argument vectors, paths, and trial order | Allowed | Allowed | Supported |
-| Invoke the planned benchmark client | No | Allowed | Supported with consent |
-| Write results within declared artifact/ledger paths | No | Allowed | Supported with consent |
-| Parse results and evaluate gates | From existing data | Allowed | Supported |
-| Edit source, weights, or server configuration | No | No | Not permitted |
-| Apply the candidate `patch` field | No | No | Not permitted |
-| Launch, restart, signal, or kill an inference service | No | No | Not permitted |
-| Deploy, promote, push Git changes, or alter infrastructure | No | No | Not permitted |
+| Validate configuration, gates, trace, and patch catalog | Allowed | None needed | Supported |
+| Render argument vectors, paths, and trial order | Allowed | None needed | Supported |
+| Invoke a schema-v1 benchmark client | No | `run --execute` | Supported |
+| Import existing profiler artifacts | Allowed | None needed | Supported |
+| Start or stop server profiling | No | None exists | Not permitted |
+| Prepare and check a patch in a detached worktree | No | Active optimize run | Supported |
+| Apply a reviewed schema-v2 patch in that worktree | No | `--apply-patches` | Supported |
+| Run finite preflight/correctness/benchmark commands | No | `--run-evaluations` | Supported |
+| Apply a schema-v1 candidate `patch` field | No | None exists | Not permitted |
+| Edit the user's branch or auto-commit/push | No | None exists | Not permitted |
+| Launch, restart, signal, or kill an inference service | No | None exists | Not permitted |
+| Deploy, promote, or alter infrastructure | No | None exists | Not permitted |
 
 `run` without `--execute` must remain non-executing. `--dry-run` is an explicit
 way to request the same safe inspection behavior. A future feature cannot reuse
 `--execute` as blanket permission for a broader class of changes.
 
+Likewise, `optimize plan` is zero-write and zero-process. `optimize run` records
+its deliberation but pauses before a worktree is created unless both active
+capabilities are present. Neither flag authorizes service lifecycle, external
+model calls, deployment, or mutation outside the fresh worktree.
+
 ## Human checkpoints
 
-There are two mandatory decision points:
+There are three mandatory decision points:
 
 1. **Before execution:** inspect the endpoint, model, dataset, prompt/token sizes,
    request rate, concurrency, command arguments, environment, timeout, artifact
    location, and estimated resource impact.
-2. **After evaluation:** inspect raw evidence, correctness, noise, regressions,
+2. **Before an optimization trial:** inspect the pinned revision, exact patch and
+   digest, changed paths and budgets, all finite argv commands, objective,
+   baseline, profiler separation, workspace root, and cost limit.
+3. **After evaluation:** inspect raw evidence, correctness, noise, regressions,
    and provenance before making any separate server or deployment change.
 
 A passing gate is a recommendation under the declared experiment, not rollout
@@ -51,6 +61,8 @@ authorization.
   at the configured endpoint.
 - A partial result, nonzero exit, timeout, or parse failure is retained as a
   failed experiment and cannot be promoted to a passing verdict.
+- SGLang/vLLM `--profile` and `--profile-*` controls are rejected by serving
+  adapters because they mutate server profiler state and perturb measurements.
 
 ## Filesystem safety
 
@@ -64,6 +76,11 @@ authorization.
   by a framework.
 - Never point an artifact directory at a source tree, home directory, filesystem
   root, model store, or other valuable shared location.
+- Each active proposal gets a detached worktree outside the repository. Patch
+  paths cannot be absolute, contain `..`/`.git`, traverse symlinks, create a
+  symlink or binary object, or exceed declared byte/file/line budgets.
+- Worktrees and failed patch evidence are not automatically deleted. The operator
+  removes them later through a separately reviewed maintenance action.
 
 ## Network and resource safety
 
@@ -98,13 +115,22 @@ Cryptographic artifact manifests, signed ledgers, isolated workers, and stronger
 secret handling are candidates for future hardening; they should not be implied
 by an ordinary local JSON/JSONL record today.
 
+Optimization stage events live in a separate append-only ledger. Large traces,
+patches, diffs, logs, and metrics are referenced by path, size, and SHA-256 rather
+than embedded. SQLite memory is a derived index and may be deleted/rebuilt; it is
+not the canonical audit record. Profile observations are permanently labeled
+`profile_diagnostic` and `gate_eligible=false`.
+
 ## Candidate patches
 
-The schema permits a nullable `patch` field so a candidate can refer to a
-proposed change in evidence. In the MVP it is inert metadata: Euboulia neither
-interprets nor applies it. A future patch workflow must separately define trusted
-sources, sandboxing, review, exact target resolution, approval, rollback, and
-provenance.
+Schema v1 permits a nullable `patch` field so a candidate can refer to a proposed
+change in evidence. It remains inert metadata forever under that schema.
+
+Schema v2 uses a separate reviewed patch catalog. The planner cannot write code;
+it selects a catalog entry whose trigger matches a finding. The workspace treats
+that result as untrusted, repeats exact-apply validation at the mutation boundary,
+and edits only its detached worktree. Euboulia never commits the patch, touches
+the user's dirty changes, or treats an accepted benchmark as deployment approval.
 
 ## Expanding the boundary
 

@@ -22,6 +22,14 @@ from euboulia.campaign import (
 from euboulia.config import ConfigError, load_config
 from euboulia.doctor import required_checks_pass, run_doctor
 from euboulia.ledger import ExperimentLedger, LedgerCorruptionError
+from euboulia.optimization.config import OptimizationConfigError, load_optimization_config
+from euboulia.optimization.contracts import Capability, RunState
+from euboulia.optimization.evaluator import EvaluationError
+from euboulia.optimization.events import EventLedger, EventLedgerCorruptionError
+from euboulia.optimization.memory import MemoryConflictError, MemorySchemaError
+from euboulia.optimization.planner import PatchCatalogError
+from euboulia.optimization.runner import OptimizationRunner, OptimizationRuntimeError
+from euboulia.optimization.workspace import WorkspaceError
 
 Command = Callable[[argparse.Namespace], int]
 
@@ -77,6 +85,53 @@ def build_parser() -> argparse.ArgumentParser:
     )
     history_parser.add_argument("--json", action="store_true", help="emit machine-readable JSON")
     history_parser.set_defaults(handler=_history)
+
+    optimize_parser = subparsers.add_parser(
+        "optimize", help="run the schema-v2 iterative optimization pipeline"
+    )
+    optimize_commands = optimize_parser.add_subparsers(dest="optimize_command", required=True)
+
+    optimize_plan_parser = optimize_commands.add_parser(
+        "plan", help="import profiles and propose reviewed patches without writing"
+    )
+    _add_config_argument(optimize_plan_parser)
+    optimize_plan_parser.add_argument(
+        "--json", action="store_true", help="emit machine-readable JSON"
+    )
+    optimize_plan_parser.set_defaults(handler=_optimize_plan)
+
+    optimize_run_parser = optimize_commands.add_parser(
+        "run", help="run until completion or an explicit capability boundary"
+    )
+    _add_config_argument(optimize_run_parser)
+    optimize_run_parser.add_argument("--run-id", help="optional deterministic run identifier")
+    optimize_run_parser.add_argument(
+        "--apply-patches",
+        action="store_true",
+        help="authorize writes only inside a fresh detached worktree",
+    )
+    optimize_run_parser.add_argument(
+        "--run-evaluations",
+        action="store_true",
+        help="authorize finite evaluator commands; does not authorize service control",
+    )
+    optimize_run_parser.add_argument(
+        "--json", action="store_true", help="emit machine-readable JSON"
+    )
+    optimize_run_parser.set_defaults(handler=_optimize_run)
+
+    optimize_events_parser = optimize_commands.add_parser(
+        "events", help="inspect the append-only optimization event stream"
+    )
+    optimize_events_parser.add_argument("--events", required=True, type=Path)
+    optimize_events_parser.add_argument("--run-id")
+    optimize_events_parser.add_argument(
+        "--limit", type=_positive_integer, default=50, help="latest events to show"
+    )
+    optimize_events_parser.add_argument(
+        "--json", action="store_true", help="emit machine-readable JSON"
+    )
+    optimize_events_parser.set_defaults(handler=_optimize_events)
     return parser
 
 
@@ -159,6 +214,79 @@ def _history(args: argparse.Namespace) -> int:
     return 0
 
 
+def _optimize_plan(args: argparse.Namespace) -> int:
+    config = load_optimization_config(args.config)
+    plan = OptimizationRunner().plan(config)
+    if args.json:
+        _print_json(plan.to_dict())
+    else:
+        print(f"Optimization campaign: {plan.campaign} ({plan.framework})")
+        observation_count = plan.profile.metrics.get("observation_count", 0)
+        print(f"Profile: {plan.profile.profile_id}; observations={observation_count}")
+        print(f"Analysis: {plan.analysis.summary}")
+        if not plan.proposals:
+            print("Proposals: none")
+        for index, proposal in enumerate(plan.proposals, start=1):
+            print(f"\n[{index}] {proposal.proposal_id}: {proposal.title}")
+            print(f"risk:      {proposal.risk}")
+            print(f"rationale: {proposal.rationale}")
+            patch_path = proposal.metadata.get("patch_path")
+            if patch_path is not None:
+                print(f"patch:     {patch_path}")
+        print("\nRead-only plan. No event, memory, worktree, command, or service was created.")
+    return 0
+
+
+def _optimize_run(args: argparse.Namespace) -> int:
+    config = load_optimization_config(args.config)
+    authorizations: set[Capability] = set()
+    if args.apply_patches:
+        authorizations.add(Capability.WORKSPACE_WRITE)
+    if args.run_evaluations:
+        authorizations.add(Capability.BENCHMARK_EXECUTION)
+    result = OptimizationRunner().run(
+        config,
+        frozenset(authorizations),
+        run_id=args.run_id,
+    )
+    if args.json:
+        _print_json(result.to_dict())
+    else:
+        print(f"Optimization run: {result.run_id}")
+        print(f"State: {result.run_state.value}")
+        print(f"Champion: {result.champion_id}")
+        print(f"Outcomes: {len(result.outcomes)}")
+        print(f"Events: {result.event_ledger}")
+        print(f"Memory: {result.memory}")
+        if result.stop_reason:
+            print(f"Reason: {result.stop_reason}")
+        if result.waiting_for_approval:
+            missing: list[str] = []
+            if not args.apply_patches:
+                missing.append("--apply-patches")
+            if not args.run_evaluations:
+                missing.append("--run-evaluations")
+            print("Review the proposal, then start a new run with: " + " ".join(missing))
+    if result.run_state in {RunState.COMPLETED, RunState.WAITING_FOR_APPROVAL}:
+        return 0
+    return 1
+
+
+def _optimize_events(args: argparse.Namespace) -> int:
+    ledger = EventLedger(args.events, create_parents=False)
+    events = ledger.by_run(args.run_id) if args.run_id else ledger.read_all()
+    selected = events[-args.limit :]
+    if args.json:
+        _print_json([event.to_dict() for event in selected])
+    elif not selected:
+        print(f"No optimization events recorded in {args.events}.")
+    else:
+        for event in selected:
+            iteration = event.iteration_id or "-"
+            print(f"{event.occurred_at}  {event.run_id}  {iteration}  {event.event_type.value}")
+    return 0
+
+
 def _print_plan(name: str, plans: Sequence[Any]) -> None:
     print(f"Campaign: {name}")
     print(f"Candidates: {len(plans)}")
@@ -203,11 +331,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         AdapterError,
         CampaignSafetyError,
         ConfigError,
+        EventLedgerCorruptionError,
+        EvaluationError,
         FileExistsError,
         LedgerCorruptionError,
+        MemoryConflictError,
+        MemorySchemaError,
         OSError,
+        OptimizationConfigError,
+        OptimizationRuntimeError,
+        PatchCatalogError,
         TypeError,
         ValueError,
+        WorkspaceError,
     ) as exc:
         print(f"euboulia: error: {exc}", file=sys.stderr)
         return 2
