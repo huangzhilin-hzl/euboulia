@@ -1,0 +1,63 @@
+# Euboulia campaign schema v1. This capacity-search example varies benchmark-
+# client load only; it is not a code-speedup comparison. The vLLM server at the
+# endpoint is externally managed and remains untouched.
+schema_version: 1
+name: vllm-llama31-client-load-sweep
+framework: vllm
+
+workload:
+  name: llama31-random-serving
+  model: meta-llama/Meta-Llama-3.1-8B-Instruct
+  input_tokens: 1024
+  output_tokens: 256
+  concurrency: 32
+  num_prompts: 320
+  endpoint: http://127.0.0.1:8000
+  dataset: random
+
+benchmark:
+  mode: serve
+  # Extra native benchmark arguments shared by every candidate. Keep workload
+  # fields above as the source of truth instead of duplicating them here.
+  base_args: []
+  result_filename: vllm-serving.json
+
+candidates:
+  # The first candidate is always the comparison baseline.
+  - id: baseline
+    name: Baseline client load
+    # Parameters are benchmark-client knobs, not vLLM server settings.
+    parameters:
+      max_concurrency: 32
+      request_rate: inf
+      seed: 42
+    env: {}
+    patch: null
+
+  - id: client-concurrency-64
+    name: Higher client concurrency
+    parameters:
+      max_concurrency: 64
+      request_rate: inf
+      seed: 42
+    env: {}
+    patch: null
+
+gates:
+  correctness:
+    metric: success_rate
+    minimum: 1.0
+  performance:
+    metric: output_throughput
+    direction: maximize
+    min_relative_improvement: 0.02
+    max_regression: 0.01
+    noise_tolerance: 0.01
+
+execution:
+  # Paths are relative to this file, so these resolve to repository/experiments.
+  artifacts_dir: ../experiments/vllm
+  ledger: ../experiments/vllm/ledger.jsonl
+  timeout_seconds: 1800
+  env:
+    TOKENIZERS_PARALLELISM: "false"

@@ -1,0 +1,35 @@
+# Python bytecode and tool caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Environments and packaging output
+.venv/
+venv/
+dist/
+build/
+*.egg-info/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+
+# Euboulia experiment evidence and heavyweight profiler output
+experiments/
+artifacts/
+profiles/
+traces/
+*.nsys-rep
+*.sqlite
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
