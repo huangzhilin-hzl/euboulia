@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gzip
 import json
 import platform
 import shutil
@@ -13,9 +14,10 @@ import yaml
 
 from euboulia.execution import ExecutionResult
 from euboulia.optimization.config import OptimizationConfig, load_optimization_config
-from euboulia.optimization.contracts import Capability, IterationState, RunState
+from euboulia.optimization.contracts import Capability, RunState
 from euboulia.optimization.evaluator import TieredEvaluator
 from euboulia.optimization.events import EventLedger, EventType
+from euboulia.optimization.profiling import SGLangProfiler
 from euboulia.optimization.runner import OptimizationRunner
 from euboulia.optimization.target import (
     BuildSpec,
@@ -32,6 +34,7 @@ _ALL_MANAGED_CAPABILITIES = frozenset(
         Capability.BENCHMARK_EXECUTION,
         Capability.BUILD_EXECUTION,
         Capability.OWNED_SERVICE_LIFECYCLE,
+        Capability.PROFILE_EXECUTION,
     }
 )
 
@@ -58,26 +61,6 @@ def _managed_project(tmp_path: Path) -> OptimizationConfig:
     _git(repository, "commit", "-m", "baseline")
     source_revision = _git(repository, "rev-parse", "HEAD")
 
-    trace = tmp_path / "trace.json"
-    trace.write_text(
-        json.dumps(
-            {
-                "traceEvents": [
-                    {
-                        "name": "decode_kernel",
-                        "cat": "kernel",
-                        "ph": "X",
-                        "ts": index * 10,
-                        "dur": 5,
-                        "pid": 1,
-                        "tid": 2,
-                    }
-                    for index in range(110)
-                ]
-            }
-        ),
-        encoding="utf-8",
-    )
     catalog = tmp_path / "changes.yaml"
     catalog.write_text(
         """schema_version: 1
@@ -114,6 +97,9 @@ entries:
     benchmark_source = (
         "import json,os,pathlib; "
         "role=os.environ['EUBOULIA_TARGET_ROLE']; "
+        "assert role!='profile' or (os.environ['EUBOULIA_WARMUPS']=='0' and "
+        "os.environ['EUBOULIA_REPETITIONS']=='1' and "
+        "os.environ['EUBOULIA_NUM_PROMPTS']=='16'); "
         "value=100.0 if role=='baseline' else 106.0; "
         "pathlib.Path('metrics.json').write_text(json.dumps({'throughput': value}))"
     )
@@ -166,9 +152,17 @@ entries:
             "target_parameters": {},
         },
         "optimization": {
-            "profiles": {
-                "provider": "imported",
-                "artifacts": [{"path": str(trace), "source": "torch_chrome_trace"}],
+            "profiling": {
+                "provider": "sglang_torch",
+                "workload_point": "fixed",
+                "warmup_runs": 0,
+                "num_steps": 2,
+                "settle_timeout_seconds": 2,
+                "max_raw_bytes": 1_000_000,
+                "min_free_disk_bytes": 1_000_000,
+                "max_summary_rows": 100,
+                "expected_rank_traces": 1,
+                "required_kernel_pattern": "decode_kernel",
             },
             "planner": {
                 "provider": "rules",
@@ -220,7 +214,6 @@ entries:
                 "max_wall_time_seconds": 30,
                 "max_consecutive_failures": 1,
                 "no_improvement_patience": 1,
-                "max_profile_bytes": 1_000_000,
             },
         },
         "execution": {"artifacts_dir": str(tmp_path / "artifacts")},
@@ -268,6 +261,7 @@ def _managed_v3_project(tmp_path: Path) -> OptimizationConfig:
             },
         ],
     }
+    document["optimization"]["profiling"]["workload_point"] = "short-c4"
     target = document["target"]
     assert isinstance(target, dict)
     target.pop("provenance")
@@ -359,7 +353,7 @@ class FakeTargetController:
     @staticmethod
     def _role(workspace: Path) -> str:
         role = Path(workspace).parent.name
-        if role not in {"baseline", "candidate"}:
+        if role not in {"profile", "baseline", "candidate"}:
             raise AssertionError(f"unexpected managed worktree role: {role}")
         return role
 
@@ -436,13 +430,55 @@ class FakeTargetController:
             raise RuntimeError(f"fake {role} stop failure")
 
 
+class _FakeProfiler(SGLangProfiler):
+    def _post_json(self, endpoint: str, path: str, payload: dict[str, object]) -> None:
+        del endpoint
+        if path != "/start_profile":
+            return
+        raw_dir = Path(str(payload["output_dir"]))
+        trace = {
+            "traceEvents": [
+                {
+                    "name": "decode_kernel",
+                    "cat": "kernel",
+                    "ph": "X",
+                    "ts": index * 10,
+                    "dur": 5,
+                    "pid": 1,
+                    "tid": 2,
+                }
+                for index in range(110)
+            ]
+        }
+        with gzip.open(raw_dir / "rank-0.trace.json.gz", "wt", encoding="utf-8") as handle:
+            json.dump(trace, handle)
+
+
+def _runner(config: OptimizationConfig, controller: FakeTargetController) -> OptimizationRunner:
+    return OptimizationRunner(controller, _FakeProfiler(config.optimization.profiling))
+
+
+def test_managed_plan_describes_capture_without_running_it(tmp_path: Path) -> None:
+    config = _managed_project(tmp_path)
+    workspace = config.optimization.workspace
+    assert workspace is not None
+
+    plan = OptimizationRunner().plan(config)
+
+    assert plan.profile_plan["provider"] == "sglang_torch"
+    assert plan.profile_plan["workload_point"] == "fixed"
+    assert Capability.PROFILE_EXECUTION in plan.required_capabilities
+    assert not config.execution.artifacts_dir.exists()
+    assert not workspace.root_dir.exists()
+
+
 def test_managed_args_only_trial_uses_fresh_services_and_measured_baseline(
     tmp_path: Path,
 ) -> None:
     config = _managed_project(tmp_path)
     controller = FakeTargetController()
 
-    result = OptimizationRunner(controller).run(
+    result = _runner(config, controller).run(
         config,
         _ALL_MANAGED_CAPABILITIES,
         run_id="managed-accepted",
@@ -454,6 +490,10 @@ def test_managed_args_only_trial_uses_fresh_services_and_measured_baseline(
     assert result.outcomes[0].metadata["baseline_evaluation"]["objective_value"] == 100.0
     assert config.optimization.evaluation.baseline_value == 1000.0
     assert controller.calls == [
+        "build:profile",
+        "start:profile",
+        "ready:profile",
+        "stop:profile",
         "build:baseline",
         "start:baseline",
         "ready:baseline",
@@ -502,7 +542,7 @@ def test_managed_args_only_trial_uses_fresh_services_and_measured_baseline(
         "--max-running-requests",
         "64",
     )
-    assert controller.stop_counts == Counter({"baseline": 1, "candidate": 1})
+    assert controller.stop_counts == Counter({"profile": 1, "baseline": 1, "candidate": 1})
     service_events = [
         (event.event_type, event.payload.get("role"))
         for event in EventLedger(config.execution.event_ledger).by_run(result.run_id)
@@ -516,6 +556,11 @@ def test_managed_args_only_trial_uses_fresh_services_and_measured_baseline(
         }
     ]
     assert service_events == [
+        (EventType.SERVICE_STARTING, "profile"),
+        (EventType.SERVICE_STARTED, "profile"),
+        (EventType.SERVICE_READY, "profile"),
+        (EventType.SERVICE_STOPPING, "profile"),
+        (EventType.SERVICE_STOPPED, "profile"),
         (EventType.SERVICE_STARTING, "baseline"),
         (EventType.SERVICE_STARTED, "baseline"),
         (EventType.SERVICE_READY, "baseline"),
@@ -533,13 +578,14 @@ def test_target_validation_runs_one_baseline_without_candidate(tmp_path: Path) -
     config = _managed_project(tmp_path)
     controller = FakeTargetController()
 
-    result = OptimizationRunner(controller).validate_baseline(
+    result = _runner(config, controller).validate_baseline(
         config,
         _ALL_MANAGED_CAPABILITIES,
         run_id="baseline-only",
     )
 
     assert result.passed is True
+    assert result.profile.provider == "sglang_torch"
     assert result.run_uid.startswith("run-")
     assert result.run_uid != result.run_id
     assert result.evaluation.objective_value == 106.0
@@ -564,7 +610,7 @@ def test_managed_v3_runs_two_points_per_service_and_captures_runtime(
     config = _managed_v3_project(tmp_path)
     controller = FakeTargetController()
 
-    result = OptimizationRunner(controller).run(
+    result = _runner(config, controller).run(
         config,
         _ALL_MANAGED_CAPABILITIES,
         run_id="managed-v3-suite",
@@ -574,6 +620,8 @@ def test_managed_v3_runs_two_points_per_service_and_captures_runtime(
     assert result.outcomes[0].relative_improvement == pytest.approx(0.06)
     baseline = result.outcomes[0].metadata["baseline_evaluation"]
     candidate = result.outcomes[0].metadata["evaluation"]
+    assert baseline["lane"] == "fast"
+    assert candidate["lane"] == "fast"
     assert baseline["objective_values"] == {"short-c4": 100.0, "long-c8": 100.0}
     assert candidate["objective_values"] == {"short-c4": 106.0, "long-c8": 106.0}
     assert candidate["relative_improvements"] == pytest.approx({"short-c4": 0.06, "long-c8": 0.06})
@@ -584,10 +632,16 @@ def test_managed_v3_runs_two_points_per_service_and_captures_runtime(
     runtime_events = [
         event for event in events if event.event_type is EventType.RUNTIME_PROVENANCE_CAPTURED
     ]
-    assert len(runtime_events) == 1
+    assert len(runtime_events) == 2
     assert runtime_events[0].payload["valid"] is True
     assert controller.calls.count("start:baseline") == 1
     assert controller.calls.count("start:candidate") == 1
+    summaries = tuple(
+        (config.execution.artifacts_dir / result.run_id / "evaluations").glob(
+            "*/evaluation-summary.json"
+        )
+    )
+    assert len(summaries) == 2
 
 
 def test_managed_composite_change_applies_patch_and_argument_overlay(tmp_path: Path) -> None:
@@ -619,7 +673,7 @@ entries:
     )
     controller = FakeTargetController()
 
-    result = OptimizationRunner(controller).run(
+    result = _runner(config, controller).run(
         config,
         _ALL_MANAGED_CAPABILITIES,
         run_id="managed-composite",
@@ -642,7 +696,11 @@ entries:
 
 @pytest.mark.parametrize(
     "missing",
-    [Capability.OWNED_SERVICE_LIFECYCLE, Capability.BUILD_EXECUTION],
+    [
+        Capability.PROFILE_EXECUTION,
+        Capability.OWNED_SERVICE_LIFECYCLE,
+        Capability.BUILD_EXECUTION,
+    ],
 )
 def test_missing_managed_capability_waits_before_workspace_or_controller_call(
     tmp_path: Path,
@@ -653,14 +711,14 @@ def test_missing_managed_capability_waits_before_workspace_or_controller_call(
     workspace = config.optimization.workspace
     assert workspace is not None
 
-    result = OptimizationRunner(controller).run(
+    result = _runner(config, controller).run(
         config,
         _ALL_MANAGED_CAPABILITIES - {missing},
         run_id=f"missing-{missing.value}",
     )
 
     assert result.run_state is RunState.WAITING_FOR_APPROVAL
-    assert result.iteration_state is IterationState.WAITING_FOR_APPROVAL
+    assert result.iteration_state is None
     assert controller.calls == []
     assert not workspace.root_dir.exists()
     latest = EventLedger(config.execution.event_ledger).latest(result.run_id)
@@ -695,13 +753,13 @@ def test_managed_candidate_failure_stops_current_handle_exactly_once(
         expected_message = "fake candidate evaluation failure"
 
     with pytest.raises(RuntimeError, match=expected_message):
-        OptimizationRunner(controller).run(
+        _runner(config, controller).run(
             config,
             _ALL_MANAGED_CAPABILITIES,
             run_id=f"candidate-{failure_stage}-failure",
         )
 
-    assert controller.stop_counts == Counter({"baseline": 1, "candidate": 1})
+    assert controller.stop_counts == Counter({"profile": 1, "baseline": 1, "candidate": 1})
     assert controller.calls.count("stop:candidate") == 1
     assert controller.handles["baseline"] is not controller.handles["candidate"]
 
@@ -713,19 +771,23 @@ def test_baseline_stop_failure_prevents_candidate_start(tmp_path: Path) -> None:
     assert workspace is not None
 
     with pytest.raises(RuntimeError, match="fake baseline stop failure"):
-        OptimizationRunner(controller).run(
+        _runner(config, controller).run(
             config,
             _ALL_MANAGED_CAPABILITIES,
             run_id="baseline-stop-failure",
         )
 
     assert controller.calls == [
+        "build:profile",
+        "start:profile",
+        "ready:profile",
+        "stop:profile",
         "build:baseline",
         "start:baseline",
         "ready:baseline",
         "stop:baseline",
     ]
-    assert controller.stop_counts == Counter({"baseline": 1})
-    assert set(controller.handles) == {"baseline"}
+    assert controller.stop_counts == Counter({"profile": 1, "baseline": 1})
+    assert set(controller.handles) == {"profile", "baseline"}
     candidate_root = workspace.root_dir / "baseline-stop-failure/iteration-001/candidate"
     assert not candidate_root.exists()

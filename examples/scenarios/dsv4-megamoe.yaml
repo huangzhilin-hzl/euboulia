@@ -22,6 +22,9 @@ inputs:
   model_revision:
     type: git_commit
     required: true
+  lm_eval_version:
+    type: string
+    required: true
   sglang_revision:
     type: git_commit
     required: true
@@ -180,18 +183,33 @@ target:
           path: /home/admin/src/dsv4-megamoe/DeepGEMM
           revision: ${deepgemm_revision}
           dirty: false
+        lm-eval:
+          version: ${lm_eval_version}
     capture:
       collect_observed: true
       fail_on_mismatch: true
       require_observed: false
 optimization:
-  # These inputs are unused by `euboulia target run`; they become active only
-  # when this validated baseline is deliberately promoted into `optimize run`.
-  profiles:
-    provider: imported
-    artifacts:
-      - path: /home/admin/profiles/dsv4-megamoe/profile.json
-        source: torch_chrome_trace
+  # `optimize run` starts an owned champion service, captures a bounded trace,
+  # streams it into a compact summary, then applies the declared retention rule.
+  profiling:
+    provider: sglang_torch
+    workload_point: isl16384-osl256-c1-n1
+    warmup_runs: 1
+    start_step: 1
+    num_steps: 3
+    activities: [GPU]
+    merge_profiles: false
+    with_stack: false
+    record_shapes: false
+    timeout_seconds: 7200
+    settle_timeout_seconds: 120
+    max_raw_bytes: 8589934592
+    min_free_disk_bytes: 17179869184
+    max_summary_rows: 5000
+    keep_raw: false
+    expected_rank_traces: 8
+    required_kernel_pattern: fp8_mxfp4_mega_moe
   planner:
     provider: rules
     patch_catalog: dsv4-megamoe-catalog.yaml
@@ -207,50 +225,86 @@ optimization:
     metric: output_throughput
     direction: maximize
     metrics_path: euboulia-result.json
+    lanes:
+      # Candidate iterations cover representative prefill/decode and serial/saturated cases.
+      fast:
+        points:
+          - isl16384-osl256-c1-n1
+          - isl262144-osl256-c1-n1
+          - isl32768-osl1024-c1-n1
+          - isl262144-osl1024-c16-n16
+        stability:
+          warmup_runs: 1
+          min_windows: 2
+          max_windows: 4
+          stable_windows: 2
+          relative_tolerance: 0.02
+          max_seconds: 7200
+      # Release qualification retains the complete 30-point scenario contract.
+      qualification:
+        points: all
+        stability:
+          warmup_runs: 1
+          min_windows: 2
+          max_windows: 5
+          stable_windows: 2
+          relative_tolerance: 0.015
+          max_seconds: 7200
     promotion:
       primary_points: [isl262144-osl256-c1-n1, isl262144-osl1024-c16-n16]
       require_all_points_valid: true
       min_relative_improvement: 0.03
       max_regression_per_point: 0.01
       noise_tolerance: 0.01
+    accuracy:
+      # lm-evaluation-harness is supplied by the runtime image, not vendored here.
+      command:
+        name: lm-eval-gsm8k-200-8shot
+        timeout_seconds: 7200
+        executable: python3
+        module: lm_eval
+        options:
+          --model: local-chat-completions
+          --apply_chat_template: true
+          --model_args:
+            model: "{served_name}"
+            base_url: "{endpoint}/v1/chat/completions"
+            api_key: EMPTY
+            num_concurrent: 64
+            max_retries: 5
+            timeout: 1800
+            tokenized_requests: false
+            max_length: 16384
+          --gen_kwargs:
+            max_tokens: 512
+            temperature: 0
+            top_p: 1
+          --tasks: gsm8k
+          --num_fewshot: 8
+          --limit: 200
+          --output_path: "{result_path}"
+      result:
+        path: euboulia-accuracy.json
+        metric: results.gsm8k.exact_match,flexible-extract
+        direction: maximize
+        threshold: 0.8
     tiers:
-      - kind: smoke
-        warmups: 0
-        repetitions: 1
-        timeout_seconds: 300
-        commands:
-          - name: dsv4-megamoe-startup-gate
-            argv: [python3, -m, euboulia.harnesses.sglang.dsv4_megamoe_gate]
-            env:
-              EUBOULIA_DEEPGEMM_SOURCE: /home/admin/src/dsv4-megamoe/DeepGEMM
       - kind: correctness
-        warmups: 0
-        repetitions: 1
         timeout_seconds: 300
         commands:
-          - name: dsv4-megamoe-8-rank-kernel-path
-            argv: [python3, -m, euboulia.harnesses.sglang.dsv4_megamoe_profile_gate]
-            timeout_seconds: 14400
-            env:
-              EUBOULIA_SHAREGPT_DATASET_ROOT: /home/admin/bench_data/dsv4_sharegpt_exact_seed1
-              EUBOULIA_SHAREGPT_MANIFEST_PATH: /home/admin/bench_data/dsv4_sharegpt_exact_seed1/manifest.json
-              EUBOULIA_SHAREGPT_SAMPLES: "16"
-              EUBOULIA_BENCHMARK_SEED: "1"
-              EUBOULIA_SGLANG_BENCHMARK_BACKEND: sglang-oai-chat
-              EUBOULIA_SGLANG_BENCHMARK_MODULE: sglang.bench_serving
           - name: deterministic-chat-smoke
-            argv: [python3, -m, euboulia.harnesses.sglang.correctness]
+            executable: python3
+            module: euboulia.harnesses.sglang.correctness
             env:
               EUBOULIA_SMOKE_API: openai-chat
               EUBOULIA_SMOKE_REQUESTS: "1"
       - kind: performance
-        warmups: 1
-        repetitions: 3
         timeout_seconds: 7200
         required_metrics: [output_throughput, mean_ttft_ms, mean_tpot_ms]
         commands:
           - name: exact-sharegpt-cache-clean
-            argv: [python3, -m, euboulia.harnesses.sglang.benchmark]
+            executable: python3
+            module: euboulia.harnesses.sglang.benchmark
             env:
               EUBOULIA_SHAREGPT_DATASET_ROOT: /home/admin/bench_data/dsv4_sharegpt_exact_seed1
               EUBOULIA_SHAREGPT_MANIFEST_PATH: /home/admin/bench_data/dsv4_sharegpt_exact_seed1/manifest.json
@@ -258,25 +312,11 @@ optimization:
               EUBOULIA_BENCHMARK_SEED: "1"
               EUBOULIA_SGLANG_BENCHMARK_BACKEND: sglang-oai-chat
               EUBOULIA_SGLANG_BENCHMARK_MODULE: sglang.bench_serving
-      - kind: accuracy
-        warmups: 0
-        repetitions: 1
-        timeout_seconds: 7200
-        commands:
-          - name: gsm8k-200-8shot
-            argv: [python3, -m, euboulia.harnesses.sglang.gsm8k]
-            env:
-              EUBOULIA_GSM8K_NUM_EXAMPLES: "200"
-              EUBOULIA_GSM8K_NUM_SHOTS: "8"
-              EUBOULIA_GSM8K_NUM_THREADS: "64"
-              EUBOULIA_GSM8K_MAX_TOKENS: "512"
-              EUBOULIA_DSV4_MEGAMOE_REPORT: "1"
   budget:
     max_iterations: 1
     max_wall_time_seconds: 86400
     max_consecutive_failures: 1
     no_improvement_patience: 1
-    max_profile_bytes: 53687091200
 
 execution:
   artifacts_dir: /home/admin/results/euboulia-dsv4-megamoe

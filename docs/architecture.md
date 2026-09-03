@@ -60,7 +60,7 @@ the implementation does not establish an implementation speedup.
 | Layer | Responsibility | Today |
 | --- | --- | --- |
 | Scenario/workload runner | Launch SGLang and execute reproducible workload suites | Foundation implemented |
-| System profiler and ROI selector | Capture NSYS and rank system/operator hotspots by end-to-end value | Offline import and rule analysis implemented; active profiling/ROI policy incomplete |
+| System profiler and ROI selector | Capture bounded traces and rank system/operator hotspots by end-to-end value | Active SGLang Torch capture plus streaming rule analysis implemented; NSYS/NCU escalation and ROI policy incomplete |
 | Kernel-task extractor | Convert a hotspot and observed calls into an executable operator contract and real shape set | Not implemented |
 | Kernel optimization agent | Generate and revise CUDA/Triton implementations | Not implemented |
 | Kernel validators | Compile, check numerics, microbenchmark real shapes, and analyze NCU | Individual command infrastructure exists; closed inner loop not implemented |
@@ -94,17 +94,18 @@ log paths. This is the only identity that can be stopped.
 ## Evaluation semantics
 
 For each fresh service, Euboulia runs correctness before interpreting performance.
-The workload suite then evaluates every named ISL/OSL/concurrency point. The suite
-gate can require all points to be valid, designate primary points, require a minimum
-improvement, and limit regression elsewhere.
+Optimization uses a representative `fast` lane; target qualification evaluates
+every named ISL/OSL/concurrency point. The suite gate can require all selected
+points to be valid, designate primary points, require a minimum improvement, and
+limit regression elsewhere.
 
 Profile traces can perturb timing, so they select hypotheses but cannot decide
 promotion. A candidate must pass a separate unprofiled evaluation.
 
 The shared SGLang harness contract receives the active endpoint, model identity,
-workload point, warmup/repetition policy, and output path through explicit
-environment values. Model-specific semantic evaluation remains separately declared;
-a successful smoke request is not an accuracy result.
+workload point, measurement-window identity, and output path through explicit
+environment values. Semantic evaluation is an external command plus JSON result
+contract; a successful smoke request is not an accuracy result.
 
 ## Evidence and feedback
 

@@ -9,6 +9,7 @@ import platform
 import re
 import shutil
 import subprocess
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -24,6 +25,7 @@ _DISTRIBUTIONS = {
     "deepgemm": ("deep_gemm", "deepgemm"),
     "deepep": ("deep_ep", "deepep"),
     "sgl-kernel": ("sgl-kernel", "sgl_kernel"),
+    "lm-eval": ("lm_eval", "lm-eval"),
 }
 _CUDA_VERSION = re.compile(r"CUDA Version:\s*([0-9.]+)")
 
@@ -128,6 +130,55 @@ def validate_runtime_provenance(
 ) -> None:
     if config.capture.fail_on_mismatch and record.mismatches:
         raise RuntimeProvenanceError("runtime provenance mismatch: " + "; ".join(record.mismatches))
+
+
+def validate_declared_hardware(
+    declared: Mapping[str, JSONValue],
+    record: RuntimeProvenanceRecord,
+) -> None:
+    """Validate portable hardware declarations against the captured host inventory."""
+
+    mismatches: list[str] = []
+    node_count = declared.get("node_count")
+    if node_count is not None and node_count != 1:
+        mismatches.append(
+            f"hardware.node_count: local managed execution provides 1, expected {node_count!r}"
+        )
+
+    raw_gpus = record.observed.get("gpus")
+    gpus = raw_gpus if isinstance(raw_gpus, list) else []
+    accelerator_count = declared.get("accelerator_count")
+    if accelerator_count is not None and accelerator_count != len(gpus):
+        mismatches.append(
+            "hardware.accelerator_count: "
+            f"expected {accelerator_count!r}, observed {len(gpus)}"
+        )
+
+    accelerator = declared.get("accelerator")
+    if accelerator is not None:
+        expected_name = _canonical_hardware_name(accelerator)
+        observed_names = [
+            item.get("name") for item in gpus if isinstance(item, dict)
+        ]
+        invalid_names = [
+            name
+            for name in observed_names
+            if _canonical_hardware_name(name) != expected_name
+        ]
+        if not observed_names or invalid_names:
+            mismatches.append(
+                "hardware.accelerator: "
+                f"expected {accelerator!r}, observed {observed_names!r}"
+            )
+
+    if mismatches:
+        raise RuntimeProvenanceError(
+            "declared hardware mismatch: " + "; ".join(mismatches)
+        )
+
+
+def _canonical_hardware_name(value: object) -> str:
+    return "".join(character for character in str(value).casefold() if character.isalnum())
 
 
 def write_runtime_provenance(record: RuntimeProvenanceRecord, path: Path) -> Path:
@@ -286,6 +337,7 @@ __all__ = [
     "RuntimeProvenanceRecord",
     "capture_runtime_provenance",
     "hardware_identity",
+    "validate_declared_hardware",
     "validate_runtime_provenance",
     "write_runtime_provenance",
 ]

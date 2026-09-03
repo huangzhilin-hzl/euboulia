@@ -7,15 +7,15 @@ import gzip
 import json
 import math
 import re
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, TextIO
 
 from .models import MetricValue, Observation, ProfileSource, SubjectKind
 
 
 class ProfileParseError(ValueError):
-    """Raised when an imported artifact lacks the minimum semantic structure."""
+    """Raised when a profiler artifact lacks the minimum semantic structure."""
 
 
 _UNIT_TO_NS = {
@@ -55,17 +55,6 @@ def _to_ns(value: float, unit: str, field_name: str) -> int:
     return round(result)
 
 
-def _read_trace(path: Path) -> object:
-    try:
-        if path.name.endswith(".gz"):
-            with gzip.open(path, "rt", encoding="utf-8") as handle:
-                return json.load(handle)
-        with path.open(encoding="utf-8") as handle:
-            return json.load(handle)
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise ProfileParseError(f"cannot read Chrome trace {path}: {exc}") from exc
-
-
 def parse_torch_chrome_trace(
     path: str | Path, *, timestamp_unit: str = "us"
 ) -> tuple[Observation, ...]:
@@ -77,65 +66,161 @@ def parse_torch_chrome_trace(
     non-standard producer.
     """
 
+    return tuple(iter_torch_chrome_trace(path, timestamp_unit=timestamp_unit))
+
+
+def iter_torch_chrome_trace(
+    path: str | Path, *, timestamp_unit: str = "us"
+) -> Iterator[Observation]:
+    """Yield observations without materializing a multi-gigabyte trace document."""
+
     source_path = Path(path)
-    payload = _read_trace(source_path)
-    events: object
-    if isinstance(payload, list):
-        events = payload
-    elif isinstance(payload, Mapping):
-        events = payload.get("traceEvents")
+    try:
+        with _open_trace(source_path) as handle:
+            for index, event in enumerate(_iter_chrome_events(handle)):
+                observation = _torch_observation(
+                    event,
+                    index=index,
+                    source_path=source_path,
+                    timestamp_unit=timestamp_unit,
+                )
+                if observation is not None:
+                    yield observation
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ProfileParseError(f"cannot stream Chrome trace {source_path}: {exc}") from exc
+
+
+def _torch_observation(
+    event: object,
+    *,
+    index: int,
+    source_path: Path,
+    timestamp_unit: str,
+) -> Observation | None:
+    if not isinstance(event, Mapping) or event.get("ph") != "X":
+        return None
+    name = event.get("name")
+    if not isinstance(name, str) or not name.strip():
+        return None
+    try:
+        start = _finite_number(event.get("ts"), f"traceEvents[{index}].ts")
+        duration = _finite_number(event.get("dur"), f"traceEvents[{index}].dur")
+        start_ns = _to_ns(start, timestamp_unit, "timestamp")
+        duration_ns = _to_ns(duration, timestamp_unit, "duration")
+    except ProfileParseError:
+        # Metadata-like complete events occasionally omit a usable duration;
+        # they are not observations and should not poison the whole artifact.
+        return None
+
+    category = str(event.get("cat", ""))
+    args = event.get("args")
+    safe_args = _safe_json_mapping(args if isinstance(args, Mapping) else {})
+    correlation_ids: dict[str, str] = {}
+    for key in ("External id", "External Id", "Correlation ID", "correlation", "id"):
+        item = safe_args.get(key)
+        if isinstance(item, str | int):
+            correlation_ids[_header_name(key)] = str(item)
+    return Observation(
+        observation_id=f"torch:{index}",
+        source=ProfileSource.TORCH_CHROME_TRACE,
+        subject_kind=_trace_subject(category, name),
+        name=name,
+        artifact=str(source_path),
+        start_ns=start_ns,
+        duration_ns=duration_ns,
+        count=1,
+        process_id=_identity(event.get("pid")),
+        thread_id=_identity(event.get("tid")),
+        device=_first_identity(safe_args, "Device", "device", "Device Id"),
+        stream=_first_identity(safe_args, "stream", "Stream", "stream id"),
+        rank=_first_identity(safe_args, "rank", "Rank"),
+        phase=_first_identity(safe_args, "phase", "Phase"),
+        native_category=category or None,
+        correlation_ids=correlation_ids,
+        dimensions=safe_args,
+    )
+
+
+def _iter_chrome_events(handle: TextIO) -> Iterator[object]:
+    """Incrementally decode a top-level array or an object's ``traceEvents`` array."""
+
+    decoder = json.JSONDecoder()
+    buffer = ""
+    position = 0
+    eof = False
+
+    def read_more() -> None:
+        nonlocal buffer, position, eof
+        if position:
+            buffer = buffer[position:]
+            position = 0
+        chunk = handle.read(1024 * 1024)
+        if chunk:
+            buffer += chunk
+        else:
+            eof = True
+
+    read_more()
+    while not eof and not buffer.strip():
+        read_more()
+    stripped = buffer.lstrip()
+    position = len(buffer) - len(stripped)
+    if position >= len(buffer):
+        raise ProfileParseError("Chrome trace is empty")
+    if buffer[position] == "[":
+        position += 1
+    elif buffer[position] == "{":
+        marker = '"traceEvents"'
+        while True:
+            marker_index = buffer.find(marker, position)
+            if marker_index >= 0:
+                colon_index = buffer.find(":", marker_index + len(marker))
+                array_index = -1 if colon_index < 0 else buffer.find("[", colon_index + 1)
+                if array_index >= 0:
+                    position = array_index + 1
+                    break
+            if eof:
+                raise ProfileParseError("Chrome trace object does not contain traceEvents")
+            if len(buffer) > 64 * 1024 * 1024:
+                raise ProfileParseError("Chrome trace preamble exceeds 64 MiB")
+            chunk = handle.read(1024 * 1024)
+            if chunk:
+                buffer += chunk
+            else:
+                eof = True
     else:
-        events = None
-    if not isinstance(events, list):
         raise ProfileParseError("Chrome trace must be an event array or contain traceEvents")
 
-    observations: list[Observation] = []
-    for index, event in enumerate(events):
-        if not isinstance(event, Mapping) or event.get("ph") != "X":
-            continue
-        name = event.get("name")
-        if not isinstance(name, str) or not name.strip():
-            continue
+    while True:
+        while True:
+            while position < len(buffer) and (
+                buffer[position].isspace() or buffer[position] == ","
+            ):
+                position += 1
+            if position < len(buffer):
+                break
+            if eof:
+                raise ProfileParseError("Chrome trace event array is incomplete")
+            read_more()
+        if buffer[position] == "]":
+            return
         try:
-            start = _finite_number(event.get("ts"), f"traceEvents[{index}].ts")
-            duration = _finite_number(event.get("dur"), f"traceEvents[{index}].dur")
-            start_ns = _to_ns(start, timestamp_unit, "timestamp")
-            duration_ns = _to_ns(duration, timestamp_unit, "duration")
-        except ProfileParseError:
-            # Metadata-like complete events occasionally omit a usable duration;
-            # they are not observations and should not poison the whole artifact.
+            event, end = decoder.raw_decode(buffer, position)
+        except json.JSONDecodeError as exc:
+            if eof:
+                raise ProfileParseError(f"invalid Chrome trace event: {exc}") from exc
+            if len(buffer) - position > 64 * 1024 * 1024:
+                raise ProfileParseError("one Chrome trace event exceeds 64 MiB") from exc
+            read_more()
             continue
+        position = end
+        yield event
 
-        category = str(event.get("cat", ""))
-        args = event.get("args")
-        safe_args = _safe_json_mapping(args if isinstance(args, Mapping) else {})
-        correlation_ids: dict[str, str] = {}
-        for key in ("External id", "External Id", "Correlation ID", "correlation", "id"):
-            item = safe_args.get(key)
-            if isinstance(item, str | int):
-                correlation_ids[_header_name(key)] = str(item)
-        observations.append(
-            Observation(
-                observation_id=f"torch:{index}",
-                source=ProfileSource.TORCH_CHROME_TRACE,
-                subject_kind=_trace_subject(category, name),
-                name=name,
-                artifact=str(source_path),
-                start_ns=start_ns,
-                duration_ns=duration_ns,
-                count=1,
-                process_id=_identity(event.get("pid")),
-                thread_id=_identity(event.get("tid")),
-                device=_first_identity(safe_args, "Device", "device", "Device Id"),
-                stream=_first_identity(safe_args, "stream", "Stream", "stream id"),
-                rank=_first_identity(safe_args, "rank", "Rank"),
-                phase=_first_identity(safe_args, "phase", "Phase"),
-                native_category=category or None,
-                correlation_ids=correlation_ids,
-                dimensions=safe_args,
-            )
-        )
-    return tuple(observations)
+
+def _open_trace(path: Path) -> TextIO:
+    if path.name.endswith(".gz"):
+        return gzip.open(path, "rt", encoding="utf-8")
+    return path.open(encoding="utf-8")
 
 
 def _trace_subject(category: str, name: str) -> SubjectKind:

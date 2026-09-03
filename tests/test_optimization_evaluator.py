@@ -8,6 +8,7 @@ from typing import cast
 import pytest
 
 from euboulia.optimization.evaluator import (
+    AccuracySpec,
     BenchmarkSpec,
     CommandSpec,
     EvaluationAuthorizationError,
@@ -17,6 +18,7 @@ from euboulia.optimization.evaluator import (
     MetricsError,
     ObjectiveDirection,
     ObjectiveSpec,
+    StabilitySpec,
     TieredEvaluator,
     parse_metrics,
 )
@@ -108,6 +110,136 @@ def test_evaluator_runs_accuracy_after_benchmark(tmp_path: Path) -> None:
         EvaluationStage.BENCHMARK,
         EvaluationStage.ACCURACY,
     ]
+
+
+def test_adaptive_benchmark_stops_after_recent_windows_stabilize(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    source = (
+        "import json,os,pathlib; "
+        "counter=pathlib.Path('counter'); "
+        "index=int(counter.read_text()) if counter.exists() else 0; "
+        "counter.write_text(str(index+1)); "
+        "values=[999,100,101,150]; "
+        "pathlib.Path('metrics.json').write_text(json.dumps({'throughput':values[index]})); "
+        "pathlib.Path('phases').open('a').write(os.environ['EUBOULIA_MEASUREMENT_PHASE']+'\\n')"
+    )
+    benchmark = CommandSpec("window", (sys.executable, "-c", source))
+    plan = EvaluationPlan(
+        trial_id="stable",
+        workspace=workspace,
+        preflight=(),
+        correctness=(),
+        benchmark=BenchmarkSpec(
+            benchmark,
+            Path("metrics.json"),
+            required_metrics=("throughput",),
+            stability=StabilitySpec(
+                warmup_runs=1,
+                min_windows=2,
+                max_windows=4,
+                stable_windows=2,
+                relative_tolerance=0.02,
+                max_seconds=30,
+            ),
+        ),
+        objective=ObjectiveSpec("throughput", ObjectiveDirection.MAXIMIZE),
+    )
+
+    evaluator = TieredEvaluator(tmp_path / "artifacts")
+    result = evaluator.execute(evaluator.authorize(plan, approved=True))
+
+    assert result.outcome is EvaluationOutcome.PASSED
+    assert result.measurement_values == (100.0, 101.0)
+    assert result.objective_value == 100.5
+    assert result.measurement_stable is True
+    assert len(result.stages[-1].executions) == 3
+    assert (workspace / "phases").read_text().splitlines() == [
+        "warmup",
+        "measurement",
+        "measurement",
+    ]
+    assert (result.artifact_dir / "benchmark-windows.json").is_file()
+
+
+def test_external_accuracy_contract_rejects_score_below_threshold(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    accuracy = _write_command(
+        "accuracy.json",
+        {"results": {"gsm8k": {"exact_match,flexible-extract": 0.79}}},
+        name="external-lm-eval",
+    )
+    plan = _plan(workspace)
+    plan = EvaluationPlan(
+        trial_id=plan.trial_id,
+        workspace=plan.workspace,
+        preflight=plan.preflight,
+        correctness=plan.correctness,
+        benchmark=plan.benchmark,
+        objective=plan.objective,
+        accuracy_check=AccuracySpec(
+            command=accuracy,
+            result_path=Path("accuracy.json"),
+            metric="results.gsm8k.exact_match,flexible-extract",
+            direction=ObjectiveDirection.MAXIMIZE,
+            threshold=0.8,
+        ),
+    )
+    evaluator = TieredEvaluator(tmp_path / "artifacts")
+
+    result = evaluator.execute(evaluator.authorize(plan, approved=True))
+
+    assert result.outcome is EvaluationOutcome.REJECTED
+    assert result.failure_stage is None
+    assert result.accuracy_value == 0.79
+    assert result.accuracy_metrics == {
+        "results.gsm8k.exact_match,flexible-extract": 0.79
+    }
+    assert result.reason == "accuracy gate failed: 0.79 is not >= 0.8"
+
+
+def test_adaptive_benchmark_fails_closed_when_windows_do_not_stabilize(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    source = (
+        "import json,pathlib; "
+        "counter=pathlib.Path('counter'); "
+        "index=int(counter.read_text()) if counter.exists() else 0; "
+        "counter.write_text(str(index+1)); "
+        "values=[100,130,100]; "
+        "pathlib.Path('metrics.json').write_text(json.dumps({'throughput':values[index]}))"
+    )
+    plan = EvaluationPlan(
+        trial_id="unstable",
+        workspace=workspace,
+        preflight=(),
+        correctness=(),
+        benchmark=BenchmarkSpec(
+            CommandSpec("window", (sys.executable, "-c", source)),
+            Path("metrics.json"),
+            stability=StabilitySpec(
+                warmup_runs=0,
+                min_windows=2,
+                max_windows=3,
+                stable_windows=2,
+                relative_tolerance=0.02,
+                max_seconds=30,
+            ),
+        ),
+        objective=ObjectiveSpec("throughput", ObjectiveDirection.MAXIMIZE),
+    )
+    evaluator = TieredEvaluator(tmp_path / "artifacts")
+
+    result = evaluator.execute(evaluator.authorize(plan, approved=True))
+
+    assert result.outcome is EvaluationOutcome.FAILED
+    assert result.failure_stage is EvaluationStage.BENCHMARK
+    assert result.measurement_values == (100.0, 130.0, 100.0)
+    assert result.measurement_stable is False
+    assert "did not stabilize" in (result.reason or "")
 
 
 def test_authorization_is_explicit_single_use_and_binds_plan(tmp_path: Path) -> None:

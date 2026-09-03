@@ -102,7 +102,7 @@ def build_parser() -> argparse.ArgumentParser:
     optimize_commands = optimize_parser.add_subparsers(dest="optimize_command", required=True)
 
     optimize_plan_parser = optimize_commands.add_parser(
-        "plan", help="import profiles and propose reviewed changes without writing"
+        "plan", help="inspect the bounded active-profile and optimization plan"
     )
     _add_recipe_argument(optimize_plan_parser)
     _add_values_argument(optimize_plan_parser)
@@ -121,6 +121,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--apply-patches",
         action="store_true",
         help="authorize writes only inside a fresh detached worktree",
+    )
+    optimize_run_parser.add_argument(
+        "--run-profiles",
+        action="store_true",
+        help="authorize bounded SGLang profile start/stop and trace capture",
     )
     optimize_run_parser.add_argument(
         "--run-evaluations",
@@ -183,6 +188,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_values_argument(target_run_parser)
     target_run_parser.add_argument("--run-id")
     target_run_parser.add_argument("--prepare-workspace", action="store_true")
+    target_run_parser.add_argument("--run-profiles", action="store_true")
     target_run_parser.add_argument("--run-evaluations", action="store_true")
     target_run_parser.add_argument("--run-builds", action="store_true")
     target_run_parser.add_argument("--manage-services", action="store_true")
@@ -303,18 +309,17 @@ def _optimize_plan(args: argparse.Namespace) -> int:
         _print_json(plan.to_dict())
     else:
         print(f"Optimization recipe: {plan.recipe} ({plan.framework})")
-        observation_count = plan.profile.metrics.get("observation_count", 0)
-        print(f"Profile: {plan.profile.profile_id}; observations={observation_count}")
-        print(f"Analysis: {plan.analysis.summary}")
-        if not plan.proposals:
-            print("Proposals: none")
-        for index, proposal in enumerate(plan.proposals, start=1):
-            print(f"\n[{index}] {proposal.proposal_id}: {proposal.title}")
-            print(f"risk:      {proposal.risk}")
-            print(f"rationale: {proposal.rationale}")
-            patch_path = proposal.metadata.get("patch_path")
-            if patch_path is not None:
-                print(f"patch:     {patch_path}")
+        profile_plan = plan.profile_plan
+        print(
+            "Profile: "
+            f"{profile_plan['provider']} point={profile_plan['workload_point']} "
+            f"steps={profile_plan['num_steps']} keep_raw={profile_plan['keep_raw']}"
+        )
+        print(
+            "Required capabilities: "
+            + ", ".join(capability.value for capability in plan.required_capabilities)
+        )
+        print("Proposals: generated after the active profile is captured and analyzed")
         print("\nRead-only plan. No event, memory, worktree, command, or service was created.")
     return 0
 
@@ -326,6 +331,8 @@ def _optimize_run(args: argparse.Namespace) -> int:
         authorizations.add(Capability.WORKSPACE_WRITE)
     if args.run_evaluations:
         authorizations.add(Capability.BENCHMARK_EXECUTION)
+    if args.run_profiles:
+        authorizations.add(Capability.PROFILE_EXECUTION)
     if args.run_builds:
         authorizations.add(Capability.BUILD_EXECUTION)
     if args.manage_services:
@@ -352,6 +359,7 @@ def _optimize_run(args: argparse.Namespace) -> int:
                 Capability.WORKSPACE_WRITE: "--apply-patches",
                 Capability.BENCHMARK_EXECUTION: "--run-evaluations",
                 Capability.BUILD_EXECUTION: "--run-builds",
+                Capability.PROFILE_EXECUTION: "--run-profiles",
                 Capability.OWNED_SERVICE_LIFECYCLE: "--manage-services",
             }
             required = OptimizationRunner.required_capabilities(config)
@@ -422,12 +430,14 @@ def _target_plan(args: argparse.Namespace) -> int:
         return 0
     config = resolution.config
     required = OptimizationRunner.baseline_validation_capabilities(config)
+    profile_plan = OptimizationRunner().plan(config).profile_plan
     lock_issues = optimization_execution_lock_issues(config)
     payload = {
         "recipe": config.name,
         "source_revision": config.baseline.source_revision,
         "endpoint": config.endpoint,
         "workload_points": len(config.workload_suite.points),
+        "profile_plan": dict(profile_plan),
         "required_capabilities": [capability.value for capability in required],
         "launch_argv": list(config.target_launch_argv),
         "resolved": True,
@@ -442,11 +452,16 @@ def _target_plan(args: argparse.Namespace) -> int:
         print(f"Revision: {config.baseline.source_revision}")
         print(f"Endpoint: {config.endpoint}")
         print(f"Workload points: {len(config.workload_suite.points)}")
+        print(
+            "Profile: "
+            f"{profile_plan['provider']} point={profile_plan['workload_point']} "
+            f"steps={profile_plan['num_steps']} keep_raw={profile_plan['keep_raw']}"
+        )
         print(f"Execution ready: {'yes' if not lock_issues else 'no'}")
         for issue in lock_issues:
             print(f"Lock issue: {issue}")
         print("Required capabilities: " + ", ".join(item.value for item in required))
-        print("\nRead-only plan. No worktree, build, service, or benchmark was created.")
+        print("\nRead-only plan. No worktree, build, service, profile, or benchmark was created.")
     return 0
 
 
@@ -455,6 +470,8 @@ def _target_run(args: argparse.Namespace) -> int:
     authorizations: set[Capability] = set()
     if args.prepare_workspace:
         authorizations.add(Capability.WORKSPACE_WRITE)
+    if args.run_profiles:
+        authorizations.add(Capability.PROFILE_EXECUTION)
     if args.run_evaluations:
         authorizations.add(Capability.BENCHMARK_EXECUTION)
     if args.run_builds:
@@ -471,6 +488,7 @@ def _target_run(args: argparse.Namespace) -> int:
     else:
         print(f"Target validation: {result.run_id}")
         print(f"Run UID: {result.run_uid}")
+        print(f"Profile: {result.profile.profile_id}")
         print(f"Outcome: {result.evaluation.outcome.value}")
         print(f"Artifacts: {result.artifact_dir}")
         print(f"Worktree: {result.workspace_path}")

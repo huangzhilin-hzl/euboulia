@@ -13,6 +13,8 @@ Run Euboulia inside the declared single-node H20 container. Before execution:
   selected in the values file;
 - `/home/admin/src/dsv4-megamoe/DeepGEMM` is a clean clone containing the exact commit
   selected in the values file;
+- `lm_eval` with API extras is installed in the image at the exact version selected
+  in the values file;
 - `/home/admin/bench_data/dsv4_sharegpt_exact_seed1` contains the six exact-length
   datasets and their `manifest.json`; and
 - the result and worktree roots do not already contain the selected run ID.
@@ -24,6 +26,7 @@ platform:
 ```yaml
 container_image: acr.example/sglang/deepep-base@sha256:<64-hex-digest>
 deepgemm_revision: <40-or-64-hex-commit>
+lm_eval_version: <installed-lm-evaluation-harness-version>
 model_revision: <40-or-64-hex-model-revision>
 sglang_revision: <40-or-64-hex-commit>
 ```
@@ -76,6 +79,7 @@ uv run euboulia target run \
   --recipe examples/scenarios/dsv4-megamoe.lock.yaml \
   --run-id dsv4-megamoe-$(date +%Y%m%d-%H%M%S) \
   --prepare-workspace \
+  --run-profiles \
   --run-builds \
   --manage-services \
   --run-evaluations
@@ -86,37 +90,48 @@ is installed editable from that worktree with `--no-deps`;
 DeepGEMM is installed last. Euboulia starts a new process group and can stop only
 that signed, owned process. It never discovers or kills an existing server.
 
-The kernel-path gate intentionally produces eight unmerged PyTorch traces. These
-can be large; budget disk space before starting. The profiled request is explicitly
-non-scoring and precedes the formal matrix.
+`target run --run-profiles` profiles the owned baseline before its unprofiled matrix;
+`optimize run --run-profiles` uses the same collector on a separate owned champion
+service. Both ask SGLang for three profiled engine steps on
+`isl16384-osl256-c1-n1`. The capture requires eight unmerged rank traces and checks
+that every trace contains `fp8_mxfp4_mega_moe`. The trace parser streams events into
+a 5,000-row summary; after the summary and SHA-256 manifest are durable, the raw
+traces are removed because the recipe declares `keep_raw: false`. Failed captures
+retain their raw traces for diagnosis. This diagnostic request is never scored.
+
+Optimization iterations use the four-point `fast` lane. Each point gets one warmup
+and two to four one-sample measurement windows; evaluation stops after two recent
+windows are within 2%. Target validation uses the complete 30-point
+`qualification` lane with a 1.5% tolerance and at most five windows. The old fixed
+three-round-per-point report path has been removed.
 
 ## Fail-closed gates
 
 Execution stops on any of the following:
 
-- model, TP8, CP8, EP8, MegaMoE, DSPARK, memory, chunking, or CUDA Graph mismatch;
-- missing DeepGEMM SM90 MegaMoE API, wrong import path, forbidden Humming state,
-  ordinary-MoE fallback, OOM, JIT/symmetric-buffer error, or unreviewed warning;
+- runtime component provenance or declared hardware model/count mismatch;
+- managed-service readiness or generic OpenAI-chat correctness failure;
 - fewer than eight H20 GPUs or fewer than eight rank traces containing
   `fp8_mxfp4_mega_moe`;
 - a ShareGPT manifest/hash mismatch, non-exact ISL/OSL, incomplete request, failed
   cache flush, non-zero cache hit, or missing per-round server snapshot; or
-- an incomplete 5-point TTFT matrix, incomplete 25-point TPOT matrix, or missing
-  GSM8K result.
+- an incomplete qualification matrix, a point that does not stabilize within its
+  window/time budget, or a missing/invalid external accuracy result.
 
 ## Output
 
 The run root is
 `/home/admin/results/euboulia-dsv4-megamoe/<run-id>/target-validation`.
-It contains `resolved-recipe.yaml`, the provenance snapshot, complete owned service logs, raw
-startup and kernel-path evidence, per-command evidence, and these canonical files:
+It contains `resolved-recipe.yaml`, the provenance snapshot, the active-profile
+summary/manifest, complete owned service logs, per-command evidence, and these
+canonical files:
 
-- `environment.txt`, `logs/server.log`, `server_startup_summary.md`;
-- `raw/server_info_initial.json`, `raw/metrics_initial.prom`,
-  `raw/nvidia_smi_initial.csv`, `raw/megamoe_kernel_path_evidence.txt`, and
-  `raw/gsm8k_result.json`;
-- `summary_rounds.csv`, `summary_best.csv`, `summary.md`;
-- `sharegpt_manifest.json` and `result_validation.json`.
+- `logs/server.log` and `runtime-provenance.json`;
+- `profile/summary.json` and `profile/manifest.json`;
+- per-point `evaluation.json` and `benchmark-windows.json`;
+- the generic `evaluation-summary.json` for the complete lane;
+- `euboulia-accuracy.json`, produced directly by external `lm_eval` during
+  qualification.
 
-Detached worktrees and traces are retained as evidence and are not automatically
-removed.
+Detached worktrees are retained. Successful raw profile traces follow `keep_raw`;
+failed captures keep raw traces for diagnosis.

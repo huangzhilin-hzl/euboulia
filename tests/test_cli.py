@@ -49,7 +49,7 @@ def test_evaluate_cli_returns_rejection_status(tmp_path: Path) -> None:
 
 def test_optimize_plan_cli_runs_read_only_example() -> None:
     repository = Path(__file__).resolve().parents[1]
-    config = repository / "examples/optimization-vllm.yaml"
+    config = repository / "examples/optimization-sglang.yaml"
 
     exit_code = main(["optimize", "plan", "--recipe", str(config)])
 
@@ -64,6 +64,7 @@ def test_optimize_run_parser_exposes_independent_managed_capabilities() -> None:
             "--recipe",
             "recipe.yaml",
             "--apply-patches",
+            "--run-profiles",
             "--run-evaluations",
             "--run-builds",
             "--manage-services",
@@ -71,6 +72,7 @@ def test_optimize_run_parser_exposes_independent_managed_capabilities() -> None:
     )
 
     assert args.apply_patches is True
+    assert args.run_profiles is True
     assert args.run_evaluations is True
     assert args.run_builds is True
     assert args.manage_services is True
@@ -142,6 +144,7 @@ def test_target_run_rejects_unresolved_template_before_artifact_write(
             "--recipe",
             str(template),
             "--prepare-workspace",
+            "--run-profiles",
             "--run-evaluations",
             "--run-builds",
             "--manage-services",
@@ -179,6 +182,7 @@ def test_target_run_parser_exposes_baseline_capabilities() -> None:
             "--values",
             "host-values.yaml",
             "--prepare-workspace",
+            "--run-profiles",
             "--run-evaluations",
             "--run-builds",
             "--manage-services",
@@ -186,6 +190,7 @@ def test_target_run_parser_exposes_baseline_capabilities() -> None:
     )
 
     assert args.prepare_workspace is True
+    assert args.run_profiles is True
     assert args.values == Path("host-values.yaml")
     assert args.run_evaluations is True
     assert args.run_builds is True

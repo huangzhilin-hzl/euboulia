@@ -93,12 +93,13 @@ uv run euboulia optimize plan \
   --recipe examples/optimization-sglang.yaml
 ```
 
-An active managed run has four independent permissions:
+An active managed run has five independent permissions:
 
 ```console
 uv run euboulia optimize run \
   --recipe your-sglang-optimization.yaml \
   --apply-patches \
+  --run-profiles \
   --run-builds \
   --manage-services \
   --run-evaluations
@@ -157,15 +158,16 @@ fixed scenario.
 
 ## Current limitations
 
-- Profiles are imported; Euboulia does not yet schedule profiling runs.
+- Active profiling currently uses SGLang's bounded Torch profiler; automatic
+  NSYS/NCU escalation is not yet connected.
 - Hotspot selection currently stops at a reviewed catalog entry; kernel-task
   extraction and CUDA/Triton candidate generation are not yet implemented.
-- Scenario-specific accuracy commands are supported, but a generic champion-only
-  semantic-accuracy stage is not yet part of the state machine.
+- Qualification can call an external semantic-evaluation tool through a generic
+  command/result contract; task implementations are intentionally not vendored.
 - Trials run on one local host; remote/container workers and crash-safe resume are
   not implemented.
-- Statistical confidence depends on the scenario's repetitions and gates; the
-  runtime cannot rescue an underpowered experiment.
+- Adaptive windows stop early when recent objective values meet the lane tolerance,
+  but confidence still depends on representative points and a sound stability policy.
 
 The near-term direction is deliberately narrow: complete the DS-V4 scenario through
 both loops, rather than adding more frameworks or generic agent features.

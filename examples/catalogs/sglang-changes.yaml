@@ -5,7 +5,7 @@ entries:
   - id: example-chunked-prefill-args
     title: Test a bounded chunked-prefill size
     rationale: >-
-      The imported NCU export shows compute pressure. This args-only entry changes
+      The active profile shows compute pressure. This args-only entry changes
       one reviewed SGLang launch option without editing source. Replace the value
       with one justified for the declared model, workload, and accelerator.
     triggers: [compute]

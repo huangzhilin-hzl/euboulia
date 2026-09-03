@@ -49,9 +49,13 @@ baseline:
   source_revision: abc123
   target_parameters: {}
 optimization:
-  profiles:
-    provider: imported
-    paths: [profiles/baseline.json, profiles/champion.json]
+  profiling:
+    provider: sglang_torch
+    workload_point: fixed-serving
+    warmup_runs: 0
+    num_steps: 2
+    max_raw_bytes: 1048576
+    min_free_disk_bytes: 1048576
   planner:
     provider: rules
     patch_catalog: catalogs/vllm-patches.yaml
@@ -79,7 +83,6 @@ optimization:
     max_wall_time_seconds: 3600
     max_consecutive_failures: 3
     no_improvement_patience: 4
-    max_profile_bytes: 1048576
 execution:
   artifacts_dir: artifacts
   ledger: artifacts/experiments.jsonl
@@ -219,7 +222,14 @@ def v3_managed_document(tmp_path: Path) -> dict[str, object]:
             },
         },
         "optimization": {
-            "profiles": {"provider": "imported", "paths": ["profile.json"]},
+            "profiling": {
+                "provider": "sglang_torch",
+                "workload_point": "short-c1",
+                "warmup_runs": 0,
+                "num_steps": 2,
+                "max_raw_bytes": 1_000_000,
+                "min_free_disk_bytes": 1_000_000,
+            },
             "planner": {"provider": "rules", "patch_catalog": "changes.yaml"},
             "workspace": {
                 "repository": str(tmp_path / "sglang"),
@@ -297,16 +307,13 @@ def test_load_v2_config_is_strict_and_resolves_all_paths(tmp_path: Path) -> None
 
     assert config.schema_version == 2
     assert config.framework is Framework.VLLM
-    assert config.optimization.profiles.provider is ProfileProvider.IMPORTED
+    assert config.optimization.profiling.provider is ProfileProvider.SGLANG_TORCH
+    assert config.optimization.profiling.workload_point == "fixed-serving"
     assert config.optimization.planner.provider is PlannerProvider.RULES
     assert config.optimization.evaluation.direction is EvaluationDirection.MAXIMIZE
     assert tuple(tier.kind for tier in config.optimization.evaluation.tiers) == (
         EvaluationTierKind.CORRECTNESS,
         EvaluationTierKind.PERFORMANCE,
-    )
-    assert config.optimization.profiles.paths == (
-        (tmp_path / "profiles/baseline.json").resolve(),
-        (tmp_path / "profiles/champion.json").resolve(),
     )
     assert (
         config.optimization.planner.patch_catalog
@@ -319,6 +326,21 @@ def test_load_v2_config_is_strict_and_resolves_all_paths(tmp_path: Path) -> None
     assert config.target is None
 
 
+def test_imported_profile_compatibility_shape_is_rejected(tmp_path: Path) -> None:
+    document = yaml.safe_load(VALID_CONFIG)
+    optimization = document["optimization"]
+    optimization.pop("profiling")
+    optimization["profiles"] = {
+        "provider": "imported",
+        "paths": ["profiles/baseline.json"],
+    }
+    source = tmp_path / "legacy-imported-profile.yaml"
+    source.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+
+    with pytest.raises(OptimizationConfigError, match=r"unknown field.*profiles"):
+        load_optimization_config(source)
+
+
 def test_loads_exact_dsv4_megamoe_target_validation_scenario(tmp_path: Path) -> None:
     repository = Path(__file__).resolve().parents[1]
     values = tmp_path / "dsv4-values.yaml"
@@ -327,6 +349,7 @@ def test_loads_exact_dsv4_megamoe_target_validation_scenario(tmp_path: Path) -> 
             {
                 "container_image": "registry.example/dsv4@sha256:" + "a" * 64,
                 "deepgemm_revision": "c" * 40,
+                "lm_eval_version": "0.4.9.2",
                 "model_revision": "d" * 40,
                 "sglang_revision": "b" * 40,
             }
@@ -341,11 +364,32 @@ def test_loads_exact_dsv4_megamoe_target_validation_scenario(tmp_path: Path) -> 
     assert config.workload_suite.dataset == "sharegpt"
     assert len(config.workload_suite.points) == 30
     assert [tier.kind for tier in config.optimization.evaluation.tiers] == [
-        EvaluationTierKind.SMOKE,
         EvaluationTierKind.CORRECTNESS,
         EvaluationTierKind.PERFORMANCE,
-        EvaluationTierKind.ACCURACY,
     ]
+    lanes = config.optimization.evaluation.lanes
+    assert lanes is not None
+    assert len(lanes.fast.points) == 4
+    assert len(lanes.qualification.points) == 30
+    assert lanes.fast.stability.max_windows == 4
+    accuracy = config.optimization.evaluation.accuracy
+    assert accuracy is not None
+    assert accuracy.command.argv[:3] == ("python3", "-m", "lm_eval")
+    assert accuracy.command.argv[accuracy.command.argv.index("--model") + 1] == (
+        "local-chat-completions"
+    )
+    model_args = accuracy.command.argv[accuracy.command.argv.index("--model_args") + 1]
+    assert set(model_args.split(",")) == {
+        "api_key=EMPTY",
+        "base_url={endpoint}/v1/chat/completions",
+        "max_length=16384",
+        "max_retries=5",
+        "model={served_name}",
+        "num_concurrent=64",
+        "timeout=1800",
+        "tokenized_requests=false",
+    }
+    assert accuracy.result.metric == "results.gsm8k.exact_match,flexible-extract"
     assert config.target is not None
     assert config.target.hardware == {
         "accelerator": "NVIDIA-H20",
@@ -360,6 +404,10 @@ def test_loads_exact_dsv4_megamoe_target_validation_scenario(tmp_path: Path) -> 
     host_index = config.target_launch_argv.index("--host")
     assert config.target_launch_argv[host_index + 1] == "0.0.0.0"
     assert config.target.launch.env["SGLANG_OPT_USE_DEEPGEMM_MEGA_MOE"] == "1"
+    assert config.optimization.profiling.workload_point == "isl16384-osl256-c1-n1"
+    assert config.optimization.profiling.expected_rank_traces == 8
+    assert config.optimization.profiling.keep_raw is False
+    assert config.optimization.profiling.required_kernel_pattern == "fp8_mxfp4_mega_moe"
     launch_facets = derive_sglang_launch_facets(config.target.launch.options)
     assert launch_facets["backends"] == {"moe_a2a": "megamoe"}
     assert launch_facets["speculative"] == {
@@ -423,6 +471,29 @@ def test_load_v3_normalizes_models_suite_runtime_and_derives_launch_facets(
     promotion = config.optimization.evaluation.promotion
     assert promotion is not None
     assert promotion.primary_points == ("short-c1", "long-c16")
+
+
+def test_v3_external_accuracy_rejects_raw_argv(tmp_path: Path) -> None:
+    document = v3_managed_document(tmp_path)
+    evaluation = document["optimization"]["evaluation"]
+    assert isinstance(evaluation, dict)
+    evaluation["accuracy"] = {
+        "command": {"name": "accuracy", "argv": ["lm_eval", "--tasks", "gsm8k"]},
+        "result": {
+            "path": "accuracy.json",
+            "metric": "results.gsm8k.exact_match,flexible-extract",
+            "direction": "maximize",
+            "threshold": 0.8,
+        },
+    }
+    source = tmp_path / "raw-accuracy-argv.yaml"
+    source.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+
+    with pytest.raises(
+        OptimizationConfigError,
+        match="must use executable/module/options instead of argv",
+    ):
+        load_optimization_config(source)
 
 
 def test_recipe_inputs_allow_plan_inventory_but_strict_load_requires_values(
@@ -577,6 +648,9 @@ def test_v3_aliases_are_optional_and_do_not_change_semantic_identity(tmp_path: P
         "isl128-osl32-c1-n8",
         "isl4096-osl512-c16-n64",
     ]
+    profiling = anonymous_evaluation["profiling"]
+    assert isinstance(profiling, dict)
+    profiling["workload_point"] = "isl128-osl32-c1-n8"
 
     named_source.write_text(yaml.safe_dump(named, sort_keys=False), encoding="utf-8")
     anonymous_source.write_text(yaml.safe_dump(anonymous, sort_keys=False), encoding="utf-8")
@@ -937,7 +1011,7 @@ def test_target_build_rejects_shell_command_strings(tmp_path: Path) -> None:
     [
         ("schema_version: 2", "schema_version: 1", "expected 2"),
         ("framework: vllm", "framework: other", "framework must be"),
-        ("provider: imported", "provider: nsys", "must be 'imported'"),
+        ("provider: sglang_torch", "provider: nsys", "must be 'sglang_torch'"),
         ("provider: rules", "provider: model", "must be 'rules'"),
         ("direction: maximize", "direction: sideways", "must be 'maximize'"),
         ("max_iterations: 10", "max_iterations: 0", "integer >= 1"),

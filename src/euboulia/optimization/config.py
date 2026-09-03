@@ -24,6 +24,7 @@ _GIT_COMMIT = re.compile(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})")
 _CONTAINER_DIGEST = re.compile(r"[^\s@]+@sha256:[0-9a-fA-F]{64}")
 _INPUT_REFERENCE = re.compile(r"\$\{([A-Za-z0-9][A-Za-z0-9._-]*)\}")
 _LONG_OPTION = re.compile(r"--[A-Za-z0-9][A-Za-z0-9_-]*")
+_COMMAND_KV_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_-]*")
 _PYTHON_EXECUTABLE = re.compile(r"(?:python|python\d+(?:\.\d+)*)")
 _SGLANG_MODULES = frozenset(
     {"sglang.launch_server", "sglang.srt.entrypoints.http_server"}
@@ -38,7 +39,7 @@ class OptimizationConfigError(ValueError):
 
 
 class ProfileProvider(StrEnum):
-    IMPORTED = "imported"
+    SGLANG_TORCH = "sglang_torch"
 
 
 class PlannerProvider(StrEnum):
@@ -171,18 +172,26 @@ class BaselineConfig:
     metric_values: Mapping[str, float] = field(default_factory=dict)
 
 @dataclass(frozen=True, slots=True)
-class ProfileArtifactConfig:
-    path: Path
-    source: str
-    nsys_report: str | None = None
-    timestamp_unit: str = "us"
+class SGLangProfilingConfig:
+    """Bounded active profiling policy for one managed SGLang champion."""
 
-
-@dataclass(frozen=True, slots=True)
-class ImportedProfilesConfig:
     provider: ProfileProvider
-    paths: tuple[Path, ...]
-    artifacts: tuple[ProfileArtifactConfig, ...] = ()
+    workload_point: str
+    warmup_runs: int = 1
+    start_step: int = 0
+    num_steps: int = 3
+    activities: tuple[str, ...] = ("GPU",)
+    merge_profiles: bool = False
+    with_stack: bool = False
+    record_shapes: bool = False
+    timeout_seconds: float = 1800.0
+    settle_timeout_seconds: float = 30.0
+    max_raw_bytes: int = 8 * 1024 * 1024 * 1024
+    min_free_disk_bytes: int = 16 * 1024 * 1024 * 1024
+    max_summary_rows: int = 10_000
+    keep_raw: bool = False
+    expected_rank_traces: int | None = None
+    required_kernel_pattern: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -288,6 +297,45 @@ class PromotionConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class StabilityConfig:
+    """Adaptive measurement policy for one evaluation lane."""
+
+    warmup_runs: int
+    min_windows: int
+    max_windows: int
+    stable_windows: int
+    relative_tolerance: float
+    max_seconds: float
+    adaptive: bool = True
+
+
+@dataclass(frozen=True, slots=True)
+class EvaluationLaneConfig:
+    points: tuple[str, ...]
+    stability: StabilityConfig
+
+
+@dataclass(frozen=True, slots=True)
+class EvaluationLanesConfig:
+    fast: EvaluationLaneConfig
+    qualification: EvaluationLaneConfig
+
+
+@dataclass(frozen=True, slots=True)
+class AccuracyResultConfig:
+    path: Path
+    metric: str
+    direction: EvaluationDirection
+    threshold: float
+
+
+@dataclass(frozen=True, slots=True)
+class ExternalAccuracyConfig:
+    command: OptimizationCommandConfig
+    result: AccuracyResultConfig
+
+
+@dataclass(frozen=True, slots=True)
 class EvaluationTierConfig:
     kind: EvaluationTierKind
     warmups: int
@@ -308,6 +356,8 @@ class TieredEvaluationConfig:
     baseline_value: float | None = None
     metrics_path: Path | None = None
     promotion: PromotionConfig | None = None
+    lanes: EvaluationLanesConfig | None = None
+    accuracy: ExternalAccuracyConfig | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -326,12 +376,11 @@ class BudgetConfig:
     max_wall_time_seconds: float
     max_consecutive_failures: int = 3
     no_improvement_patience: int = 5
-    max_profile_bytes: int = 2 * 1024 * 1024 * 1024
 
 
 @dataclass(frozen=True, slots=True)
 class OptimizationPolicyConfig:
-    profiles: ImportedProfilesConfig
+    profiling: SGLangProfilingConfig
     planner: RulesPlannerConfig
     evaluation: TieredEvaluationConfig
     budget: BudgetConfig
@@ -469,8 +518,10 @@ def _string_tuple(value: object, path: str, *, allow_empty: bool = True) -> tupl
     return result
 
 
-def _argv_tuple(value: object, path: str) -> tuple[str, ...]:
-    argv = _string_tuple(value, path, allow_empty=False)
+def _argv_tuple(
+    value: object, path: str, *, allow_empty: bool = False
+) -> tuple[str, ...]:
+    argv = _string_tuple(value, path, allow_empty=allow_empty)
     for index, token in enumerate(argv):
         if "\x00" in token:
             raise OptimizationConfigError(f"{path}[{index}] contains a NUL byte")
@@ -839,84 +890,127 @@ def _parse_baseline(value: object) -> BaselineConfig:
     )
 
 
-def _parse_profiles(value: object, source: Path) -> ImportedProfilesConfig:
-    path = "optimization.profiles"
+def _parse_profiling(
+    value: object,
+    *,
+    point_names: tuple[str, ...],
+) -> SGLangProfilingConfig:
+    path = "optimization.profiling"
     raw = _mapping(value, path)
-    _reject_unknown(raw, {"provider", "paths", "artifacts"}, path)
-    provider_value = _string(raw.get("provider"), f"{path}.provider")
+    _reject_unknown(
+        raw,
+        {
+            "provider",
+            "workload_point",
+            "warmup_runs",
+            "start_step",
+            "num_steps",
+            "activities",
+            "merge_profiles",
+            "with_stack",
+            "record_shapes",
+            "timeout_seconds",
+            "settle_timeout_seconds",
+            "max_raw_bytes",
+            "min_free_disk_bytes",
+            "max_summary_rows",
+            "keep_raw",
+            "expected_rank_traces",
+            "required_kernel_pattern",
+        },
+        path,
+    )
     try:
-        provider = ProfileProvider(provider_value)
+        provider = ProfileProvider(_string(raw.get("provider"), f"{path}.provider"))
     except ValueError as exc:
         raise OptimizationConfigError(
-            "optimization.profiles.provider must be 'imported' in the current runtime"
+            "optimization.profiling.provider must be 'sglang_torch'"
         ) from exc
-    has_paths = raw.get("paths") is not None
-    has_artifacts = raw.get("artifacts") is not None
-    if has_paths == has_artifacts:
+    workload_point = _safe_id(
+        raw.get("workload_point", point_names[0]), f"{path}.workload_point"
+    )
+    if workload_point not in point_names:
         raise OptimizationConfigError(
-            "optimization.profiles must contain exactly one of paths or artifacts"
+            f"{path}.workload_point references unknown workload point: {workload_point}"
         )
-    artifacts: list[ProfileArtifactConfig] = []
-    if has_paths:
-        path_values = _string_tuple(raw.get("paths"), f"{path}.paths", allow_empty=False)
-        for index, item in enumerate(path_values):
-            artifact_path = _resolve_path(item, f"{path}.paths[{index}]", source)
-            artifacts.append(
-                ProfileArtifactConfig(
-                    path=artifact_path,
-                    source=_infer_profile_source(artifact_path),
-                )
-            )
-    else:
-        raw_artifacts = raw.get("artifacts")
-        if not isinstance(raw_artifacts, list) or not raw_artifacts:
-            raise OptimizationConfigError(f"{path}.artifacts must be a non-empty list")
-        allowed_sources = {"torch_chrome_trace", "nsys_stats_csv", "ncu_csv"}
-        for index, item in enumerate(raw_artifacts):
-            item_path = f"{path}.artifacts[{index}]"
-            artifact = _mapping(item, item_path)
-            _reject_unknown(
-                artifact, {"path", "source", "nsys_report", "timestamp_unit"}, item_path
-            )
-            profile_source = _string(artifact.get("source"), f"{item_path}.source")
-            if profile_source not in allowed_sources:
-                raise OptimizationConfigError(
-                    f"{item_path}.source must be torch_chrome_trace, nsys_stats_csv, or ncu_csv"
-                )
-            raw_report = artifact.get("nsys_report")
-            report = None if raw_report is None else _string(raw_report, f"{item_path}.nsys_report")
-            if profile_source == "nsys_stats_csv" and report is None:
-                raise OptimizationConfigError(
-                    f"{item_path}.nsys_report is required for nsys_stats_csv"
-                )
-            if profile_source != "nsys_stats_csv" and report is not None:
-                raise OptimizationConfigError(
-                    f"{item_path}.nsys_report is valid only for nsys_stats_csv"
-                )
-            artifacts.append(
-                ProfileArtifactConfig(
-                    path=_resolve_path(artifact.get("path"), f"{item_path}.path", source),
-                    source=profile_source,
-                    nsys_report=report,
-                    timestamp_unit=_string(
-                        artifact.get("timestamp_unit", "us"), f"{item_path}.timestamp_unit"
-                    ),
-                )
-            )
-    paths = tuple(artifact.path for artifact in artifacts)
-    if len(set(paths)) != len(paths):
-        raise OptimizationConfigError("optimization.profiles.paths must not contain duplicates")
-    return ImportedProfilesConfig(provider=provider, paths=paths, artifacts=tuple(artifacts))
-
-
-def _infer_profile_source(path: Path) -> str:
-    lowered = path.name.casefold()
-    if lowered.endswith((".json", ".json.gz")):
-        return "torch_chrome_trace"
-    if "ncu" in lowered and lowered.endswith(".csv"):
-        return "ncu_csv"
-    raise OptimizationConfigError(
-        f"cannot infer profiler format from {path.name!r}; use optimization.profiles.artifacts"
+    activities = tuple(
+        item.upper()
+        for item in _string_tuple(
+            raw.get("activities", ["GPU"]), f"{path}.activities", allow_empty=False
+        )
+    )
+    invalid_activities = sorted(set(activities) - {"CPU", "GPU"})
+    if invalid_activities:
+        raise OptimizationConfigError(
+            f"{path}.activities supports only CPU and GPU"
+        )
+    if len(set(activities)) != len(activities):
+        raise OptimizationConfigError(f"{path}.activities must not contain duplicates")
+    required_pattern = raw.get("required_kernel_pattern")
+    if required_pattern is not None:
+        required_pattern = _string(required_pattern, f"{path}.required_kernel_pattern")
+        try:
+            re.compile(required_pattern)
+        except re.error as exc:
+            raise OptimizationConfigError(
+                f"{path}.required_kernel_pattern is not a valid regular expression: {exc}"
+            ) from exc
+    expected_rank_traces = raw.get("expected_rank_traces")
+    merge_profiles = _boolean(
+        raw.get("merge_profiles", False), f"{path}.merge_profiles"
+    )
+    if merge_profiles and expected_rank_traces not in {None, 1}:
+        raise OptimizationConfigError(
+            f"{path}.expected_rank_traces must be 1 when merge_profiles is true"
+        )
+    max_raw_bytes = _integer(
+        raw.get("max_raw_bytes", 8 * 1024 * 1024 * 1024),
+        f"{path}.max_raw_bytes",
+        minimum=1,
+    )
+    min_free_disk_bytes = _integer(
+        raw.get("min_free_disk_bytes", 16 * 1024 * 1024 * 1024),
+        f"{path}.min_free_disk_bytes",
+        minimum=1,
+    )
+    if min_free_disk_bytes < max_raw_bytes:
+        raise OptimizationConfigError(
+            f"{path}.min_free_disk_bytes must be >= max_raw_bytes"
+        )
+    return SGLangProfilingConfig(
+        provider=provider,
+        workload_point=workload_point,
+        warmup_runs=_integer(raw.get("warmup_runs", 1), f"{path}.warmup_runs"),
+        start_step=_integer(raw.get("start_step", 0), f"{path}.start_step"),
+        num_steps=_integer(raw.get("num_steps", 3), f"{path}.num_steps", minimum=1),
+        activities=activities,
+        merge_profiles=merge_profiles,
+        with_stack=_boolean(raw.get("with_stack", False), f"{path}.with_stack"),
+        record_shapes=_boolean(
+            raw.get("record_shapes", False), f"{path}.record_shapes"
+        ),
+        timeout_seconds=_number(
+            raw.get("timeout_seconds", 1800), f"{path}.timeout_seconds", minimum=0.001
+        ),
+        settle_timeout_seconds=_number(
+            raw.get("settle_timeout_seconds", 30),
+            f"{path}.settle_timeout_seconds",
+            minimum=0.001,
+        ),
+        max_raw_bytes=max_raw_bytes,
+        min_free_disk_bytes=min_free_disk_bytes,
+        max_summary_rows=_integer(
+            raw.get("max_summary_rows", 10_000),
+            f"{path}.max_summary_rows",
+            minimum=1,
+        ),
+        keep_raw=_boolean(raw.get("keep_raw", False), f"{path}.keep_raw"),
+        expected_rank_traces=(
+            None
+            if expected_rank_traces is None
+            else _integer(expected_rank_traces, f"{path}.expected_rank_traces", minimum=1)
+        ),
+        required_kernel_pattern=required_pattern,
     )
 
 
@@ -971,11 +1065,40 @@ def _parse_commands(value: object, path: str) -> tuple[OptimizationCommandConfig
     for index, item in enumerate(value):
         item_path = f"{path}[{index}]"
         raw = _mapping(item, item_path)
-        _reject_unknown(raw, {"name", "argv", "timeout_seconds", "env"}, item_path)
+        _reject_unknown(
+            raw,
+            {
+                "name",
+                "argv",
+                "executable",
+                "module",
+                "options",
+                "extra_argv",
+                "timeout_seconds",
+                "env",
+            },
+            item_path,
+        )
+        has_argv = raw.get("argv") is not None
+        has_executable = raw.get("executable") is not None
+        if has_argv == has_executable:
+            raise OptimizationConfigError(
+                f"{item_path} must contain exactly one of argv or executable"
+            )
+        structured_fields = {"module", "options", "extra_argv"}
+        if has_argv and structured_fields.intersection(raw):
+            raise OptimizationConfigError(
+                f"{item_path}.argv cannot be combined with module, options, or extra_argv"
+            )
+        argv = (
+            _argv_tuple(raw.get("argv"), f"{item_path}.argv")
+            if has_argv
+            else _compile_command_argv(raw, item_path)
+        )
         commands.append(
             OptimizationCommandConfig(
                 name=_string(raw.get("name"), f"{item_path}.name"),
-                argv=_argv_tuple(raw.get("argv"), f"{item_path}.argv"),
+                argv=argv,
                 timeout_seconds=(
                     None
                     if raw.get("timeout_seconds") is None
@@ -989,6 +1112,70 @@ def _parse_commands(value: object, path: str) -> tuple[OptimizationCommandConfig
             )
         )
     return tuple(commands)
+
+
+def _compile_command_argv(raw: Mapping[str, object], path: str) -> tuple[str, ...]:
+    executable = _string(raw.get("executable"), f"{path}.executable")
+    if "\x00" in executable:
+        raise OptimizationConfigError(f"{path}.executable contains a NUL byte")
+    argv = [executable]
+    if raw.get("module") is not None:
+        module = _string(raw.get("module"), f"{path}.module")
+        if "\x00" in module:
+            raise OptimizationConfigError(f"{path}.module contains a NUL byte")
+        argv.extend(("-m", module))
+    options = _mapping(raw.get("options", {}), f"{path}.options")
+    for option in sorted(options):
+        if _LONG_OPTION.fullmatch(option) is None:
+            raise OptimizationConfigError(
+                f"{path}.options key {option!r} must be a long option such as --model"
+            )
+        value = options[option]
+        if value is None or value is False:
+            continue
+        argv.append(option)
+        if value is True:
+            continue
+        if isinstance(value, Mapping):
+            argv.append(_compile_key_value_option(value, f"{path}.options.{option}"))
+        else:
+            argv.append(_command_option_scalar(value, f"{path}.options.{option}"))
+    argv.extend(
+        _argv_tuple(raw.get("extra_argv", []), f"{path}.extra_argv", allow_empty=True)
+    )
+    return tuple(argv)
+
+
+def _compile_key_value_option(value: Mapping[object, object], path: str) -> str:
+    if not value:
+        raise OptimizationConfigError(f"{path} must not be empty")
+    items: list[str] = []
+    for raw_name in sorted(value, key=str):
+        if not isinstance(raw_name, str) or _COMMAND_KV_KEY.fullmatch(raw_name) is None:
+            raise OptimizationConfigError(f"{path} contains invalid key {raw_name!r}")
+        raw_value = value[raw_name]
+        if raw_value is None or isinstance(raw_value, Mapping | list):
+            raise OptimizationConfigError(
+                f"{path}.{raw_name} must be a string, number, or boolean"
+            )
+        items.append(
+            f"{raw_name}={_command_option_scalar(raw_value, f'{path}.{raw_name}')}"
+        )
+    return ",".join(items)
+
+
+def _command_option_scalar(value: object, path: str) -> str:
+    if isinstance(value, str):
+        if "\x00" in value:
+            raise OptimizationConfigError(f"{path} contains a NUL byte")
+        return value
+    if isinstance(value, bool):
+        return str(value).lower()
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float) and math.isfinite(value):
+        return str(value)
+    raise OptimizationConfigError(f"{path} must be a string, finite number, or boolean")
 
 
 def _local_http_url(value: object, path: str) -> str:
@@ -1281,7 +1468,9 @@ def _parse_target(
     )
 
 
-def _parse_evaluation_tiers(value: object) -> tuple[EvaluationTierConfig, ...]:
+def _parse_evaluation_tiers(
+    value: object, *, schema_version: int
+) -> tuple[EvaluationTierConfig, ...]:
     path = "optimization.evaluation.tiers"
     if not isinstance(value, list) or not value:
         raise OptimizationConfigError(f"{path} must be a non-empty list")
@@ -1289,18 +1478,15 @@ def _parse_evaluation_tiers(value: object) -> tuple[EvaluationTierConfig, ...]:
     for index, item in enumerate(value):
         item_path = f"{path}[{index}]"
         raw = _mapping(item, item_path)
-        _reject_unknown(
-            raw,
-            {
-                "kind",
-                "warmups",
-                "repetitions",
-                "timeout_seconds",
-                "required_metrics",
-                "commands",
-            },
-            item_path,
-        )
+        allowed = {
+            "kind",
+            "warmups",
+            "repetitions",
+            "timeout_seconds",
+            "required_metrics",
+            "commands",
+        }
+        _reject_unknown(raw, allowed, item_path)
         try:
             kind = EvaluationTierKind(_string(raw.get("kind"), f"{item_path}.kind"))
         except ValueError as exc:
@@ -1338,7 +1524,141 @@ def _parse_evaluation_tiers(value: object) -> tuple[EvaluationTierConfig, ...]:
         raise OptimizationConfigError(
             f"{path} must include correctness and performance"
         )
+    if schema_version == 3 and EvaluationTierKind.ACCURACY in kinds:
+        raise OptimizationConfigError(
+            "optimization.evaluation accuracy must use the external accuracy contract, "
+            "not an accuracy tier"
+        )
     return tuple(tiers)
+
+
+def _parse_stability(value: object, path: str) -> StabilityConfig:
+    raw = _mapping(value, path)
+    _reject_unknown(
+        raw,
+        {
+            "warmup_runs",
+            "min_windows",
+            "max_windows",
+            "stable_windows",
+            "relative_tolerance",
+            "max_seconds",
+        },
+        path,
+    )
+    min_windows = _integer(raw.get("min_windows", 2), f"{path}.min_windows", minimum=1)
+    max_windows = _integer(raw.get("max_windows", 5), f"{path}.max_windows", minimum=1)
+    stable_windows = _integer(
+        raw.get("stable_windows", min_windows), f"{path}.stable_windows", minimum=1
+    )
+    if min_windows > max_windows:
+        raise OptimizationConfigError(f"{path}.min_windows must not exceed max_windows")
+    if stable_windows > min_windows:
+        raise OptimizationConfigError(f"{path}.stable_windows must not exceed min_windows")
+    return StabilityConfig(
+        warmup_runs=_integer(raw.get("warmup_runs", 1), f"{path}.warmup_runs"),
+        min_windows=min_windows,
+        max_windows=max_windows,
+        stable_windows=stable_windows,
+        relative_tolerance=_number(
+            raw.get("relative_tolerance", 0.02),
+            f"{path}.relative_tolerance",
+            minimum=0.0,
+        ),
+        max_seconds=_number(raw.get("max_seconds", 3600.0), f"{path}.max_seconds", minimum=0.001),
+    )
+
+
+def _parse_lane_points(
+    value: object, path: str, point_names: tuple[str, ...]
+) -> tuple[str, ...]:
+    if value == "all":
+        return point_names
+    points = tuple(
+        _safe_id(item, f"{path}[{index}]")
+        for index, item in enumerate(_string_tuple(value, path, allow_empty=False))
+    )
+    if len(points) != len(set(points)):
+        raise OptimizationConfigError(f"{path} must not contain duplicates")
+    unknown = sorted(set(points) - set(point_names))
+    if unknown:
+        raise OptimizationConfigError(
+            f"{path} references unknown workload point(s): {', '.join(unknown)}"
+        )
+    return points
+
+
+def _parse_lane(
+    value: object, path: str, point_names: tuple[str, ...]
+) -> EvaluationLaneConfig:
+    raw = _mapping(value, path)
+    _reject_unknown(raw, {"points", "stability"}, path)
+    return EvaluationLaneConfig(
+        points=_parse_lane_points(raw.get("points"), f"{path}.points", point_names),
+        stability=_parse_stability(raw.get("stability"), f"{path}.stability"),
+    )
+
+
+def _legacy_lanes(point_names: tuple[str, ...]) -> EvaluationLanesConfig:
+    stability = StabilityConfig(
+        warmup_runs=0,
+        min_windows=1,
+        max_windows=1,
+        stable_windows=1,
+        relative_tolerance=0.0,
+        max_seconds=3600.0,
+        adaptive=False,
+    )
+    lane = EvaluationLaneConfig(points=point_names, stability=stability)
+    return EvaluationLanesConfig(fast=lane, qualification=lane)
+
+
+def _parse_lanes(value: object, point_names: tuple[str, ...]) -> EvaluationLanesConfig:
+    path = "optimization.evaluation.lanes"
+    raw = _mapping(value, path)
+    _reject_unknown(raw, {"fast", "qualification"}, path)
+    fast = _parse_lane(raw.get("fast"), f"{path}.fast", point_names)
+    qualification = _parse_lane(
+        raw.get("qualification"), f"{path}.qualification", point_names
+    )
+    if qualification.points != point_names:
+        raise OptimizationConfigError(
+            f"{path}.qualification.points must be 'all' so release qualification "
+            "covers the complete workload suite"
+        )
+    return EvaluationLanesConfig(fast=fast, qualification=qualification)
+
+
+def _parse_external_accuracy(value: object) -> ExternalAccuracyConfig:
+    path = "optimization.evaluation.accuracy"
+    raw = _mapping(value, path)
+    _reject_unknown(raw, {"command", "result"}, path)
+    raw_command = _mapping(raw.get("command"), f"{path}.command")
+    if "argv" in raw_command:
+        raise OptimizationConfigError(
+            f"{path}.command must use executable/module/options instead of argv"
+        )
+    commands = _parse_commands([raw_command], f"{path}.command")
+    result_path = f"{path}.result"
+    result = _mapping(raw.get("result"), result_path)
+    _reject_unknown(result, {"path", "metric", "direction", "threshold"}, result_path)
+    try:
+        direction = EvaluationDirection(
+            _string(result.get("direction"), f"{result_path}.direction")
+        )
+    except ValueError as exc:
+        raise OptimizationConfigError(
+            f"{result_path}.direction must be 'maximize' or 'minimize'"
+        ) from exc
+    return ExternalAccuracyConfig(
+        command=commands[0],
+        result=AccuracyResultConfig(
+            path=_workspace_relative_path(result.get("path"), f"{result_path}.path"),
+            metric=_string(result.get("metric"), f"{result_path}.metric"),
+            direction=direction,
+            threshold=_number(result.get("threshold"), f"{result_path}.threshold"),
+        ),
+    )
 
 
 def _parse_promotion(value: object, point_names: tuple[str, ...]) -> PromotionConfig:
@@ -1412,7 +1732,7 @@ def _parse_evaluation(
             }
         )
     else:
-        allowed.add("promotion")
+        allowed.update({"promotion", "lanes", "accuracy"})
     _reject_unknown(raw, allowed, path)
     try:
         direction = EvaluationDirection(_string(raw.get("direction"), f"{path}.direction"))
@@ -1439,10 +1759,29 @@ def _parse_evaluation(
             noise_tolerance=noise_tolerance,
         )
     )
+    lanes = (
+        _legacy_lanes(point_names)
+        if schema_version == 2 or raw.get("lanes") is None
+        else _parse_lanes(raw.get("lanes"), point_names)
+    )
+    if schema_version == 3 and raw.get("lanes") is None:
+        # Keep older v3 recipes loadable, but do not silently turn their fixed
+        # repetition settings into adaptive measurements.
+        lanes = _legacy_lanes(point_names)
+    accuracy = (
+        _parse_external_accuracy(raw.get("accuracy"))
+        if schema_version == 3 and raw.get("accuracy") is not None
+        else None
+    )
+    if not set(promotion.primary_points).issubset(lanes.fast.points):
+        raise OptimizationConfigError(
+            "optimization.evaluation.promotion.primary_points must be included in "
+            "optimization.evaluation.lanes.fast.points"
+        )
     return TieredEvaluationConfig(
         metric=_string(raw.get("metric"), f"{path}.metric"),
         direction=direction,
-        tiers=_parse_evaluation_tiers(raw.get("tiers")),
+        tiers=_parse_evaluation_tiers(raw.get("tiers"), schema_version=schema_version),
         min_relative_improvement=min_relative_improvement,
         max_regression=max_regression,
         noise_tolerance=noise_tolerance,
@@ -1453,6 +1792,8 @@ def _parse_evaluation(
             else _workspace_relative_path(raw.get("metrics_path"), f"{path}.metrics_path")
         ),
         promotion=promotion,
+        lanes=lanes,
+        accuracy=accuracy,
     )
 
 
@@ -1466,7 +1807,6 @@ def _parse_budget(value: object) -> BudgetConfig:
             "max_wall_time_seconds",
             "max_consecutive_failures",
             "no_improvement_patience",
-            "max_profile_bytes",
         },
         path,
     )
@@ -1491,11 +1831,6 @@ def _parse_budget(value: object) -> BudgetConfig:
             minimum=1,
         ),
         no_improvement_patience=patience,
-        max_profile_bytes=_integer(
-            raw.get("max_profile_bytes", 2 * 1024 * 1024 * 1024),
-            f"{path}.max_profile_bytes",
-            minimum=1,
-        ),
     )
 
 
@@ -1541,9 +1876,9 @@ def _parse_optimization(
 ) -> OptimizationPolicyConfig:
     path = "optimization"
     raw = _mapping(value, path)
-    _reject_unknown(raw, {"profiles", "planner", "evaluation", "budget", "workspace"}, path)
+    _reject_unknown(raw, {"profiling", "planner", "evaluation", "budget", "workspace"}, path)
     return OptimizationPolicyConfig(
-        profiles=_parse_profiles(raw.get("profiles"), source),
+        profiling=_parse_profiling(raw.get("profiling"), point_names=point_names),
         planner=_parse_planner(raw.get("planner"), source),
         evaluation=_parse_evaluation(
             raw.get("evaluation"), point_names=point_names, schema_version=schema_version
@@ -2012,11 +2347,14 @@ def dump_resolved_optimization_config(config: OptimizationConfig) -> str:
 
 
 __all__ = [
+    "AccuracyResultConfig",
     "BaselineConfig",
     "BudgetConfig",
     "EvaluationDirection",
+    "EvaluationLaneConfig",
+    "EvaluationLanesConfig",
     "EvaluationTierConfig",
-    "ImportedProfilesConfig",
+    "ExternalAccuracyConfig",
     "ManagedTargetConfig",
     "ModelArtifactConfig",
     "ModelsConfig",
@@ -2029,7 +2367,6 @@ __all__ = [
     "OptimizationRecipeResolution",
     "OptimizationWorkloadConfig",
     "PlannerProvider",
-    "ProfileArtifactConfig",
     "ProfileProvider",
     "PromotionConfig",
     "RecipeInputConfig",
@@ -2040,6 +2377,8 @@ __all__ = [
     "RuntimeContainerConfig",
     "RuntimeExpectedConfig",
     "RuntimeProvenanceConfig",
+    "SGLangProfilingConfig",
+    "StabilityConfig",
     "TargetBuildConfig",
     "TargetLaunchConfig",
     "TargetReadinessConfig",

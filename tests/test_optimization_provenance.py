@@ -12,8 +12,10 @@ from euboulia.optimization.config import (
 )
 from euboulia.optimization.provenance import (
     RuntimeProvenanceError,
+    RuntimeProvenanceRecord,
     capture_runtime_provenance,
     hardware_identity,
+    validate_declared_hardware,
     validate_runtime_provenance,
     write_runtime_provenance,
 )
@@ -48,3 +50,28 @@ def test_runtime_provenance_fails_on_observed_mismatch(tmp_path: Path) -> None:
     assert record.valid is False
     with pytest.raises(RuntimeProvenanceError, match=r"components\.python\.version"):
         validate_runtime_provenance(config, record)
+
+
+def test_declared_hardware_validation_is_scenario_independent() -> None:
+    record = RuntimeProvenanceRecord(
+        expected={},
+        observed={
+            "gpus": [
+                {"index": "0", "name": "NVIDIA H20"},
+                {"index": "1", "name": "NVIDIA H20"},
+            ]
+        },
+        mismatches=(),
+        unobserved=(),
+        collected_at="2026-01-01T00:00:00+00:00",
+    )
+
+    validate_declared_hardware(
+        {"accelerator": "NVIDIA-H20", "accelerator_count": 2, "node_count": 1},
+        record,
+    )
+    with pytest.raises(RuntimeProvenanceError, match="accelerator_count"):
+        validate_declared_hardware(
+            {"accelerator": "NVIDIA-H20", "accelerator_count": 8},
+            record,
+        )

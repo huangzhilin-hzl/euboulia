@@ -12,12 +12,14 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import cast
 
+from euboulia.execution import CommandExecutor, ExecutionResult
 from euboulia.models import JSONValue
 from euboulia.optimization.budget import BudgetLimits, BudgetTracker
 from euboulia.optimization.config import (
     EvaluationTierConfig,
     OptimizationCommandConfig,
     OptimizationConfig,
+    StabilityConfig,
     WorkloadPointConfig,
     dump_resolved_optimization_config,
     require_optimization_execution_lock,
@@ -39,12 +41,15 @@ from euboulia.optimization.contracts import (
     StageContext,
 )
 from euboulia.optimization.evaluator import (
+    AccuracySpec,
     BenchmarkSpec,
     CommandSpec,
     EvaluationOutcome,
     EvaluationPlan,
+    EvaluationSummary,
     ObjectiveDirection,
     ObjectiveSpec,
+    StabilitySpec,
     TieredEvaluationResult,
     TieredEvaluator,
     WorkloadSuiteEvaluationResult,
@@ -58,11 +63,12 @@ from euboulia.optimization.facets import derive_sglang_launch_facets
 from euboulia.optimization.identity import ScenarioIdentity, scenario_identity
 from euboulia.optimization.memory import SQLiteMemoryStore
 from euboulia.optimization.planner import PatchCatalog, RulePlanner
-from euboulia.optimization.profiling import ImportedProfiler, RuleAnalyzer
+from euboulia.optimization.profiling import RuleAnalyzer, SGLangProfiler
 from euboulia.optimization.provenance import (
     RuntimeProvenanceRecord,
     capture_runtime_provenance,
     hardware_identity,
+    validate_declared_hardware,
     validate_runtime_provenance,
     write_runtime_provenance,
 )
@@ -95,9 +101,7 @@ class OptimizationPlan:
     campaign: str
     framework: str
     identity: ScenarioIdentity
-    profile: ProfileResult
-    analysis: AnalysisReport
-    proposals: tuple[ChangeProposal, ...]
+    profile_plan: Mapping[str, JSONValue]
     required_capabilities: tuple[Capability, ...]
     warnings: tuple[str, ...]
 
@@ -112,9 +116,7 @@ class OptimizationPlan:
             "recipe": self.recipe,
             "framework": self.framework,
             "identity": self.identity.to_dict(),
-            "profile": _profile_dict(self.profile),
-            "analysis": _analysis_dict(self.analysis),
-            "proposals": [_proposal_dict(proposal) for proposal in self.proposals],
+            "profile_plan": dict(self.profile_plan),
             "required_capabilities": [item.value for item in self.required_capabilities],
             "warnings": list(self.warnings),
         }
@@ -167,6 +169,7 @@ class BaselineValidationResult:
 
     run_id: str
     run_uid: str
+    profile: ProfileResult
     evaluation: TieredEvaluationResult | WorkloadSuiteEvaluationResult
     workspace_path: Path
     artifact_dir: Path
@@ -174,13 +177,14 @@ class BaselineValidationResult:
 
     @property
     def passed(self) -> bool:
-        return self.evaluation.outcome is EvaluationOutcome.PASSED
+        return self.profile.complete and self.evaluation.outcome is EvaluationOutcome.PASSED
 
     def to_dict(self) -> dict[str, object]:
         return {
             "run_id": self.run_id,
             "run_uid": self.run_uid,
             "passed": self.passed,
+            "profile": _profile_dict(self.profile),
             "workspace_path": str(self.workspace_path),
             "artifact_dir": str(self.artifact_dir),
             "identity": self.identity.to_dict(),
@@ -198,15 +202,16 @@ class _CandidateExecutionResult:
 
 
 class OptimizationRunner:
-    """Join imported evidence, reviewed changes, isolated trials, and memory.
+    """Join active profile evidence, reviewed changes, isolated trials, and memory."""
 
-    A configuration without ``target`` retains the external-service compatibility
-    path.  A managed SGLang target is built, started, checked, evaluated, and
-    stopped by an owned ``TargetController`` under separate capabilities.
-    """
-
-    def __init__(self, target_controller: TargetController | None = None) -> None:
+    def __init__(
+        self,
+        target_controller: TargetController | None = None,
+        profiler: SGLangProfiler | None = None,
+    ) -> None:
         self._target_controller = target_controller
+        self._profiler = profiler
+        self._active_profile_manifest: Path | None = None
 
     @staticmethod
     def required_capabilities(config: OptimizationConfig) -> tuple[Capability, ...]:
@@ -233,6 +238,7 @@ class OptimizationRunner:
             Capability.WORKSPACE_WRITE,
             Capability.BENCHMARK_EXECUTION,
             Capability.OWNED_SERVICE_LIFECYCLE,
+            Capability.PROFILE_EXECUTION,
         ]
         if config.target.build is not None and config.target.build.commands:
             required.append(Capability.BUILD_EXECUTION)
@@ -282,7 +288,8 @@ class OptimizationRunner:
                 artifact_dir / "runtime-provenance.json",
             )
             validate_runtime_provenance(target.runtime, provenance_record)
-        target_spec = _target_spec(config, provenance_record)
+            validate_declared_hardware(target.hardware, provenance_record)
+        target_spec = _profile_target_spec(config, provenance_record)
         workspace = GitWorktreeWorkspace.create(
             workspace_config.repository,
             workspace_config.root_dir / selected_run_id / "validation" / "baseline",
@@ -301,8 +308,25 @@ class OptimizationRunner:
             trial_id="baseline-validation",
         )
         evaluation: TieredEvaluationResult | WorkloadSuiteEvaluationResult | None = None
+        profile: ProfileResult | None = None
         try:
             controller.wait_ready(handle)
+            context = StageContext(
+                run_id=selected_run_id,
+                iteration_id="target-validation",
+                artifact_dir=artifact_dir,
+                authorizations=authorizations,
+                input_digest=_config_digest(config),
+            )
+            _, profile = self._capture_running_service_profile(
+                config,
+                context,
+                workspace.path,
+                handle,
+                role="baseline-validation",
+                candidate_id=config.baseline.name,
+            )
+            profile_manifest = _profile_manifest_path(profile)
             runtime_environment = {
                 "EUBOULIA_TARGET_ENDPOINT": handle.endpoint,
                 "EUBOULIA_TARGET_MANIFEST_PATH": str(handle.manifest_path),
@@ -313,6 +337,7 @@ class OptimizationRunner:
                 "EUBOULIA_TARGET_TRIAL_ID": "baseline-validation",
                 "EUBOULIA_TARGET_WORKSPACE": str(workspace.path),
                 "EUBOULIA_TARGET_ARTIFACT_DIR": str(artifact_dir),
+                "EUBOULIA_PROFILE_MANIFEST_PATH": str(profile_manifest),
             }
             evaluator = TieredEvaluator(artifact_dir / "evaluations")
             evaluation = _execute_workload_suite(
@@ -323,6 +348,7 @@ class OptimizationRunner:
                 apply_promotion_gate=False,
                 evaluator=evaluator,
                 artifact_dir=artifact_dir / "evaluations" / "baseline-validation",
+                lane="qualification",
                 runtime_environment=runtime_environment,
             )
         finally:
@@ -332,9 +358,12 @@ class OptimizationRunner:
                 _preserve_service_log(handle, artifact_dir)
         if evaluation is None:  # pragma: no cover - evaluation returns or raises
             raise AssertionError("baseline validation completed without an evaluation")
+        if profile is None:  # pragma: no cover - profile returns or raises
+            raise AssertionError("baseline validation completed without a profile")
         result = BaselineValidationResult(
             run_id=selected_run_id,
             run_uid=run_uid,
+            profile=profile,
             evaluation=evaluation,
             workspace_path=workspace.path,
             artifact_dir=artifact_dir,
@@ -347,39 +376,46 @@ class OptimizationRunner:
         return result
 
     def plan(self, config: OptimizationConfig) -> OptimizationPlan:
-        """Analyze declared artifacts and select catalog proposals without writes."""
+        """Describe the active capture and authorization boundary without writes."""
 
-        if config.target is not None:
-            _target_spec(config)
-        context = StageContext(
-            run_id="preview",
-            iteration_id="preview-001",
-            artifact_dir=config.execution.artifacts_dir,
-        )
-        profile, analysis, proposals = self._deliberate(config, context, ())
-        required_capabilities = self.required_capabilities(config)
-        target_warning = (
-            "managed SGLang trials use a fresh baseline service and candidate service"
-            if config.target is not None
-            else (
-                "target is absent; server-argument changes are ineligible and evaluation "
-                "commands must address an externally managed service"
+        if config.target is None:
+            raise OptimizationRuntimeError(
+                "active SGLang profiling requires a managed target"
             )
-        )
+        _target_spec(config)
+        required_capabilities = self.required_capabilities(config)
+        profiling = config.optimization.profiling
         warnings = (
             "plan is read-only; no event, memory, worktree, command, or service was created",
-            "profile evidence is diagnostic-only and cannot promote a candidate",
+            "profile and proposals are produced only by optimize run after authorization",
+            "profile evidence is diagnostic-only; promotion uses an unprofiled rerun",
             "Cookbook conversion is external; only reviewed target and change "
             "declarations are used",
-            target_warning,
+            "managed SGLang trials use fresh profile, baseline, and candidate services",
         )
         return OptimizationPlan(
             campaign=config.name,
             framework=config.framework.value,
             identity=self.identity(config),
-            profile=profile,
-            analysis=analysis,
-            proposals=proposals,
+            profile_plan={
+                "provider": profiling.provider.value,
+                "workload_point": profiling.workload_point,
+                "warmup_runs": profiling.warmup_runs,
+                "start_step": profiling.start_step,
+                "num_steps": profiling.num_steps,
+                "activities": list(profiling.activities),
+                "merge_profiles": profiling.merge_profiles,
+                "with_stack": profiling.with_stack,
+                "record_shapes": profiling.record_shapes,
+                "timeout_seconds": profiling.timeout_seconds,
+                "settle_timeout_seconds": profiling.settle_timeout_seconds,
+                "max_raw_bytes": profiling.max_raw_bytes,
+                "min_free_disk_bytes": profiling.min_free_disk_bytes,
+                "max_summary_rows": profiling.max_summary_rows,
+                "keep_raw": profiling.keep_raw,
+                "expected_rank_traces": profiling.expected_rank_traces,
+                "required_kernel_pattern": profiling.required_kernel_pattern,
+            },
             required_capabilities=required_capabilities,
             warnings=warnings,
         )
@@ -393,6 +429,11 @@ class OptimizationRunner:
     ) -> OptimizationRunResult:
         """Run bounded iterations or pause before the first unauthorized side effect."""
 
+        if config.target is None:
+            raise OptimizationRuntimeError(
+                "optimize run requires a managed SGLang target for active profiling"
+            )
+        self._active_profile_manifest = None
         require_optimization_execution_lock(config)
         selected_run_id = _run_id(run_id)
         run_uid = _run_uid()
@@ -447,6 +488,41 @@ class OptimizationRunner:
             )
         )
         lifecycle = lifecycle.move_run(RunState.ITERATING)
+
+        required = set(self.required_capabilities(config))
+        missing = sorted(required - authorizations, key=lambda item: item.value)
+        if missing:
+            ledger.append(
+                OptimizationEvent.create(
+                    EventType.APPROVAL_REQUESTED,
+                    selected_run_id,
+                    payload={"missing_capabilities": [item.value for item in missing]},
+                )
+            )
+            lifecycle = lifecycle.move_run(RunState.WAITING_FOR_APPROVAL)
+            return self._result(
+                selected_run_id,
+                run_uid,
+                lifecycle,
+                champion_id,
+                profile,
+                analysis,
+                observed_proposals,
+                outcomes,
+                config,
+                "explicit authorization is required before active profiling",
+            )
+        ledger.append(
+            OptimizationEvent.create(
+                EventType.APPROVAL_GRANTED,
+                selected_run_id,
+                payload={
+                    "capabilities": [
+                        item.value for item in sorted(required, key=lambda item: item.value)
+                    ]
+                },
+            )
+        )
 
         try:
             no_improvement = 0
@@ -519,14 +595,26 @@ class OptimizationRunner:
                         EventType.PROFILE_STARTED,
                         selected_run_id,
                         iteration_id=iteration_id,
-                        payload={"provider": "imported", "candidate_id": champion_id},
+                        payload={
+                            "provider": config.optimization.profiling.provider.value,
+                            "candidate_id": champion_id,
+                            "workload_point": config.optimization.profiling.workload_point,
+                        },
                     )
                 )
-                profile, analysis, proposals = self._deliberate(
+                profiler, profile = self._capture_champion_profile(
+                    config,
+                    context,
+                    champion_id,
+                    ledger,
+                )
+                self._active_profile_manifest = _profile_manifest_path(profile)
+                analysis, proposals = self._deliberate(
                     config,
                     context,
                     recalled,
-                    candidate_id=champion_id,
+                    profiler,
+                    profile,
                     attempted_memory=exact_recalled,
                 )
                 ledger.append(
@@ -597,45 +685,6 @@ class OptimizationRunner:
                     )
 
                 proposal = proposals[0]
-                lifecycle = lifecycle.move_iteration(IterationState.WAITING_FOR_APPROVAL)
-                required = set(self.required_capabilities(config))
-                missing = sorted(required - authorizations, key=lambda item: item.value)
-                if missing:
-                    ledger.append(
-                        OptimizationEvent.create(
-                            EventType.APPROVAL_REQUESTED,
-                            selected_run_id,
-                            iteration_id=iteration_id,
-                            entity_id=proposal.proposal_id,
-                            payload={"missing_capabilities": [item.value for item in missing]},
-                        )
-                    )
-                    lifecycle = lifecycle.move_run(RunState.WAITING_FOR_APPROVAL)
-                    return self._result(
-                        selected_run_id,
-                        run_uid,
-                        lifecycle,
-                        champion_id,
-                        profile,
-                        analysis,
-                        observed_proposals,
-                        outcomes,
-                        config,
-                        "explicit authorization is required for every declared side effect",
-                    )
-                ledger.append(
-                    OptimizationEvent.create(
-                        EventType.APPROVAL_GRANTED,
-                        selected_run_id,
-                        iteration_id=iteration_id,
-                        entity_id=proposal.proposal_id,
-                        payload={
-                            "capabilities": [
-                                item.value for item in sorted(required, key=lambda item: item.value)
-                            ]
-                        },
-                    )
-                )
 
                 try:
                     execution = self._execute_candidate(
@@ -845,25 +894,287 @@ class OptimizationRunner:
             )
             raise
 
+    def _capture_running_service_profile(
+        self,
+        config: OptimizationConfig,
+        context: StageContext,
+        workspace: Path,
+        handle: ServiceHandle,
+        *,
+        role: str,
+        candidate_id: str,
+    ) -> tuple[SGLangProfiler, ProfileResult]:
+        profiling = config.optimization.profiling
+        profiler = self._profiler or SGLangProfiler(profiling)
+        point = next(
+            item
+            for item in config.workload_suite.points
+            if item.name == profiling.workload_point
+        )
+        runtime_environment = {
+            "EUBOULIA_TARGET_ENDPOINT": handle.endpoint,
+            "EUBOULIA_TARGET_MANIFEST_PATH": str(handle.manifest_path),
+            "EUBOULIA_TARGET_PID": str(handle.pid),
+            "EUBOULIA_TARGET_ROLE": role,
+            "EUBOULIA_TARGET_STDERR_PATH": str(handle.stderr_path),
+            "EUBOULIA_TARGET_STDOUT_PATH": str(handle.stdout_path),
+            "EUBOULIA_TARGET_TRIAL_ID": handle.trial_id,
+            "EUBOULIA_TARGET_WORKSPACE": str(workspace),
+            "EUBOULIA_TARGET_ARTIFACT_DIR": str(context.artifact_dir),
+        }
+        command = _evaluation_plan(
+            config,
+            handle.trial_id,
+            workspace,
+            point=point,
+            metrics_path=Path(".euboulia-profile-metrics.json"),
+            baseline_value=None,
+            apply_promotion_gate=False,
+            include_checks=False,
+            include_accuracy=False,
+            runtime_environment=runtime_environment,
+        ).benchmark.command
+        command = replace(
+            command,
+            timeout_seconds=min(
+                command.timeout_seconds or profiling.timeout_seconds,
+                profiling.timeout_seconds,
+            ),
+            env_overrides={
+                **command.env_overrides,
+                "EUBOULIA_WARMUPS": "0",
+                "EUBOULIA_REPETITIONS": "1",
+            },
+        )
+        for warmup_index in range(profiling.warmup_runs):
+            warmup = _run_profile_command(
+                command,
+                workspace,
+                context.artifact_dir / "profile-warmup",
+                f"warmup-{warmup_index + 1}",
+            )
+            if not warmup.succeeded:
+                raise OptimizationRuntimeError(
+                    f"profile warmup failed; inspect {warmup.stderr_path}"
+                )
+        profile = profiler.capture(
+            ProfileRequest(
+                candidate_id=candidate_id,
+                source_revision=config.baseline.source_revision,
+                workload_digest=_workload_digest(config),
+                max_bytes=profiling.max_raw_bytes,
+            ),
+            context,
+            endpoint=handle.endpoint,
+            run_workload=lambda: _run_profile_command(
+                command,
+                workspace,
+                context.artifact_dir / "profile" / "workload",
+                "profile-workload",
+            ),
+        )
+        return profiler, profile
+
+    def _capture_champion_profile(
+        self,
+        config: OptimizationConfig,
+        context: StageContext,
+        champion_id: str,
+        ledger: EventLedger,
+    ) -> tuple[SGLangProfiler, ProfileResult]:
+        target = config.target
+        workspace_config = config.optimization.workspace
+        if target is None:
+            raise OptimizationRuntimeError("active SGLang profiling requires target")
+        if workspace_config is None:
+            raise OptimizationRuntimeError(
+                "optimization.workspace is required for active SGLang profiling"
+            )
+
+        controller = self._target_controller or SGLangTargetController()
+        evidence_root = context.artifact_dir / "profile-target"
+        provenance_record: RuntimeProvenanceRecord | None = None
+        if target.runtime is not None:
+            provenance_record = capture_runtime_provenance(
+                target.runtime,
+                repository=workspace_config.repository,
+            )
+            provenance_path = write_runtime_provenance(
+                provenance_record,
+                evidence_root / "runtime-provenance.json",
+            )
+            ledger.append(
+                OptimizationEvent.create(
+                    EventType.RUNTIME_PROVENANCE_CAPTURED,
+                    context.run_id,
+                    iteration_id=context.iteration_id,
+                    payload=_json_payload(provenance_record.to_dict()),
+                    artifacts=(_artifact_ref(provenance_path, "runtime-provenance"),),
+                )
+            )
+            validate_runtime_provenance(target.runtime, provenance_record)
+            validate_declared_hardware(target.hardware, provenance_record)
+        target_spec = _profile_target_spec(config, provenance_record)
+        workspace = self._prepare_managed_workspace(
+            config,
+            context.run_id,
+            context.iteration_id,
+            role="profile",
+            entity_id=champion_id,
+            ledger=ledger,
+        )
+        self._record_target_materialized(
+            ledger,
+            context.run_id,
+            context.iteration_id,
+            champion_id,
+            "profile",
+            target_spec,
+            TargetChangeSet(),
+            None,
+        )
+        self._build_managed_target(
+            controller,
+            target_spec,
+            workspace,
+            evidence_root / "build",
+            ledger,
+            context.run_id,
+            context.iteration_id,
+            champion_id,
+            "profile",
+        )
+
+        trial_id = f"{context.iteration_id}-profile"
+        service_dir = evidence_root / "service"
+        ledger.append(
+            OptimizationEvent.create(
+                EventType.SERVICE_STARTING,
+                context.run_id,
+                iteration_id=context.iteration_id,
+                entity_id=champion_id,
+                payload={"role": "profile", "trial_id": trial_id},
+            )
+        )
+        try:
+            handle = controller.start(
+                workspace.path,
+                target_spec,
+                TargetChangeSet(),
+                service_dir,
+                run_id=context.run_id,
+                trial_id=trial_id,
+            )
+        except BaseException as exc:
+            ledger.append(
+                OptimizationEvent.create(
+                    EventType.SERVICE_FAILED,
+                    context.run_id,
+                    iteration_id=context.iteration_id,
+                    entity_id=champion_id,
+                    payload={"role": "profile", "stage": "start", **_error_payload(exc)},
+                    artifacts=_artifact_refs_in(service_dir),
+                )
+            )
+            raise
+        ledger.append(
+            OptimizationEvent.create(
+                EventType.SERVICE_STARTED,
+                context.run_id,
+                iteration_id=context.iteration_id,
+                entity_id=champion_id,
+                payload={
+                    "role": "profile",
+                    "trial_id": trial_id,
+                    "handle_id": handle.handle_id,
+                    "pid": handle.pid,
+                },
+            )
+        )
+        try:
+            try:
+                controller.wait_ready(handle)
+            except BaseException as exc:
+                ledger.append(
+                    OptimizationEvent.create(
+                        EventType.SERVICE_FAILED,
+                        context.run_id,
+                        iteration_id=context.iteration_id,
+                        entity_id=champion_id,
+                        payload={
+                            "role": "profile",
+                            "stage": "readiness",
+                            **_error_payload(exc),
+                        },
+                    )
+                )
+                raise
+            ledger.append(
+                OptimizationEvent.create(
+                    EventType.SERVICE_READY,
+                    context.run_id,
+                    iteration_id=context.iteration_id,
+                    entity_id=champion_id,
+                    payload={
+                        "role": "profile",
+                        "trial_id": trial_id,
+                        "handle_id": handle.handle_id,
+                        "endpoint": handle.endpoint,
+                    },
+                )
+            )
+            profiler, profile = self._capture_running_service_profile(
+                config,
+                context,
+                workspace.path,
+                handle,
+                role="profile",
+                candidate_id=champion_id,
+            )
+        finally:
+            try:
+                ledger.append(
+                    OptimizationEvent.create(
+                        EventType.SERVICE_STOPPING,
+                        context.run_id,
+                        iteration_id=context.iteration_id,
+                        entity_id=champion_id,
+                        payload={
+                            "role": "profile",
+                            "trial_id": trial_id,
+                            "handle_id": handle.handle_id,
+                        },
+                    )
+                )
+                controller.stop(handle)
+            finally:
+                _preserve_service_log(handle, evidence_root)
+            ledger.append(
+                OptimizationEvent.create(
+                    EventType.SERVICE_STOPPED,
+                    context.run_id,
+                    iteration_id=context.iteration_id,
+                    entity_id=champion_id,
+                    payload={
+                        "role": "profile",
+                        "trial_id": trial_id,
+                        "handle_id": handle.handle_id,
+                    },
+                    artifacts=_service_artifacts(handle),
+                )
+            )
+        return profiler, profile
+
     def _deliberate(
         self,
         config: OptimizationConfig,
         context: StageContext,
         recalled: tuple[MemoryEntry, ...],
+        profiler: SGLangProfiler,
+        profile: ProfileResult,
         *,
-        candidate_id: str | None = None,
         attempted_memory: tuple[MemoryEntry, ...] | None = None,
-    ) -> tuple[ProfileResult, AnalysisReport, tuple[ChangeProposal, ...]]:
-        profiler = ImportedProfiler(config.optimization.profiles.artifacts)
-        profile = profiler.capture(
-            ProfileRequest(
-                candidate_id=candidate_id or config.baseline.name,
-                source_revision=config.baseline.source_revision,
-                workload_digest=_workload_digest(config),
-                max_bytes=config.optimization.budget.max_profile_bytes,
-            ),
-            context,
-        )
+    ) -> tuple[AnalysisReport, tuple[ChangeProposal, ...]]:
         analysis = RuleAnalyzer(profiler).analyze(profile, recalled, context)
         if attempted_memory is not None:
             analysis = replace(
@@ -876,15 +1187,6 @@ class OptimizationRunner:
             )
         planner_config = config.optimization.planner
         catalog = PatchCatalog.load(planner_config.patch_catalog)
-        if config.target is None:
-            catalog = PatchCatalog(
-                entries=tuple(
-                    entry
-                    for entry in catalog.entries
-                    if not entry.server_args_set and not entry.server_args_remove
-                ),
-                source=catalog.source,
-            )
         planner = RulePlanner(
             catalog,
             max_proposals=planner_config.max_proposals_per_iteration,
@@ -895,7 +1197,7 @@ class OptimizationRunner:
             recalled if attempted_memory is None else attempted_memory,
             context,
         )
-        return profile, analysis, proposals
+        return analysis, proposals
 
     def _execute_candidate(
         self,
@@ -1001,6 +1303,7 @@ class OptimizationRunner:
             apply_promotion_gate=True,
             evaluator=evaluator,
             artifact_dir=config.execution.artifacts_dir / run_id / "evaluations" / iteration_id,
+            lane="fast",
         )
         ledger.append(
             OptimizationEvent.create(
@@ -1059,6 +1362,7 @@ class OptimizationRunner:
                 )
             )
             validate_runtime_provenance(target.runtime, provenance_record)
+            validate_declared_hardware(target.hardware, provenance_record)
         target_spec = _target_spec(config, provenance_record)
 
         ledger.append(
@@ -1122,10 +1426,14 @@ class OptimizationRunner:
             stop_state=IterationState.STOPPING_BASELINE,
             baseline_values={},
             apply_promotion_gate=False,
+            profile_manifest_path=self._active_profile_manifest,
         )
+        lanes = config.optimization.evaluation.lanes
+        if lanes is None:  # normalized configuration always supplies lanes
+            raise OptimizationRuntimeError("optimization.evaluation.lanes is required")
         if baseline_evaluation.outcome is not EvaluationOutcome.PASSED or len(
             _objective_values(config, baseline_evaluation)
-        ) != len(config.workload_suite.points):
+        ) != len(lanes.fast.points):
             reason = baseline_evaluation.reason or "managed baseline evaluation failed"
             ledger.append(
                 OptimizationEvent.create(
@@ -1221,6 +1529,7 @@ class OptimizationRunner:
             stop_state=IterationState.STOPPING_SERVICE,
             baseline_values=measured_baselines,
             apply_promotion_gate=True,
+            profile_manifest_path=self._active_profile_manifest,
         )
         return _CandidateExecutionResult(
             lifecycle=lifecycle,
@@ -1489,6 +1798,7 @@ class OptimizationRunner:
         stop_state: IterationState,
         baseline_values: Mapping[str, float],
         apply_promotion_gate: bool,
+        profile_manifest_path: Path | None,
     ) -> tuple[
         Lifecycle,
         TieredEvaluationResult | WorkloadSuiteEvaluationResult,
@@ -1580,6 +1890,10 @@ class OptimizationRunner:
                 "EUBOULIA_TARGET_WORKSPACE": str(workspace.path),
                 "EUBOULIA_TARGET_ARTIFACT_DIR": str(evidence_dir.parent),
             }
+            if profile_manifest_path is not None:
+                runtime_environment["EUBOULIA_PROFILE_MANIFEST_PATH"] = str(
+                    profile_manifest_path
+                )
             ledger.append(
                 OptimizationEvent.create(
                     EventType.EVALUATION_STARTED,
@@ -1603,6 +1917,7 @@ class OptimizationRunner:
                 apply_promotion_gate=apply_promotion_gate,
                 evaluator=evaluator,
                 artifact_dir=config.execution.artifacts_dir / run_id / "evaluations" / trial_id,
+                lane="fast",
                 runtime_environment=runtime_environment,
             )
             ledger.append(
@@ -1840,6 +2155,22 @@ def _target_spec(
     )
 
 
+def _profile_target_spec(
+    config: OptimizationConfig,
+    runtime_record: RuntimeProvenanceRecord | None = None,
+) -> TargetSpec:
+    base = _target_spec(config, runtime_record)
+    profiling = config.optimization.profiling
+    return replace(
+        base,
+        launch_env={
+            **base.launch_env,
+            "SGLANG_PROFILE_WITH_STACK": str(profiling.with_stack).lower(),
+            "SGLANG_PROFILE_RECORD_SHAPES": str(profiling.record_shapes).lower(),
+        },
+    )
+
+
 def _error_payload(exc: BaseException) -> dict[str, JSONValue]:
     return {"error_type": type(exc).__name__, "error": str(exc)}
 
@@ -1893,6 +2224,7 @@ def _evaluation_plan(
     apply_promotion_gate: bool,
     include_checks: bool,
     include_accuracy: bool,
+    stability: StabilityConfig | None = None,
     runtime_environment: Mapping[str, str] | None = None,
 ) -> EvaluationPlan:
     evaluation = config.optimization.evaluation
@@ -1931,6 +2263,7 @@ def _evaluation_plan(
     correctness: list[CommandSpec] = []
     performance: list[CommandSpec] = []
     accuracy: list[CommandSpec] = []
+    performance_tier: EvaluationTierConfig | None = None
     for tier in evaluation.tiers:
         commands = [
             _command_spec(command, tier, evaluation_environment) for command in tier.commands
@@ -1943,6 +2276,7 @@ def _evaluation_plan(
                 correctness.extend(commands)
         else:
             if tier.kind.value == "performance":
+                performance_tier = tier
                 performance.extend(commands)
             elif include_accuracy:
                 accuracy.extend(commands)
@@ -1952,6 +2286,8 @@ def _evaluation_plan(
         )
     if len(performance) != 1:
         raise OptimizationRuntimeError("active evaluation requires exactly one performance command")
+    if performance_tier is None:  # pragma: no cover - configuration validation guards this
+        raise OptimizationRuntimeError("active evaluation requires a performance tier")
     promotion = evaluation.promotion
     if promotion is None:  # normalized configuration always supplies this
         raise OptimizationRuntimeError("optimization.evaluation.promotion is required")
@@ -1967,15 +2303,78 @@ def _evaluation_plan(
         baseline=baseline_value if apply_promotion_gate else None,
         minimum_relative_improvement=minimum,
     )
+    accuracy_check = None
+    if include_accuracy and evaluation.accuracy is not None:
+        accuracy_config = evaluation.accuracy
+        result_path = accuracy_config.result.path
+        replacements = {
+            "endpoint": evaluation_environment["EUBOULIA_TARGET_ENDPOINT"],
+            "model_path": config.models.target.path,
+            "result_path": str((workspace / result_path).resolve(strict=False)),
+            "served_name": config.models.target.served_name,
+            "workspace": str(workspace.resolve()),
+        }
+        command = _external_command_spec(
+            accuracy_config.command,
+            evaluation_environment,
+            replacements,
+        )
+        accuracy_check = AccuracySpec(
+            command=command,
+            result_path=result_path,
+            metric=accuracy_config.result.metric,
+            direction=ObjectiveDirection(accuracy_config.result.direction.value),
+            threshold=accuracy_config.result.threshold,
+        )
+    stability_spec = (
+        None
+        if stability is None or not stability.adaptive
+        else StabilitySpec(
+            warmup_runs=stability.warmup_runs,
+            min_windows=stability.min_windows,
+            max_windows=stability.max_windows,
+            stable_windows=stability.stable_windows,
+            relative_tolerance=stability.relative_tolerance,
+            max_seconds=stability.max_seconds,
+        )
+    )
     return EvaluationPlan(
         trial_id=iteration_id,
         workspace=workspace,
         preflight=tuple(preflight),
         correctness=tuple(correctness),
-        benchmark=BenchmarkSpec(performance[0], metrics_path),
+        benchmark=BenchmarkSpec(
+            performance[0],
+            metrics_path,
+            required_metrics=performance_tier.required_metrics,
+            stability=stability_spec,
+        ),
         objective=objective,
         accuracy=tuple(accuracy),
+        accuracy_check=accuracy_check,
         profiler_trial=False,
+    )
+
+
+def _run_profile_command(
+    command: CommandSpec,
+    workspace: Path,
+    artifact_dir: Path,
+    artifact_prefix: str,
+) -> ExecutionResult:
+    environment = dict(command.env_overrides)
+    environment["EUBOULIA_COMMAND_EVIDENCE_DIR"] = str(
+        artifact_dir / f"{artifact_prefix}-evidence"
+    )
+    return CommandExecutor(
+        artifact_dir,
+        default_timeout_seconds=command.timeout_seconds,
+    ).run(
+        command.argv,
+        cwd=workspace,
+        timeout_seconds=command.timeout_seconds,
+        env_overrides=environment,
+        artifact_prefix=artifact_prefix,
     )
 
 
@@ -1988,6 +2387,7 @@ def _execute_workload_suite(
     apply_promotion_gate: bool,
     evaluator: TieredEvaluator,
     artifact_dir: Path,
+    lane: str,
     runtime_environment: Mapping[str, str] | None = None,
 ) -> TieredEvaluationResult | WorkloadSuiteEvaluationResult:
     evaluation = config.optimization.evaluation
@@ -1995,8 +2395,16 @@ def _execute_workload_suite(
         raise OptimizationRuntimeError(
             "optimization.evaluation.metrics_path is required for active evaluation"
         )
+    lanes = evaluation.lanes
+    if lanes is None:  # normalized configuration always supplies lanes
+        raise OptimizationRuntimeError("optimization.evaluation.lanes is required")
+    if lane not in {"fast", "qualification"}:
+        raise OptimizationRuntimeError(f"unknown evaluation lane: {lane}")
+    lane_config = lanes.fast if lane == "fast" else lanes.qualification
+    points_by_name = {point.name: point for point in config.workload_suite.points}
+    selected_points = tuple(points_by_name[name] for name in lane_config.points)
     point_results: dict[str, TieredEvaluationResult] = {}
-    for index, point in enumerate(config.workload_suite.points):
+    for index, point in enumerate(selected_points):
         point_trial_id = (
             trial_id
             if config.schema_version == 2 and len(config.workload_suite.points) == 1
@@ -2010,12 +2418,15 @@ def _execute_workload_suite(
             metrics_path=_point_metrics_path(
                 evaluation.metrics_path,
                 point.name,
-                single_point=len(config.workload_suite.points) == 1,
+                single_point=len(selected_points) == 1,
             ),
             baseline_value=baseline_values.get(point.name),
             apply_promotion_gate=apply_promotion_gate,
             include_checks=index == 0,
-            include_accuracy=index == len(config.workload_suite.points) - 1,
+            include_accuracy=(
+                lane == "qualification" and index == len(selected_points) - 1
+            ),
+            stability=lane_config.stability,
             runtime_environment=runtime_environment,
         )
         point_result = evaluator.execute(evaluator.authorize(plan, approved=True))
@@ -2030,6 +2441,8 @@ def _execute_workload_suite(
     return _aggregate_suite_result(
         config,
         trial_id=trial_id,
+        lane=lane,
+        required_points=lane_config.points,
         point_results=point_results,
         artifact_dir=artifact_dir,
         apply_promotion_gate=apply_promotion_gate,
@@ -2046,7 +2459,7 @@ def _evaluation_artifact(
     result: TieredEvaluationResult | WorkloadSuiteEvaluationResult,
 ) -> Path:
     filename = (
-        "suite-evaluation.json"
+        "evaluation-summary.json"
         if isinstance(result, WorkloadSuiteEvaluationResult)
         else "evaluation.json"
     )
@@ -2082,10 +2495,41 @@ def _command_spec(
     )
 
 
+def _external_command_spec(
+    command: OptimizationCommandConfig,
+    runtime_environment: Mapping[str, str],
+    replacements: Mapping[str, str],
+) -> CommandSpec:
+    def render(value: str) -> str:
+        rendered = value
+        for name, replacement in replacements.items():
+            rendered = rendered.replace("{" + name + "}", replacement)
+        unresolved = re.findall(r"\{[A-Za-z][A-Za-z0-9_]*\}", rendered)
+        if unresolved:
+            raise OptimizationRuntimeError(
+                f"external command contains unknown placeholder(s): {', '.join(unresolved)}"
+            )
+        return rendered
+
+    environment = {
+        name: render(value) if value is not None else None
+        for name, value in command.env.items()
+    }
+    environment.update(runtime_environment)
+    return CommandSpec(
+        name=command.name,
+        argv=tuple(render(item) for item in command.argv),
+        timeout_seconds=command.timeout_seconds,
+        env_overrides=environment,
+    )
+
+
 def _aggregate_suite_result(
     config: OptimizationConfig,
     *,
     trial_id: str,
+    lane: str,
+    required_points: tuple[str, ...],
     point_results: Mapping[str, TieredEvaluationResult],
     artifact_dir: Path,
     apply_promotion_gate: bool,
@@ -2104,7 +2548,7 @@ def _aggregate_suite_result(
         if result.relative_improvement is not None
     }
     required_names = (
-        tuple(point.name for point in config.workload_suite.points)
+        required_points
         if not apply_promotion_gate or promotion.require_all_points_valid
         else promotion.primary_points
     )
@@ -2140,6 +2584,7 @@ def _aggregate_suite_result(
     gate_passed = outcome is EvaluationOutcome.PASSED
     result = WorkloadSuiteEvaluationResult(
         trial_id=trial_id,
+        lane=lane,
         outcome=outcome,
         point_results=point_results,
         primary_points=promotion.primary_points,
@@ -2152,8 +2597,9 @@ def _aggregate_suite_result(
         reason=reason,
     )
     artifact_dir.mkdir(parents=True, exist_ok=True)
-    (artifact_dir / "suite-evaluation.json").write_text(
-        json.dumps(result.to_dict(), indent=2, sort_keys=True) + "\n",
+    (artifact_dir / "evaluation-summary.json").write_text(
+        json.dumps(EvaluationSummary(result).to_dict(), indent=2, sort_keys=True)
+        + "\n",
         encoding="utf-8",
     )
     return result
@@ -2249,6 +2695,16 @@ def _artifact_ref(path: Path, label: str) -> ArtifactRef:
     )
 
 
+def _profile_manifest_path(profile: ProfileResult) -> Path:
+    for artifact in profile.artifacts:
+        path = Path(artifact.path)
+        if path.name == "manifest.json" and path.is_file():
+            return path
+    raise OptimizationRuntimeError(
+        f"active profile {profile.profile_id} has no durable manifest artifact"
+    )
+
+
 def _run_id(value: str | None) -> str:
     selected = value or f"opt-{uuid.uuid4().hex[:16]}"
     if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", selected) is None:
@@ -2264,6 +2720,7 @@ def _required_capabilities(config: OptimizationConfig) -> tuple[Capability, ...]
     required = {
         Capability.WORKSPACE_WRITE,
         Capability.BENCHMARK_EXECUTION,
+        Capability.PROFILE_EXECUTION,
     }
     if config.target is not None:
         required.add(Capability.OWNED_SERVICE_LIFECYCLE)

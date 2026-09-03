@@ -47,7 +47,8 @@ ITERATION_TRANSITIONS: Mapping[IterationState, frozenset[IterationState]] = {
     IterationState.ANALYZING: frozenset({IterationState.PLANNING, IterationState.FAILED}),
     IterationState.PLANNING: frozenset(
         {
-            IterationState.WAITING_FOR_APPROVAL,
+            IterationState.PREPARING_BASELINE,
+            IterationState.PREPARING_WORKSPACE,
             IterationState.RECORDING_MEMORY,
             IterationState.FAILED,
         }

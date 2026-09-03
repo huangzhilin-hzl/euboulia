@@ -10,7 +10,6 @@ def test_lifecycle_walks_the_review_boundary() -> None:
         IterationState.PROFILING,
         IterationState.ANALYZING,
         IterationState.PLANNING,
-        IterationState.WAITING_FOR_APPROVAL,
         IterationState.PREPARING_WORKSPACE,
         IterationState.APPLYING_PATCH,
         IterationState.EVALUATING,
@@ -22,14 +21,15 @@ def test_lifecycle_walks_the_review_boundary() -> None:
     assert lifecycle.iteration is IterationState.ACCEPTED
 
 
-def test_lifecycle_refuses_to_skip_approval() -> None:
+def test_lifecycle_allows_execution_after_run_level_approval() -> None:
     lifecycle = Lifecycle().move_run(RunState.ITERATING).begin_iteration()
     lifecycle = lifecycle.move_iteration(IterationState.PROFILING)
     lifecycle = lifecycle.move_iteration(IterationState.ANALYZING)
     lifecycle = lifecycle.move_iteration(IterationState.PLANNING)
 
-    with pytest.raises(StateTransitionError, match="planning -> preparing_workspace"):
-        lifecycle.move_iteration(IterationState.PREPARING_WORKSPACE)
+    lifecycle = lifecycle.move_iteration(IterationState.PREPARING_WORKSPACE)
+
+    assert lifecycle.iteration is IterationState.PREPARING_WORKSPACE
 
 
 def test_lifecycle_walks_managed_baseline_and_candidate_services() -> None:
@@ -38,7 +38,6 @@ def test_lifecycle_walks_managed_baseline_and_candidate_services() -> None:
         IterationState.PROFILING,
         IterationState.ANALYZING,
         IterationState.PLANNING,
-        IterationState.WAITING_FOR_APPROVAL,
         IterationState.PREPARING_BASELINE,
         IterationState.BUILDING_BASELINE,
         IterationState.STARTING_BASELINE,

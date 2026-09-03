@@ -411,13 +411,13 @@ def _reject_profile_controls(
         for arg in base_args:
             if isinstance(arg, str) and _is_profile_control(arg):
                 raise AdapterError(
-                    "serving profile controls are disabled; use offline profile import"
+                    "serving profile controls are disabled in the benchmark adapter"
                 )
     if isinstance(parameters, Mapping):
         for name in parameters:
             if isinstance(name, str) and _is_profile_parameter(name):
                 raise AdapterError(
-                    "serving profile controls are disabled; use offline profile import"
+                    "serving profile controls are disabled in the benchmark adapter"
                 )
 
 
