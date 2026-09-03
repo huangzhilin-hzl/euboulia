@@ -1,100 +1,69 @@
-# Design inspirations
+# Design principles
 
-Euboulia borrows narrow, proven mechanisms from successful agent and experiment
-systems. It does not embed a general-purpose agent framework in the optimization
-runtime. The source of truth remains Euboulia's own typed events and evidence.
+Euboulia borrows a few mechanisms from agent and experiment systems, but it does not
+embed their runtimes. Its source of truth is its own typed configuration, events,
+artifacts, and verdicts.
 
-| Project | Mechanism adopted by Euboulia | Deliberate boundary |
+## Principles used today
+
+| Principle | Influence | Euboulia boundary |
 | --- | --- | --- |
-| [OpenHands](https://docs.openhands.dev/sdk/arch/conversation) | Immutable events, an append-only event log, resumable projections, and an isolated workspace abstraction | No unrestricted shell ACI and no dependency on the OpenHands runtime |
-| [SWE-agent](https://github.com/SWE-agent/SWE-agent/blob/main/docs/usage/trajectories.md) | Replayable action/observation trajectories, bounded tool output, timeouts, and explicit failure retention | Performance agents receive domain actions, not a general terminal |
-| [Aider](https://aider.chat/docs/usage/modes.html) | Separate the hypothesis-producing architect from the patch materializer; run lint and tests immediately after an edit | Patches use exact application; there is no fuzzy edit fallback or automatic commit |
-| [Optuna](https://optuna.readthedocs.io/en/stable/tutorial/20_recipes/009_ask_and_tell.html) | Trial states, ask/tell-shaped search policies, hard budgets, duplicate rejection, and fail-fast pruning | Optuna may become an adapter, but it is not the audit log or scheduler |
-| [MLflow](https://mlflow.org/docs/latest/ml/tracking/) | Separate small run metadata and metrics from large content-addressed artifacts; model parent run and child trials | Tracking is a one-way projection and cannot decide or block a trial |
-| [LangGraph](https://docs.langchain.com/oss/python/langgraph/persistence) | Checkpoint-oriented thinking, deterministic replay, and explicit pause/resume boundaries | The first runtime uses a small explicit state machine instead of adding LangGraph |
-| [InferenceX](https://github.com/SemiAnalysisAI/InferenceX) | A shared serving benchmark driver, fixed workload identity, fail-closed request accounting, and a separate semantic-eval path | Euboulia keeps local process ownership and per-candidate gates; it does not import InferenceX's CI matrix, deployment assumptions, or model-specific eval policy |
+| Append-only action/observation history | [OpenHands](https://docs.openhands.dev/sdk/arch/conversation), [SWE-agent](https://github.com/SWE-agent/SWE-agent/blob/main/docs/usage/trajectories.md) | Typed optimization events and retained failures; no unrestricted agent shell |
+| Separate hypothesis from materialization | [Aider](https://aider.chat/docs/usage/modes.html) | The planner selects a reviewed change; the workspace independently validates and applies it |
+| Explicit trial state and budgets | [Optuna](https://optuna.readthedocs.io/en/stable/tutorial/20_recipes/009_ask_and_tell.html) | Bounded iterations, failures, wall time, duplicate rejection, and accepted/rejected outcomes |
+| Metadata separate from large artifacts | [MLflow](https://mlflow.org/docs/latest/ml/tracking/) | Events contain identifiers and digests; traces, patches, logs, and raw results remain files |
+| Pause at capability boundaries | [LangGraph](https://docs.langchain.com/oss/python/langgraph/persistence) | A small explicit state machine pauses for missing authority; crash-safe resume is not yet claimed |
+| Fixed workload identity and fail-closed accounting | [InferenceX](https://github.com/SemiAnalysisAI/InferenceX) | Shared SGLang harnesses, complete-request validation, separate correctness, and unprofiled promotion evidence |
 
-## Components, not branding
+These are implementation choices, not branding. OpenHands, SWE-agent, Aider,
+Optuna, MLflow, LangGraph, and InferenceX are not runtime dependencies.
 
-The resulting loop is:
+## Why a small state machine
+
+The target workflow has two finite state machines:
 
 ```text
-imported profile
-      |
-      v
-Profiler -> Analyzer -> HypothesisPlanner -> approval
-                                           |
-                                           v
-                              Reviewed ChangeWorkspace
-                                           |
-                                           v
-                      RuntimeProvenance -> TargetController
-                                           |
-                                           v
-                 correctness once -> unprofiled point matrix
-                                           |
-                                           v
-                             EventLedger + Memory index
-                                           |
-                                           +---- next iteration
+outer: run -> NSYS -> attribute -> choose ROI -> integrate -> A/B -> champion -> run
+inner: define + shapes -> generate -> compile -> correct -> microbench -> NCU -> revise
 ```
 
-Each arrow crosses a typed protocol. This makes the built-in rule components
-replaceable without changing the state machine. A later LLM planner, Optuna
-search policy, MLflow sink, container workspace, or remote GPU evaluator can be
-added as an adapter.
+An explicit state machine makes authorization, failure, and teardown behavior easy to
+test. General agent orchestration becomes useful only when Euboulia adds competing
+planners, remote workers, resumable long-running trials, or richer human interaction.
+Adding a framework before those needs would obscure the experiment contract.
 
-## Why the event log is separate
+## Why events and memory are separate
 
-The existing experiment ledger contains only benchmark `Experiment` snapshots.
-Optimization events use a separate append-only log so old recipe readers stay
-compatible. An event contains IDs and small JSON data; trace files, patches,
-stdout, and benchmark output remain artifacts referenced by path, size, and
-SHA-256 digest.
+The event ledger is the append-only trajectory: what was attempted, in which state,
+with which evidence. SQLite memory is a derived projection optimized for questions
+such as “has this change already failed for the same scenario?” It can be rebuilt and
+must never replace the event/artifact record.
 
-Memory is a derived SQLite index over completed iterations. It stores both
-positive and negative outcomes and can be rebuilt from evidence. It is useful for
-deduplicating proposals and recalling relevant results, but it never replaces the
-event log as the audit record.
+This separation supports both measured feedback loops:
 
-## Safety and evidence rules
+- evidence updates future hypothesis selection;
+- positive and negative results both matter;
+- duplicates can be rejected; and
+- no result silently rewrites history.
 
-1. Profile captures diagnose a candidate but are ineligible for promotion.
-2. A reviewed change is still untrusted input. Structured arguments are validated;
-   a patch must pass path, symlink, size, file-count, line-count, base-revision,
-   and exact-apply checks.
-3. Managed baseline and candidate trials use separate detached Git worktrees at
-   the same pinned revision; the user's branch is never edited or automatically
-   committed.
-4. Checks are fail-fast and ordered from cheap to expensive: preflight and
-   correctness once per fresh service, then an unprofiled benchmark for every
-   declared workload point.
-5. The reference baseline is immutable. An accepted candidate becomes the
-   current champion, and the next candidate is compared with that champion.
-6. Planning, workspace writes, evaluator commands, owned service lifecycle,
-   optional builds, and any external model call are separate capabilities.
-   Configuration may request a capability but cannot authorize itself.
+The inner loop improves kernel candidates from compiler/test/performance feedback;
+the outer loop re-profiles each champion and changes the next optimization target.
+Memory makes both loops more efficient, but it is not a substitute for either
+measurement cycle and is not model-weight training.
 
-## Why benchmark and semantic accuracy are separate
+## What should remain domain-specific
 
-InferenceX centralizes serving measurement instead of maintaining a benchmark
-script per model, while lm-eval tasks and thresholds live on a separate path.
-Euboulia adopts that separation. Its built-in SGLang performance harness consumes
-the framework-neutral workload contract, verifies complete request accounting,
-and aggregates repeated measurements. Its built-in correctness command is only a
-fast endpoint/output-shape smoke check.
+Euboulia's value lies in inference knowledge, not generic tool calling. The following
+should stay first-class concepts even if their implementations later become plugins:
 
-Semantic accuracy is intentionally not inferred from that smoke response. Model
-task selection, answer extraction, tokenizer/chat-template behavior, and score
-thresholds are versioned evaluation policy. In the MVP they remain an external
-reviewed command. A later accuracy component can reuse lm-eval-style tasks, but it
-must have an explicit onboarding or champion-promotion state rather than forcing
-the same expensive suite into every mechanically equivalent candidate trial.
+- SGLang runtime and workload identity;
+- attention, MoE, speculative-decoding, communication, and kernel bottlenecks;
+- operator semantics and real serving-shape distributions;
+- compile, numerical-correctness, microbenchmark, and NCU feedback as one inner loop;
+- profile-versus-promotion evidence separation;
+- isolated baseline/candidate lifecycle;
+- point-aware performance and correctness gates; and
+- exact ownership of GPU service processes.
 
-## Deferred integrations
-
-The MVP owns a narrowly scoped local SGLang lifecycle: fresh baseline and
-candidate children are built, started, checked, evaluated, and finally stopped.
-It does not adopt an existing SGLang process and does not manage vLLM. Managed
-vLLM, interleaved GPU scheduling, statistical pruning, container/remote
-workspaces, Optuna policies, and MLflow tracking remain later integrations.
+Future LLM planners, search policies, tracking sinks, and remote workers should adapt
+to these contracts rather than replace them.

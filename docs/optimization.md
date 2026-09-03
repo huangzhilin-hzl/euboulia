@@ -1,75 +1,158 @@
-# Iterative optimization runtime
+# SGLang optimization runtime
 
-The schema-v2/v3 runtime turns imported profiler evidence and a reviewed change
-catalog into bounded experiments. It is an evidence loop, not a Cookbook parser,
-a deployment controller, or an unrestricted coding agent.
+The target runtime closes two loops: an outer SGLang end-to-end optimization loop and
+an inner hot-operator optimization loop. The current implementation already provides
+much of the outer experiment foundation; the inner CUDA/Triton loop is the main build
+target, not an optional extension.
 
-## MVP boundary
+Use schema v3 for new work. Schema v2 is compatibility input, and schema v1 belongs
+to the older benchmark-only flow.
 
-The operator owns recipe interpretation. If a Cookbook, tuning guide, incident
-note, or upstream recommendation motivates an experiment, the operator converts
-it into two reviewed inputs before Euboulia sees it:
+## Primary workflow
 
-1. an optional `target` declaration describing one locally owned SGLang process;
-2. a change-catalog entry containing structured server arguments, an exact patch,
-   or both.
+### Outer loop: SGLang end to end
 
-Euboulia validates and executes those declarations. It does not scrape a
-Cookbook, infer hidden setup steps, translate prose into commands, or generate a
-free-form patch. This boundary makes the executable input small enough to review
-and hash.
+1. Start the current champion under a pinned runtime contract.
+2. Execute the declared workload suite.
+3. Capture NSYS evidence and attribute time to SGLang stages and operator kernels.
+4. Select the hotspot with the highest expected end-to-end ROI.
+5. Construct and run the inner operator loop.
+6. Integrate the best valid operator candidate back into an isolated SGLang tree.
+7. Run an unprofiled, fixed-scenario baseline/candidate comparison.
+8. Promote the winner to champion and profile that champion again.
 
-Managed lifecycle is **SGLang-first** in the MVP. A `target` block with
-`provider: vllm` is not supported and must not be described as managed. vLLM
-remains supported by the existing externally managed service paths.
+The last step is mandatory: once a hotspot becomes faster, the dominant bottleneck
+may move elsewhere.
 
-## Two execution modes
+### Inner loop: hot operator
 
-The top-level `target` block is optional and selects the lifecycle boundary:
+1. Extract the operator definition, reference implementation, real serving shapes,
+   dtypes/layouts, target GPU, numerical tolerance, and objective.
+2. Generate or revise a CUDA/Triton implementation in an isolated workspace.
+3. Compile it and feed build failures back into the next revision.
+4. Compare numerical output against the reference over required shapes and edge cases.
+5. Microbenchmark valid candidates over the observed shape distribution.
+6. Run NCU on useful candidates, diagnose stalls, occupancy, memory traffic, and
+   instruction mix, then revise again.
+7. Return only the best correct candidate to the outer integration step.
 
-| Configuration | Service ownership | Allowed reviewed change | Baseline |
-| --- | --- | --- | --- |
-| `target` absent | An already-running external service; Euboulia never starts, signals, or stops it | Patch-only, evaluated by finite commands in a detached candidate worktree | v2 scalar `evaluation.baseline_value` or v3 `baseline.metric_values` keyed by workload point |
-| `target.provider: sglang` | Fresh local processes created and owned by this run | Args-only, patch-only, or composite | Rebuilt and remeasured from the pinned baseline worktree |
+Microbenchmark improvement is necessary but insufficient. SGLang end-to-end A/B is
+the promotion truth because launch overhead, fusion, scheduling, communication, and
+shape frequency can erase an isolated kernel win.
 
-Leaving out `target` is a compatibility feature, not permission to discover or
-take over a process at the declared `endpoint`. Evaluation commands may send requests
-to that endpoint, but the service must already be ready and remains untouched.
+## Required inputs
 
-## The loop
+A runnable outer optimization needs:
+
+1. **Scenario contract:** model/runtime identity, endpoint, workload points, metrics,
+   repetitions, and promotion policy.
+2. **Profile evidence:** PyTorch Chrome, Nsight Systems CSV, or Nsight Compute CSV
+   exported from the relevant workload.
+3. **Pinned source:** an SGLang repository and baseline Git revision.
+4. **Change input:** currently a reviewed catalog entry; eventually the validated
+   output of the operator loop.
+
+The operator loop additionally needs:
+
+- an executable reference implementation and numerical contract;
+- real shapes and their workload frequency, not only synthetic square shapes;
+- compiler/toolchain and target-GPU identity;
+- correctness cases and tolerance policy; and
+- microbenchmark and NCU measurement rules.
+
+Euboulia currently does not extract that kernel task or generate the implementation.
+The reviewed catalog is a safe bootstrap for exercising the outer loop while those
+inner-loop capabilities are built.
+
+## Current executable slice
 
 ```text
-Imported profile -> Analyze -> Plan reviewed change -> Approve
-       ^                                             |
-       |                                             v
-       +--- Event ledger + Memory <- Gate <- Isolated trial pair
+import existing profile -> rule-ranked finding -> reviewed catalog change
+  -> authorization -> isolated baseline/candidate trial -> suite gate -> memory
 ```
 
-1. **Profile** imports declared PyTorch Chrome, Nsight Systems, or Nsight
-   Compute exports. It does not call a server profiling endpoint.
-2. **Analyze** normalizes activities and applies conservative bottleneck rules.
-   Every finding includes confidence, evidence, and caveats.
-3. **Plan** maps a finding to a pre-reviewed change-catalog entry.
-4. **Approve** is a hard boundary. Configuration requests side effects but never
-   authorizes them.
-5. **Materialize** creates isolated worktrees at the exact pinned revision and
-   applies only the selected structured change.
-6. **Evaluate** runs correctness once for the fresh service, then unprofiled
-   performance for every workload point, and fails closed on missing, invalid, or
-   non-finite evidence.
-7. **Remember** appends canonical events and indexes accepted, rejected, invalid,
-   and failed outcomes in rebuildable SQLite memory.
+- Profile data is diagnostic and can select a hypothesis.
+- Baseline and candidate performance is measured without profiling.
+- Every failure and rejection is retained; the planner can use that memory to avoid
+  repeating the same change in the same context.
+- Active NSYS capture, real-shape extraction, kernel generation/repair, and automatic
+  champion re-profile are not yet connected.
 
-Profile-derived timing is permanently diagnostic-only. It can select a
-hypothesis, but it cannot promote one.
+## Inspect before execution
 
-## Reviewed change catalog
+The checked-in SGLang example is illustrative. Replace its model paths, revisions,
+runtime identity, source repository, launch arguments, and workload before an active
+run.
 
-Despite the historical `patch_catalog` configuration field name, a catalog entry
-is a reviewed **change**, with one of three shapes:
+```console
+uv run euboulia optimize plan \
+  --recipe examples/optimization-sglang.yaml
+```
+
+`optimize plan` imports and analyzes the declared profile, proposes a catalog entry,
+and prints the plan. It creates no worktree and starts no process.
+
+Running without all required permissions records the deliberation and pauses at the
+capability boundary:
+
+```console
+uv run euboulia optimize run --recipe your-scenario.yaml
+```
+
+## Execute a managed SGLang trial
+
+```console
+uv run euboulia optimize run \
+  --recipe your-scenario.yaml \
+  --apply-patches \
+  --run-builds \
+  --manage-services \
+  --run-evaluations
+```
+
+Permissions are independent:
+
+| Flag | Permits |
+| --- | --- |
+| `--apply-patches` | Create isolated worktrees and materialize the selected reviewed change |
+| `--run-builds` | Run only the finite argv commands declared in `target.build` |
+| `--manage-services` | Start, readiness-check, and stop only SGLang processes created by this run |
+| `--run-evaluations` | Run the declared finite correctness and benchmark commands |
+
+Omit `--run-builds` only when the recipe has no build commands. None of these flags
+permits an edit to the user's branch, adoption of an existing service, commit, push,
+or deployment.
+
+## Schema v3 structure
+
+| Section | Purpose |
+| --- | --- |
+| `models` | Target and optional draft model identities, paths, revisions, and manifests |
+| `endpoint` | Loopback endpoint used by the managed target and evaluator |
+| `workload_suite` | Dataset/request-rate policy and named ISL/OSL/concurrency points |
+| `benchmark` | Benchmark mode and typed parameters |
+| `baseline` | Baseline identity, pinned SGLang revision, and declared target parameters |
+| `target` | SGLang build, launch environment/argv, GPUs, readiness, runtime, and serving identity |
+| `optimization.profiles` | Imported profile artifacts and formats |
+| `optimization.planner` | Reviewed catalog and proposal/deduplication policy |
+| `optimization.workspace` | Repository, detached-worktree root, and patch limits |
+| `optimization.evaluation` | Correctness/performance commands, objective, repetitions, and suite gates |
+| `optimization.budget` | Iteration, wall-time, failure, patience, and profile-size limits |
+| `execution` | Artifact directory, event ledger, experiment ledger, and memory database |
+
+Paths are resolved relative to the recipe. Commands are argv arrays, never shell
+strings. Environment changes are explicit key/value mappings.
+
+See [examples/optimization-sglang.yaml](../examples/optimization-sglang.yaml) for a
+complete shape.
+
+## Bootstrap change catalog
+
+Until the operator loop emits validated candidates, one catalog entry represents one
+pre-reviewed hypothesis. The supported forms are:
 
 ```yaml
-# Args-only
+# Server arguments only
 server_args:
   set:
     "--chunked-prefill-size": 4096
@@ -77,244 +160,144 @@ server_args:
 ```
 
 ```yaml
-# Patch-only
-patch: ../patches/reviewed-change.diff
+# Source patch only
+patch: ../patches/reviewed-kernel-change.diff
 ```
 
 ```yaml
-# Composite: one atomic hypothesis
-patch: ../patches/reviewed-change.diff
+# Atomic source + configuration hypothesis
+patch: ../patches/reviewed-kernel-change.diff
 server_args:
   set:
     "--mem-fraction-static": 0.82
   remove: []
 ```
 
-Server option names must be canonical `--kebab-case` tokens. A value is a string,
-finite number, or `null` for a valueless switch; disabling an option uses the
-explicit `remove` list. The runner never turns these mappings into a shell string.
-A composite change is accepted or rejected as a whole, so its evidence cannot be
-misattributed to only the patch or only the argument.
+Argument names must be canonical long options. Valueless switches use `null`, while
+disabled options belong in `remove`. Composite changes receive one verdict; their
+effect cannot be attributed to only half of the change.
 
-See the checked-in
-[SGLang configuration](../examples/optimization-sglang.yaml) and
-[change catalog](../examples/catalogs/sglang-changes.yaml). They are safe to use
-with `optimize plan`; their repository, revisions, local model, patches, and
-build/launch commands are illustrative and must be replaced before active
-execution. The SGLang correctness and performance commands are reusable built-in
-harnesses rather than per-model scripts.
+The workspace validates the base revision, patch bytes, paths, file modes, symlink
+traversal, changed-file/line budgets, and exact `git apply --check` result before
+writing to the detached candidate tree.
 
-## Shared SGLang evaluation harnesses
+## Managed trial semantics
 
-The runner translates the declared model, workload suite, evaluation tier, and active target
-handle into a stable environment contract for every evaluator command:
+For every iteration:
 
-| Environment input | Source |
-| --- | --- |
-| `EUBOULIA_TARGET_ENDPOINT`, `EUBOULIA_MODEL`, `EUBOULIA_MODEL_SERVED_NAME` | Active service handle and `models.target` |
-| `EUBOULIA_WORKLOAD_NAME`, `EUBOULIA_WORKLOAD_POINT_ID` | Suite and current point identity |
-| `EUBOULIA_INPUT_TOKENS`, `EUBOULIA_OUTPUT_TOKENS` | Current point shape |
-| `EUBOULIA_CONCURRENCY`, `EUBOULIA_NUM_PROMPTS`, `EUBOULIA_REQUEST_RATE`, `EUBOULIA_DATASET` | Current point and suite load policy |
-| `EUBOULIA_WARMUPS`, `EUBOULIA_REPETITIONS` | Current evaluation tier |
-| `EUBOULIA_METRICS_PATH` | Declared evaluator result path |
+1. Create a baseline worktree at `baseline.source_revision`.
+2. Build it when `target.build.commands` is present.
+3. Start a fresh SGLang process and wait for the declared loopback readiness URL.
+4. Run correctness once and evaluate every workload point.
+5. Stop the owned baseline process.
+6. Create a second worktree at the same revision and apply the selected change.
+7. Build, start, evaluate, and stop the candidate independently.
+8. Apply per-point and suite gates, record the verdict, and update memory.
 
-`python -m euboulia.harnesses.sglang.correctness` performs a cheap deterministic
-request against either SGLang's native `/generate` API or its OpenAI-compatible
-chat API. It is deliberately a per-trial smoke gate: it detects launch, routing,
-response-shape, and empty-output failures before an expensive measurement. It is
-not a semantic accuracy claim.
+Changing ISL, OSL, or concurrency does not restart the service; workload points share
+the same fresh process for that side of the trial. A later iteration receives new
+baseline and candidate processes.
 
-`python -m euboulia.harnesses.sglang.benchmark` runs the upstream
-`sglang.benchmark.serving` client with a random fixed-length workload,
-`request-rate=inf`, bounded concurrency, deterministic sampling, and cache flush.
-It discards the configured number of complete warmup runs, validates that every
-request completed in every sample, and writes the median of common finite numeric
-metrics across measured repetitions. Missing requests, invalid throughput,
-non-zero client exit, or malformed JSON fail the trial closed.
+Any readiness, build, command, parsing, or teardown failure invalidates the trial.
+The runner still attempts exact owned-process teardown in `finally`.
 
-This split follows the useful part of InferenceX's design: one shared benchmark
-driver and a separate correctness/eval path, rather than copying both into every
-model recipe. Full semantic accuracy remains a declared external evaluator in
-the MVP. It should be run when onboarding a model/framework/quantization path and
-again for a promoted candidate when the change can affect numerics; the cheap
-smoke gate still runs for every baseline and candidate. A champion-only accuracy
-tier and task thresholds require an explicit evaluator state transition and are
-deferred instead of being disguised as the current correctness tier.
+## Evaluation contract
 
-## Managed SGLang trial pair
+The runner supplies evaluator commands with explicit environment values for:
 
-For each managed trial, baseline and candidate are independent materializations
-of `baseline.source_revision`. They are never two launches from one dirty source
-tree and never two measurements from one long-lived server:
+- active endpoint and model/served name;
+- suite and point identity;
+- input/output tokens, concurrency, prompt count, dataset, and request rate;
+- warmup and repetition counts; and
+- metrics output path.
+
+The built-in SGLang correctness harness checks routing, response shape, and non-empty
+output. This is a smoke check, not semantic accuracy. Scenario-specific commands may
+run task evaluation such as GSM8K when a model, quantization path, or
+numerics-affecting kernel changes; the runtime does not yet provide a generic
+champion-only accuracy state.
+
+The performance harness runs repeated samples, validates complete requests and
+finite metrics, and emits normalized results for the gate. Dataset-specific harness
+rules may additionally enforce exact lengths, cache state, or evidence snapshots.
+
+## Promotion policy
+
+A credible suite declares:
+
+- one objective metric and whether it is minimized or maximized;
+- primary workload points;
+- minimum improvement on primary points;
+- maximum allowed regression on other points;
+- noise tolerance; and
+- whether every declared point must produce valid evidence.
+
+Profile measurements are always gate-ineligible. Baseline and candidate must keep
+the model, prompts, hardware, runtime identity, request policy, and measurement rules
+fixed unless one of those is the variable under test.
+
+## Runtime provenance
+
+`target.runtime.expected` can pin the image and components such as Python, SGLang,
+Torch, CUDA, NCCL, Triton, FlashInfer, DeepGEMM, DeepEP, and `sgl-kernel`. The runner
+captures observable state before launch and can fail on a mismatch.
+
+Some values, such as a container digest, may be declared but unobservable from a
+local process. `capture.require_observed` decides whether that absence is fatal;
+Euboulia never labels an unobserved value as verified.
+
+`target.serving` separately records backend and speculative-decoding identity so a
+launch cannot silently drift from the scenario declaration.
+
+## Evidence and inspection
 
 ```text
-baseline worktree (pinned revision)
-  -> optional reviewed build
-  -> start owned SGLang process
-  -> wait for declared loopback readiness URL
-  -> correctness once -> measure every baseline workload point
-  -> finally stop owned process
+<artifacts>/
+├── events.jsonl
+├── memory.sqlite3
+└── <run-id>/
+    └── evaluations/<trial-id>/
 
-candidate worktree (same pinned revision)
-  -> apply args-only / patch-only / composite change
-  -> optional reviewed build
-  -> start a new owned SGLang process
-  -> wait for declared loopback readiness URL
-  -> correctness once -> unprofiled performance for every workload point
-  -> finally stop owned process
-
-paired point metrics -> suite gate -> evidence and memory
+<workspace-root>/<run-id>/<iteration-id>/
+├── baseline/{worktree,evidence}/
+└── candidate/{worktree,evidence}/
 ```
 
-The baseline must be stopped successfully before the candidate is launched. A
-readiness timeout, early process exit, command failure, parse failure, gate
-failure, interruption, or exception still enters teardown through `finally`.
-Failure to stop an owned process is fail-closed and can never update the champion.
-Every managed iteration receives fresh baseline and candidate processes; target
-handles are never reused across roles or iterations. Tier `warmups` and
-`repetitions` are consumed by the shared benchmark harness as discarded full runs
-and measured full runs for each point against the current process. The runner
-stores each metrics file under a point-specific path; it never starts a new service
-merely to change ISL/OSL/concurrency. Runner-level repeated or
-interleaved process pairs remain follow-on work rather than an implied behavior.
-
-When `target.build.commands` is present, the same declared argv build sequence is
-run separately in each pinned worktree. With no `build` block, the build phase is
-a no-op; source isolation and fresh process ownership still apply.
-
-## Capabilities and CLI
-
-`optimize plan` remains zero-write and zero-process. `optimize run` records its
-deliberation and pauses at `waiting_for_approval` before the first undeclared side
-effect. Capabilities do not imply one another:
-
-| Capability | CLI flag | Required when | Permits | Does not permit |
-| --- | --- | --- | --- | --- |
-| `workspace_write` | `--apply-patches` | Every active optimization trial | Create isolated worktrees and materialize the reviewed change | User-branch edits, commit, push, deployment |
-| `benchmark_execution` | `--run-evaluations` | Every active optimization trial | Run declared finite correctness and benchmark argv | Service ownership, profiler control, shell strings |
-| `owned_service_lifecycle` | `--manage-services` | `target` is present | Start, readiness-check, and stop only services created by this run | Discovering, adopting, restarting, or killing an external process |
-| `build_execution` | `--run-builds` | `target.build.commands` is non-empty | Run the declared finite build argv in pinned worktrees | Arbitrary shell, package publishing, host cleanup |
-
-An external-service patch-only run therefore uses:
+Inspect events with:
 
 ```console
-euboulia optimize run \
-  --recipe external-service.yaml \
-  --apply-patches \
-  --run-evaluations
+uv run euboulia optimize events \
+  --events <artifacts>/events.jsonl
 ```
 
-A managed SGLang run without build commands additionally uses
-`--manage-services`. A managed configuration such as the checked-in example,
-which declares build commands, requires all four flags:
+The event log and linked artifacts are the audit source. SQLite is a rebuildable
+query index. Failed worktrees are retained for inspection and require a separate,
+operator-controlled cleanup action.
 
-```console
-euboulia optimize run \
-  --recipe examples/optimization-sglang.yaml \
-  --apply-patches \
-  --run-evaluations \
-  --manage-services \
-  --run-builds
-```
+## External-service compatibility
 
-These flags authorize only the reviewed plan for that run. A YAML field, detected
-GPU, reachable port, or prior authorization cannot silently grant a capability.
+When `target` is absent, Euboulia can evaluate reviewed patch-only changes against an
+already-running service. It may send requests to the configured endpoint but never
+discovers, starts, restarts, signals, or stops that service. This path supports older
+SGLang/vLLM workflows; new engine optimization work should prefer managed SGLang.
 
-## Exact configuration shape
+## Gap to the primary workflow
 
-`schema_version: 3` contains the following groups:
+- NSYS/NCU artifacts are imported rather than captured at the correct loop stage.
+- ROI selection does not yet combine end-to-end contribution, call frequency,
+  optimization headroom, and implementation cost.
+- A hotspot is not yet converted into a kernel task with reference semantics and
+  real serving shapes.
+- CUDA/Triton generation is not connected to compile-error repair, numerical
+  correctness, microbenchmark, and NCU-guided iteration.
+- Validated kernels are not automatically integrated into SGLang, and a promoted
+  champion is not automatically re-profiled to select the next hotspot.
+- Scenario-specific accuracy harnesses exist, but semantic accuracy lacks a generic
+  champion-only state.
+- Trial scheduling is local and sequential; remote workers, interleaved pairs,
+  confidence intervals, and crash-safe resume remain future work.
+- Euboulia ends at evidence and a recommendation. Merge, rollout, and production
+  observation belong to separate systems.
 
-- `models`: the target model plus optional external draft artifacts, each with a
-  stable ID, path, served name, revision, and optional weights-manifest digest;
-- `endpoint`: benchmark base URL, separate from model and workload identity;
-- `workload_suite`: dataset/request-rate policy and one or more explicitly named
-  ISL/OSL/concurrency/prompt-count points;
-- `benchmark`: benchmark mode, base argv inputs, result filename, and typed
-  parameters;
-- `baseline`: candidate identity, pinned Git revision, and baseline target
-  arguments;
-- optional top-level `target`: SGLang launch argv/environment, loopback readiness
-  URL and polling bounds, GPU IDs, shutdown timeout, optional build argv, typed
-  runtime provenance, backend selections, and speculative-decoding declaration;
-- `optimization.profiles`: explicit imported artifacts and formats;
-- `optimization.planner`: reviewed catalog path, proposal limit, and duplicate
-  policy;
-- `optimization.workspace`: source repository, external worktree root, timeouts,
-  and patch byte/file/line limits;
-- `optimization.evaluation`: objective, direction, metrics path, ordered
-  correctness/performance tiers, warmups, repetitions, primary workload points,
-  and per-point promotion/regression thresholds;
-- `optimization.budget`: iteration, elapsed-time, failure, patience, and imported
-  profile-size limits; and
-- `execution`: artifact directory, event ledger, experiment ledger, and memory
-  index, all resolved relative to the configuration file.
-
-Schema v2 remains accepted and is normalized internally into one target model and
-one workload point. New configurations should use v3 because it makes model,
-workload, runtime, and serving identity independently auditable.
-
-### Runtime and speculative identity
-
-`target.runtime.expected` records the container image/digest and component
-versions or revisions for Python, SGLang, Torch, CUDA, NCCL, Triton, FlashInfer,
-DeepGEMM, DeepEP, `sgl-kernel`, or other named dependencies. Before a managed
-baseline starts, Euboulia writes `runtime-provenance.json`, compares fields it can
-observe, and fails before launch on an observed mismatch when
-`capture.fail_on_mismatch` is enabled. A container digest is declared-only in the
-local MVP unless the execution environment can expose it; `require_observed`
-controls whether an unobservable field is itself fatal.
-
-`target.serving.speculative` distinguishes an embedded draft (`model_ref` points
-to `models.target`) from an external draft (`model_ref` points to
-`models.drafts`). For an enabled external algorithm, the referenced draft path
-must also occur in the exact launch argv. With `algorithm: "off"`, any
-`--speculative-*` launch flag is rejected as declaration drift.
-
-All commands are YAML argv arrays with explicit environment deltas. Shell command
-strings, pipes, redirections, command substitution, and implicit interactive
-setup are outside the schema.
-
-## Evidence and state
-
-The event ledger records runtime provenance, target materialization, argument application, worktree
-preparation, patch application, build, service start/readiness/stop, evaluation,
-verdict, champion update, and memory recording. Events identify baseline versus
-candidate and link to artifacts without storing secret environment values.
-
-The managed state path makes baseline and candidate teardown visible. It does not
-consider an evaluation complete until the corresponding owned process has been
-stopped. `memory.sqlite3` remains a derived query index; the append-only event and
-artifact records are the audit source of truth.
-
-## Process and filesystem invariants
-
-- Launch, build, correctness, and benchmark commands use structured argv with
-  `shell=False` semantics.
-- A target controller records the exact child/process-group identity it created.
-  It may signal that owned identity only.
-- Port scans, `pgrep`, `pkill`, name-based process matching, PID-file adoption,
-  and killing a process merely because it listens on the configured port are
-  forbidden.
-- Baseline and candidate worktrees begin at the same pinned commit. Patches never
-  touch the operator's branch and remain subject to path, size, mode, symlink,
-  changed-file, and changed-line checks.
-- Failed worktrees and evidence are retained for review; cleanup is a separate
-  operator action.
-
-## Current limits
-
-The MVP does not:
-
-- convert SGLang Cookbook material into target or change declarations;
-- manage a vLLM service;
-- provide a built-in semantic accuracy suite or champion-only accuracy gate;
-- generate or repair free-form patches with an LLM;
-- take over an already-running SGLang process;
-- resume an interrupted side effect from the event log;
-- use containers or remote GPU workers;
-- establish statistical confidence from an underpowered recipe/run; or
-- deploy, commit, push, promote, or clean retained worktrees.
-
-See [Safety](safety.md) for the authorization and ownership model and
-[Design inspirations](design-inspirations.md) for the mechanisms that informed
-the loop.
+See [Architecture](architecture.md) for component contracts and [Safety](safety.md)
+for the execution boundary.
