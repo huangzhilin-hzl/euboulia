@@ -44,6 +44,7 @@ def _plan(
     correctness: tuple[CommandSpec, ...] = (_SUCCESS,),
     benchmark: CommandSpec | None = None,
     objective: ObjectiveSpec | None = None,
+    accuracy: tuple[CommandSpec, ...] = (),
     profiler_trial: bool = False,
     trial_id: str = "trial-1",
 ) -> EvaluationPlan:
@@ -63,6 +64,7 @@ def _plan(
         correctness=correctness,
         benchmark=BenchmarkSpec(benchmark_command, Path("metrics.json")),
         objective=objective_spec,
+        accuracy=accuracy,
         profiler_trial=profiler_trial,
     )
 
@@ -88,6 +90,24 @@ def test_evaluator_runs_tiers_in_order_and_promotes_passing_candidate(tmp_path: 
     assert all(
         execution.stdout_path.is_file() for stage in result.stages for execution in stage.executions
     )
+
+
+def test_evaluator_runs_accuracy_after_benchmark(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    evaluator = TieredEvaluator(tmp_path / "artifacts")
+
+    result = evaluator.execute(
+        evaluator.authorize(_plan(workspace, accuracy=(_SUCCESS,)), approved=True)
+    )
+
+    assert result.outcome is EvaluationOutcome.PASSED
+    assert [stage.stage for stage in result.stages] == [
+        EvaluationStage.PREFLIGHT,
+        EvaluationStage.CORRECTNESS,
+        EvaluationStage.BENCHMARK,
+        EvaluationStage.ACCURACY,
+    ]
 
 
 def test_authorization_is_explicit_single_use_and_binds_plan(tmp_path: Path) -> None:

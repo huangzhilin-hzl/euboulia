@@ -1,0 +1,16 @@
+schema_version: 1
+entries:
+  - id: enforce-shared-experts-fusion
+    title: Force DS-V4 shared-experts fusion
+    rationale: >-
+      Once the baseline contract is valid, test the already identified shared-expert
+      path as one isolated server-argument hypothesis while keeping the full ShareGPT
+      matrix unchanged. DSPARK draft compatibility must be reviewed before execution.
+    triggers: [compute]
+    server_args:
+      set:
+        "--enforce-shared-experts-fusion": null
+      remove: []
+    predicted_metric: output_throughput
+    risk: high
+

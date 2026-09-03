@@ -14,11 +14,19 @@ from euboulia import __version__
 from euboulia.adapters import AdapterError
 from euboulia.doctor import required_checks_pass, run_doctor
 from euboulia.ledger import ExperimentLedger, LedgerCorruptionError
-from euboulia.optimization.config import OptimizationConfigError, load_optimization_config
+from euboulia.optimization.config import (
+    OptimizationConfigError,
+    OptimizationRecipeResolution,
+    dump_resolved_optimization_config,
+    load_optimization_config,
+    optimization_execution_lock_issues,
+    require_optimization_execution_lock,
+    resolve_optimization_config,
+)
 from euboulia.optimization.contracts import Capability, RunState
 from euboulia.optimization.evaluator import EvaluationError
 from euboulia.optimization.events import EventLedger, EventLedgerCorruptionError
-from euboulia.optimization.memory import MemoryConflictError, MemorySchemaError
+from euboulia.optimization.memory import MemoryConflictError
 from euboulia.optimization.planner import PatchCatalogError
 from euboulia.optimization.runner import OptimizationRunner, OptimizationRuntimeError
 from euboulia.optimization.target import TargetError
@@ -97,6 +105,7 @@ def build_parser() -> argparse.ArgumentParser:
         "plan", help="import profiles and propose reviewed changes without writing"
     )
     _add_recipe_argument(optimize_plan_parser)
+    _add_values_argument(optimize_plan_parser)
     optimize_plan_parser.add_argument(
         "--json", action="store_true", help="emit machine-readable JSON"
     )
@@ -106,6 +115,7 @@ def build_parser() -> argparse.ArgumentParser:
         "run", help="run until completion or an explicit capability boundary"
     )
     _add_recipe_argument(optimize_run_parser)
+    _add_values_argument(optimize_run_parser)
     optimize_run_parser.add_argument("--run-id", help="optional deterministic run identifier")
     optimize_run_parser.add_argument(
         "--apply-patches",
@@ -144,6 +154,40 @@ def build_parser() -> argparse.ArgumentParser:
         "--json", action="store_true", help="emit machine-readable JSON"
     )
     optimize_events_parser.set_defaults(handler=_optimize_events)
+
+    target_parser = subparsers.add_parser(
+        "target", help="validate one managed SGLang baseline without creating a candidate"
+    )
+    target_commands = target_parser.add_subparsers(dest="target_command", required=True)
+    target_resolve_parser = target_commands.add_parser(
+        "resolve", help="bind required inputs and write an executable lock recipe"
+    )
+    _add_recipe_argument(target_resolve_parser)
+    _add_values_argument(target_resolve_parser)
+    target_resolve_parser.add_argument("--output", required=True, type=Path)
+    target_resolve_parser.add_argument("--json", action="store_true")
+    target_resolve_parser.set_defaults(handler=_target_resolve)
+
+    target_plan_parser = target_commands.add_parser(
+        "plan", help="inspect the managed baseline validation boundary"
+    )
+    _add_recipe_argument(target_plan_parser)
+    _add_values_argument(target_plan_parser)
+    target_plan_parser.add_argument("--json", action="store_true")
+    target_plan_parser.set_defaults(handler=_target_plan)
+
+    target_run_parser = target_commands.add_parser(
+        "run", help="execute one managed baseline validation"
+    )
+    _add_recipe_argument(target_run_parser)
+    _add_values_argument(target_run_parser)
+    target_run_parser.add_argument("--run-id")
+    target_run_parser.add_argument("--prepare-workspace", action="store_true")
+    target_run_parser.add_argument("--run-evaluations", action="store_true")
+    target_run_parser.add_argument("--run-builds", action="store_true")
+    target_run_parser.add_argument("--manage-services", action="store_true")
+    target_run_parser.add_argument("--json", action="store_true")
+    target_run_parser.set_defaults(handler=_target_run)
     return parser
 
 
@@ -160,6 +204,14 @@ def _add_recipe_argument(parser: argparse.ArgumentParser) -> None:
         dest="recipe",
         type=Path,
         help=argparse.SUPPRESS,
+    )
+
+
+def _add_values_argument(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--values",
+        type=Path,
+        help="YAML mapping that binds declared recipe inputs",
     )
 
 
@@ -239,7 +291,13 @@ def _history(args: argparse.Namespace) -> int:
 
 
 def _optimize_plan(args: argparse.Namespace) -> int:
-    config = load_optimization_config(args.recipe)
+    resolution = resolve_optimization_config(
+        args.recipe, args.values, allow_unresolved=True
+    )
+    if resolution.config is None:
+        _print_unresolved_resolution(resolution, as_json=args.json)
+        return 0
+    config = resolution.config
     plan = OptimizationRunner().plan(config)
     if args.json:
         _print_json(plan.to_dict())
@@ -262,7 +320,7 @@ def _optimize_plan(args: argparse.Namespace) -> int:
 
 
 def _optimize_run(args: argparse.Namespace) -> int:
-    config = load_optimization_config(args.recipe)
+    config = load_optimization_config(args.recipe, args.values)
     authorizations: set[Capability] = set()
     if args.apply_patches:
         authorizations.add(Capability.WORKSPACE_WRITE)
@@ -281,6 +339,7 @@ def _optimize_run(args: argparse.Namespace) -> int:
         _print_json(result.to_dict())
     else:
         print(f"Optimization run: {result.run_id}")
+        print(f"Run UID: {result.run_uid}")
         print(f"State: {result.run_state.value}")
         print(f"Champion: {result.champion_id}")
         print(f"Outcomes: {len(result.outcomes)}")
@@ -320,6 +379,120 @@ def _optimize_events(args: argparse.Namespace) -> int:
             iteration = event.iteration_id or "-"
             print(f"{event.occurred_at}  {event.run_id}  {iteration}  {event.event_type.value}")
     return 0
+
+
+def _target_resolve(args: argparse.Namespace) -> int:
+    resolution = resolve_optimization_config(args.recipe, args.values)
+    config = resolution.config
+    if config is None:  # pragma: no cover - strict resolution raises first
+        raise AssertionError("target resolve did not produce a configuration")
+    if config.target is None:
+        raise OptimizationRuntimeError("target configuration is required for target resolve")
+    require_optimization_execution_lock(config)
+    output = args.output.expanduser().resolve()
+    if output.parent != resolution.source.parent:
+        raise OptimizationConfigError(
+            "target resolve output must be in the recipe directory so relative paths "
+            "retain their meaning"
+        )
+    if output.exists() or output.is_symlink():
+        raise FileExistsError(f"resolved recipe already exists: {output}")
+    output.write_text(dump_resolved_optimization_config(config), encoding="utf-8")
+    payload = {
+        "recipe": resolution.name,
+        "resolved": True,
+        "output": str(output),
+        "bound_inputs": sorted(resolution.bindings),
+    }
+    if args.json:
+        _print_json(payload)
+    else:
+        print(f"Resolved recipe: {resolution.name}")
+        print(f"Lock file: {output}")
+        print("Bound inputs: " + ", ".join(sorted(resolution.bindings)))
+    return 0
+
+
+def _target_plan(args: argparse.Namespace) -> int:
+    resolution = resolve_optimization_config(
+        args.recipe, args.values, allow_unresolved=True
+    )
+    if resolution.config is None:
+        _print_unresolved_resolution(resolution, as_json=args.json)
+        return 0
+    config = resolution.config
+    required = OptimizationRunner.baseline_validation_capabilities(config)
+    lock_issues = optimization_execution_lock_issues(config)
+    payload = {
+        "recipe": config.name,
+        "source_revision": config.baseline.source_revision,
+        "endpoint": config.endpoint,
+        "workload_points": len(config.workload_suite.points),
+        "required_capabilities": [capability.value for capability in required],
+        "launch_argv": list(config.target_launch_argv),
+        "resolved": True,
+        "bound_inputs": sorted(resolution.bindings),
+        "execution_ready": not lock_issues,
+        "execution_lock_issues": list(lock_issues),
+    }
+    if args.json:
+        _print_json(payload)
+    else:
+        print(f"Target validation: {config.name}")
+        print(f"Revision: {config.baseline.source_revision}")
+        print(f"Endpoint: {config.endpoint}")
+        print(f"Workload points: {len(config.workload_suite.points)}")
+        print(f"Execution ready: {'yes' if not lock_issues else 'no'}")
+        for issue in lock_issues:
+            print(f"Lock issue: {issue}")
+        print("Required capabilities: " + ", ".join(item.value for item in required))
+        print("\nRead-only plan. No worktree, build, service, or benchmark was created.")
+    return 0
+
+
+def _target_run(args: argparse.Namespace) -> int:
+    config = load_optimization_config(args.recipe, args.values)
+    authorizations: set[Capability] = set()
+    if args.prepare_workspace:
+        authorizations.add(Capability.WORKSPACE_WRITE)
+    if args.run_evaluations:
+        authorizations.add(Capability.BENCHMARK_EXECUTION)
+    if args.run_builds:
+        authorizations.add(Capability.BUILD_EXECUTION)
+    if args.manage_services:
+        authorizations.add(Capability.OWNED_SERVICE_LIFECYCLE)
+    result = OptimizationRunner().validate_baseline(
+        config,
+        frozenset(authorizations),
+        run_id=args.run_id,
+    )
+    if args.json:
+        _print_json(result.to_dict())
+    else:
+        print(f"Target validation: {result.run_id}")
+        print(f"Run UID: {result.run_uid}")
+        print(f"Outcome: {result.evaluation.outcome.value}")
+        print(f"Artifacts: {result.artifact_dir}")
+        print(f"Worktree: {result.workspace_path}")
+    return 0 if result.passed else 1
+
+
+def _print_unresolved_resolution(
+    resolution: OptimizationRecipeResolution,
+    *,
+    as_json: bool,
+) -> None:
+    payload = {
+        "recipe": resolution.name,
+        "resolved": False,
+        "missing_inputs": list(resolution.missing_inputs),
+    }
+    if as_json:
+        _print_json(payload)
+        return
+    print(f"Recipe template: {resolution.name}")
+    print("Missing required inputs: " + ", ".join(resolution.missing_inputs))
+    print("Provide --values or run 'euboulia target resolve' before execution.")
 
 
 def _print_plan(name: str, plans: Sequence[Any]) -> None:
@@ -371,7 +544,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         FileExistsError,
         LedgerCorruptionError,
         MemoryConflictError,
-        MemorySchemaError,
         OSError,
         OptimizationConfigError,
         OptimizationRuntimeError,

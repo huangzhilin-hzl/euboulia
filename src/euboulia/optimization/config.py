@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import math
 import re
 from collections.abc import Mapping
@@ -9,15 +10,27 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from ipaddress import ip_address
 from pathlib import Path
+from typing import cast
 from urllib.parse import urlsplit
 
 import yaml
 
-from euboulia.models import Framework, JSONValue
+from euboulia.models import Framework, JSONScalar, JSONValue
 from euboulia.optimization.contracts import EvaluationTierKind, _json_mapping
 
 _SAFE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 _SHA256 = re.compile(r"[0-9a-fA-F]{64}")
+_GIT_COMMIT = re.compile(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})")
+_CONTAINER_DIGEST = re.compile(r"[^\s@]+@sha256:[0-9a-fA-F]{64}")
+_INPUT_REFERENCE = re.compile(r"\$\{([A-Za-z0-9][A-Za-z0-9._-]*)\}")
+_LONG_OPTION = re.compile(r"--[A-Za-z0-9][A-Za-z0-9_-]*")
+_PYTHON_EXECUTABLE = re.compile(r"(?:python|python\d+(?:\.\d+)*)")
+_SGLANG_MODULES = frozenset(
+    {"sglang.launch_server", "sglang.srt.entrypoints.http_server"}
+)
+_MANAGED_LAUNCH_OPTIONS = frozenset(
+    {"--host", "--model-path", "--port", "--served-model-name"}
+)
 
 
 class OptimizationConfigError(ValueError):
@@ -37,9 +50,21 @@ class EvaluationDirection(StrEnum):
     MINIMIZE = "minimize"
 
 
-class SpeculativeDraftKind(StrEnum):
-    EMBEDDED = "embedded"
-    EXTERNAL = "external"
+class RecipeInputType(StrEnum):
+    STRING = "string"
+    INTEGER = "integer"
+    NUMBER = "number"
+    BOOLEAN = "boolean"
+    GIT_COMMIT = "git_commit"
+    CONTAINER_DIGEST = "container_digest"
+    SHA256 = "sha256"
+
+
+@dataclass(frozen=True, slots=True)
+class RecipeInputConfig:
+    name: str
+    type: RecipeInputType
+    required: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,7 +83,7 @@ class OptimizationWorkloadConfig:
 
 @dataclass(frozen=True, slots=True)
 class ModelArtifactConfig:
-    model_id: str
+    name: str
     path: str
     served_name: str
     revision: str
@@ -70,32 +95,30 @@ class ModelsConfig:
     target: ModelArtifactConfig
     drafts: tuple[ModelArtifactConfig, ...] = ()
 
-    def by_id(self, model_id: str) -> ModelArtifactConfig:
-        if self.target.model_id == model_id:
+    def by_name(self, name: str) -> ModelArtifactConfig:
+        if self.target.name == name:
             return self.target
         for draft in self.drafts:
-            if draft.model_id == model_id:
+            if draft.name == name:
                 return draft
-        raise KeyError(model_id)
+        raise KeyError(name)
 
 
 @dataclass(frozen=True, slots=True)
 class WorkloadPointConfig:
-    point_id: str
+    name: str
     input_tokens: int
     output_tokens: int
     concurrency: int
     num_prompts: int
     request_rate: str | float | None = None
 
-
 @dataclass(frozen=True, slots=True)
 class WorkloadSuiteConfig:
-    suite_id: str
+    name: str
     dataset: str
     request_rate: str | float
     points: tuple[WorkloadPointConfig, ...]
-
 
 @dataclass(frozen=True, slots=True)
 class RuntimeContainerConfig:
@@ -133,29 +156,6 @@ class RuntimeProvenanceConfig:
 
 
 @dataclass(frozen=True, slots=True)
-class SpeculativeDraftConfig:
-    kind: SpeculativeDraftKind
-    model_ref: str
-
-
-@dataclass(frozen=True, slots=True)
-class SpeculativeConfig:
-    algorithm: str
-    draft: SpeculativeDraftConfig | None = None
-    num_steps: int | None = None
-    eagle_topk: int | None = None
-    num_draft_tokens: int | None = None
-    adaptive: bool = False
-    draft_attention_backend: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class ServingConfig:
-    backends: Mapping[str, str]
-    speculative: SpeculativeConfig
-
-
-@dataclass(frozen=True, slots=True)
 class OptimizationBenchmarkConfig:
     mode: str
     base_args: tuple[str, ...] = ()
@@ -165,11 +165,10 @@ class OptimizationBenchmarkConfig:
 
 @dataclass(frozen=True, slots=True)
 class BaselineConfig:
-    candidate_id: str
+    name: str
     source_revision: str
     target_parameters: Mapping[str, JSONValue] = field(default_factory=dict)
     metric_values: Mapping[str, float] = field(default_factory=dict)
-
 
 @dataclass(frozen=True, slots=True)
 class ProfileArtifactConfig:
@@ -204,8 +203,54 @@ class OptimizationCommandConfig:
 
 @dataclass(frozen=True, slots=True)
 class TargetLaunchConfig:
-    argv: tuple[str, ...]
+    python: str = "python3"
+    python_options: tuple[str, ...] = ()
+    module: str = "sglang.launch_server"
+    bind_host: str | None = None
+    options: Mapping[str, JSONScalar] = field(default_factory=dict)
+    extra_argv: tuple[str, ...] = ()
     env: Mapping[str, str | None] = field(default_factory=dict)
+
+    def compile_argv(
+        self,
+        *,
+        model_path: str,
+        served_name: str,
+        endpoint: str,
+    ) -> tuple[str, ...]:
+        """Compile the author-facing launch declaration into a safe argv tuple."""
+
+        parsed_endpoint = urlsplit(endpoint)
+        endpoint_host = parsed_endpoint.hostname
+        if endpoint_host is None:  # pragma: no cover - endpoint validation guards this
+            raise OptimizationConfigError("endpoint must contain a host")
+        host = self.bind_host or endpoint_host
+        port = parsed_endpoint.port
+        if port is None:
+            port = 443 if parsed_endpoint.scheme.casefold() == "https" else 80
+
+        argv = [
+            self.python,
+            *self.python_options,
+            "-m",
+            self.module,
+            "--model-path",
+            model_path,
+            "--served-model-name",
+            served_name,
+            "--host",
+            host,
+            "--port",
+            str(port),
+        ]
+        for option, value in self.options.items():
+            if value is None or value is False:
+                continue
+            argv.append(option)
+            if value is not True:
+                argv.append(str(value))
+        argv.extend(self.extra_argv)
+        return tuple(argv)
 
 
 @dataclass(frozen=True, slots=True)
@@ -227,10 +272,10 @@ class ManagedTargetConfig:
     readiness: TargetReadinessConfig
     shutdown_timeout_seconds: float
     gpus: tuple[str, ...]
+    hardware: Mapping[str, JSONValue] = field(default_factory=dict)
     build: TargetBuildConfig | None = None
     provenance: Mapping[str, JSONValue] = field(default_factory=dict)
     runtime: RuntimeProvenanceConfig | None = None
-    serving: ServingConfig | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -317,6 +362,20 @@ class OptimizationConfig:
     execution: OptimizationExecutionConfig
     source: Path
     target: ManagedTargetConfig | None = None
+    input_bindings: Mapping[str, JSONScalar] = field(default_factory=dict)
+    resolved_document: Mapping[str, JSONValue] = field(default_factory=dict)
+
+    @property
+    def target_launch_argv(self) -> tuple[str, ...]:
+        """Return the compiled machine-facing argv for the managed target."""
+
+        if self.target is None:
+            return ()
+        return self.target.launch.compile_argv(
+            model_path=self.models.target.path,
+            served_name=self.models.target.served_name,
+            endpoint=self.endpoint,
+        )
 
     @property
     def workload(self) -> OptimizationWorkloadConfig:
@@ -324,7 +383,7 @@ class OptimizationConfig:
 
         point = self.workload_suite.points[0]
         return OptimizationWorkloadConfig(
-            name=point.point_id,
+            name=point.name,
             model=self.models.target.path,
             input_tokens=point.input_tokens,
             output_tokens=point.output_tokens,
@@ -333,6 +392,23 @@ class OptimizationConfig:
             endpoint=self.endpoint,
             dataset=self.workload_suite.dataset,
         )
+
+
+@dataclass(frozen=True, slots=True)
+class OptimizationRecipeResolution:
+    """One template after applying explicit values, possibly still unresolved."""
+
+    source: Path
+    name: str
+    inputs: Mapping[str, RecipeInputConfig]
+    bindings: Mapping[str, JSONScalar]
+    missing_inputs: tuple[str, ...]
+    resolved_document: Mapping[str, JSONValue]
+    config: OptimizationConfig | None = None
+
+    @property
+    def resolved(self) -> bool:
+        return not self.missing_inputs
 
 
 def _mapping(value: object, path: str) -> Mapping[str, object]:
@@ -414,6 +490,45 @@ def _environment(value: object, path: str) -> Mapping[str, str | None]:
     return result
 
 
+def _launch_tokens(value: object, path: str) -> tuple[str, ...]:
+    tokens = _string_tuple(value, path)
+    for index, token in enumerate(tokens):
+        if "\x00" in token:
+            raise OptimizationConfigError(f"{path}[{index}] contains a NUL byte")
+    return tokens
+
+
+def _launch_options(value: object, path: str) -> Mapping[str, JSONScalar]:
+    raw = _mapping(value, path)
+    result: dict[str, JSONScalar] = {}
+    for raw_name, raw_value in raw.items():
+        if _LONG_OPTION.fullmatch(raw_name) is None:
+            raise OptimizationConfigError(
+                f"{path} key {raw_name!r} must be a long option such as '--tp-size'"
+            )
+        if raw_name in _MANAGED_LAUNCH_OPTIONS:
+            raise OptimizationConfigError(
+                f"{path}.{raw_name} is generated from models.target and endpoint"
+            )
+        if isinstance(raw_value, str):
+            if "\x00" in raw_value:
+                raise OptimizationConfigError(f"{path}.{raw_name} contains a NUL byte")
+            normalized: JSONScalar = raw_value
+        elif raw_value is None or isinstance(raw_value, bool | int):
+            normalized = raw_value
+        elif isinstance(raw_value, float):
+            if not math.isfinite(raw_value):
+                raise OptimizationConfigError(f"{path}.{raw_name} must be finite")
+            normalized = raw_value
+        else:
+            raise OptimizationConfigError(
+                f"{path}.{raw_name} must be a string, number, boolean, or null; "
+                "use target.launch.extra_argv for positional or repeated arguments"
+            )
+        result[raw_name] = normalized
+    return dict(sorted(result.items()))
+
+
 def _resolve_path(value: object, path: str, source: Path) -> Path:
     candidate = Path(_string(value, path)).expanduser()
     if not candidate.is_absolute():
@@ -474,6 +589,37 @@ def _safe_id(value: object, path: str) -> str:
     return result
 
 
+def _name(
+    raw: Mapping[str, object],
+    path: str,
+    *,
+    default: str,
+) -> str:
+    """Read an optional human-facing name without treating it as content identity."""
+
+    return _safe_id(raw.get("name", default), f"{path}.name")
+
+
+def _point_alias(
+    *,
+    input_tokens: int,
+    output_tokens: int,
+    concurrency: int,
+    num_prompts: int,
+    request_rate: str | float | None,
+) -> str:
+    parts = [
+        f"isl{input_tokens}",
+        f"osl{output_tokens}",
+        f"c{concurrency}",
+        f"n{num_prompts}",
+    ]
+    if request_rate is not None:
+        normalized_rate = str(request_rate).replace(".", "p")
+        parts.append(f"r{normalized_rate}")
+    return "-".join(parts)
+
+
 def _optional_sha256(value: object, path: str) -> str | None:
     if value is None:
         return None
@@ -487,15 +633,20 @@ def _parse_model_artifact(value: object, path: str) -> ModelArtifactConfig:
     raw = _mapping(value, path)
     _reject_unknown(
         raw,
-        {"id", "path", "served_name", "revision", "weights_manifest_sha256"},
+        {"name", "path", "served_name", "revision", "weights_manifest_sha256"},
         path,
     )
     model_path = _string(raw.get("path"), f"{path}.path")
+    revision = _string(raw.get("revision"), f"{path}.revision")
+    default_alias = "target"
+    if not path.endswith(".target"):
+        alias_seed = f"{revision}\0{model_path}".encode()
+        default_alias = f"draft-{hashlib.sha256(alias_seed).hexdigest()[:12]}"
     return ModelArtifactConfig(
-        model_id=_safe_id(raw.get("id"), f"{path}.id"),
+        name=_name(raw, path, default=default_alias),
         path=model_path,
         served_name=_string(raw.get("served_name", model_path), f"{path}.served_name"),
-        revision=_string(raw.get("revision"), f"{path}.revision"),
+        revision=revision,
         weights_manifest_sha256=_optional_sha256(
             raw.get("weights_manifest_sha256"), f"{path}.weights_manifest_sha256"
         ),
@@ -514,16 +665,16 @@ def _parse_models(value: object) -> ModelsConfig:
         _parse_model_artifact(item, f"models.drafts[{index}]")
         for index, item in enumerate(raw_drafts)
     )
-    identifiers = (target.model_id, *(item.model_id for item in drafts))
-    if len(identifiers) != len(set(identifiers)):
-        raise OptimizationConfigError("models target and draft IDs must be unique")
+    names = (target.name, *(item.name for item in drafts))
+    if len(names) != len(set(names)):
+        raise OptimizationConfigError("models target and draft names must be unique")
     return ModelsConfig(target=target, drafts=drafts)
 
 
 def _parse_workload_suite(value: object) -> WorkloadSuiteConfig:
     path = "workload_suite"
     raw = _mapping(value, path)
-    _reject_unknown(raw, {"id", "dataset", "request_rate", "points"}, path)
+    _reject_unknown(raw, {"name", "dataset", "request_rate", "points"}, path)
     request_rate = _parse_request_rate(
         raw.get("request_rate", "inf"), "workload_suite.request_rate"
     )
@@ -538,7 +689,7 @@ def _parse_workload_suite(value: object) -> WorkloadSuiteConfig:
         _reject_unknown(
             item,
             {
-                "id",
+                "name",
                 "input_tokens",
                 "output_tokens",
                 "concurrency",
@@ -547,33 +698,48 @@ def _parse_workload_suite(value: object) -> WorkloadSuiteConfig:
             },
             item_path,
         )
+        input_tokens = _integer(
+            item.get("input_tokens"), f"{item_path}.input_tokens", minimum=1
+        )
+        output_tokens = _integer(
+            item.get("output_tokens"), f"{item_path}.output_tokens", minimum=1
+        )
+        concurrency = _integer(
+            item.get("concurrency"), f"{item_path}.concurrency", minimum=1
+        )
+        num_prompts = _integer(
+            item.get("num_prompts"), f"{item_path}.num_prompts", minimum=1
+        )
+        point_request_rate = (
+            None
+            if item.get("request_rate") is None
+            else _parse_request_rate(item.get("request_rate"), f"{item_path}.request_rate")
+        )
         points.append(
             WorkloadPointConfig(
-                point_id=_safe_id(item.get("id"), f"{item_path}.id"),
-                input_tokens=_integer(
-                    item.get("input_tokens"), f"{item_path}.input_tokens", minimum=1
+                name=_name(
+                    item,
+                    item_path,
+                    default=_point_alias(
+                        input_tokens=input_tokens,
+                        output_tokens=output_tokens,
+                        concurrency=concurrency,
+                        num_prompts=num_prompts,
+                        request_rate=point_request_rate,
+                    ),
                 ),
-                output_tokens=_integer(
-                    item.get("output_tokens"), f"{item_path}.output_tokens", minimum=1
-                ),
-                concurrency=_integer(
-                    item.get("concurrency"), f"{item_path}.concurrency", minimum=1
-                ),
-                num_prompts=_integer(
-                    item.get("num_prompts"), f"{item_path}.num_prompts", minimum=1
-                ),
-                request_rate=(
-                    None
-                    if item.get("request_rate") is None
-                    else _parse_request_rate(item.get("request_rate"), f"{item_path}.request_rate")
-                ),
+                input_tokens=input_tokens,
+                output_tokens=output_tokens,
+                concurrency=concurrency,
+                num_prompts=num_prompts,
+                request_rate=point_request_rate,
             )
         )
-    point_ids = tuple(point.point_id for point in points)
-    if len(point_ids) != len(set(point_ids)):
-        raise OptimizationConfigError("workload_suite point IDs must be unique")
+    point_names = tuple(point.name for point in points)
+    if len(point_names) != len(set(point_names)):
+        raise OptimizationConfigError("workload_suite point names must be unique")
     return WorkloadSuiteConfig(
-        suite_id=_safe_id(raw.get("id"), "workload_suite.id"),
+        name=_name(raw, path, default="workload"),
         dataset=_string(raw.get("dataset", "random"), "workload_suite.dataset"),
         request_rate=request_rate,
         points=tuple(points),
@@ -605,19 +771,19 @@ def _legacy_models_and_suite(
     return (
         ModelsConfig(
             target=ModelArtifactConfig(
-                model_id="target",
+                name="target",
                 path=workload.model,
                 served_name=workload.model,
                 revision=revision,
             )
         ),
         WorkloadSuiteConfig(
-            suite_id=workload.name,
+            name=workload.name,
             dataset=workload.dataset,
             request_rate="inf",
             points=(
                 WorkloadPointConfig(
-                    point_id=workload.name,
+                    name=workload.name,
                     input_tokens=workload.input_tokens,
                     output_tokens=workload.output_tokens,
                     concurrency=workload.concurrency,
@@ -649,16 +815,22 @@ def _parse_benchmark(value: object) -> OptimizationBenchmarkConfig:
 def _parse_baseline(value: object) -> BaselineConfig:
     path = "baseline"
     raw = _mapping(value, path)
-    _reject_unknown(raw, {"id", "source_revision", "target_parameters", "metric_values"}, path)
+    _reject_unknown(
+        raw,
+        {"name", "source_revision", "target_parameters", "metric_values"},
+        path,
+    )
     raw_values = _mapping(raw.get("metric_values", {}), "baseline.metric_values")
     metric_values: dict[str, float] = {}
-    for point_id, metric_value in raw_values.items():
-        normalized_id = _safe_id(point_id, f"baseline.metric_values key {point_id!r}")
-        metric_values[normalized_id] = _number(
-            metric_value, f"baseline.metric_values.{normalized_id}"
+    for point_name, metric_value in raw_values.items():
+        normalized_name = _safe_id(
+            point_name, f"baseline.metric_values key {point_name!r}"
+        )
+        metric_values[normalized_name] = _number(
+            metric_value, f"baseline.metric_values.{normalized_name}"
         )
     return BaselineConfig(
-        candidate_id=_safe_id(raw.get("id", "baseline"), "baseline.id"),
+        name=_name(raw, path, default="baseline"),
         source_revision=_string(raw.get("source_revision"), "baseline.source_revision"),
         target_parameters=_parse_json_mapping(
             raw.get("target_parameters", {}), "baseline.target_parameters"
@@ -786,6 +958,7 @@ _TIER_RANK = {
     EvaluationTierKind.SMOKE: 0,
     EvaluationTierKind.CORRECTNESS: 1,
     EvaluationTierKind.PERFORMANCE: 2,
+    EvaluationTierKind.ACCURACY: 3,
 }
 
 
@@ -851,9 +1024,71 @@ def _local_http_url(value: object, path: str) -> str:
 def _parse_target_launch(value: object) -> TargetLaunchConfig:
     path = "target.launch"
     raw = _mapping(value, path)
-    _reject_unknown(raw, {"argv", "env"}, path)
+    _reject_unknown(
+        raw,
+        {
+            "python",
+            "python_options",
+            "module",
+            "bind_host",
+            "options",
+            "extra_argv",
+            "env",
+        },
+        path,
+    )
+    python = _string(raw.get("python", "python3"), f"{path}.python")
+    module = _string(raw.get("module", "sglang.launch_server"), f"{path}.module")
+    if "\x00" in python:
+        raise OptimizationConfigError(f"{path}.python contains a NUL byte")
+    if "\x00" in module:
+        raise OptimizationConfigError(f"{path}.module contains a NUL byte")
+    if _PYTHON_EXECUTABLE.fullmatch(Path(python).name) is None:
+        raise OptimizationConfigError(f"{path}.python must name a Python executable")
+    if module not in _SGLANG_MODULES:
+        raise OptimizationConfigError(f"{path}.module must name an approved SGLang server")
+    python_options = _launch_tokens(
+        raw.get("python_options", []), f"{path}.python_options"
+    )
+    if python_options not in {(), ("-u",)}:
+        raise OptimizationConfigError(f"{path}.python_options must be [] or [-u]")
+    bind_host = (
+        None
+        if raw.get("bind_host") is None
+        else _string(raw.get("bind_host"), f"{path}.bind_host")
+    )
+    if bind_host is not None and (
+        "\x00" in bind_host or any(char.isspace() for char in bind_host)
+    ):
+        raise OptimizationConfigError(
+            f"{path}.bind_host must not contain whitespace or NUL bytes"
+        )
+    options = _launch_options(raw.get("options", {}), f"{path}.options")
+    extra_argv = _launch_tokens(raw.get("extra_argv", []), f"{path}.extra_argv")
+    extra_options: set[str] = set()
+    for index, token in enumerate(extra_argv):
+        option = token.partition("=")[0]
+        if _LONG_OPTION.fullmatch(option) is None:
+            continue
+        if option in _MANAGED_LAUNCH_OPTIONS:
+            raise OptimizationConfigError(
+                f"{path}.extra_argv[{index}] must not override an option generated "
+                "from models.target or endpoint"
+            )
+        extra_options.add(option)
+    duplicated_options = sorted(set(options).intersection(extra_options))
+    if duplicated_options:
+        raise OptimizationConfigError(
+            f"{path}.options and {path}.extra_argv both declare: "
+            + ", ".join(duplicated_options)
+        )
     return TargetLaunchConfig(
-        argv=_argv_tuple(raw.get("argv"), f"{path}.argv"),
+        python=python,
+        python_options=python_options,
+        module=module,
+        bind_host=bind_host,
+        options=options,
+        extra_argv=extra_argv,
         env=_environment(raw.get("env", {}), f"{path}.env"),
     )
 
@@ -995,166 +1230,11 @@ def _parse_runtime(value: object, source: Path) -> RuntimeProvenanceConfig:
     )
 
 
-def _parse_serving(value: object, models: ModelsConfig) -> ServingConfig:
-    path = "target.serving"
-    raw = _mapping(value, path)
-    _reject_unknown(raw, {"backends", "speculative"}, path)
-    backend_raw = _mapping(raw.get("backends", {}), f"{path}.backends")
-    backends: dict[str, str] = {}
-    for backend_name, backend_value in backend_raw.items():
-        normalized_name = _safe_id(backend_name, f"{path}.backends key {backend_name!r}")
-        backends[normalized_name] = _string(backend_value, f"{path}.backends.{normalized_name}")
-
-    speculative_path = f"{path}.speculative"
-    speculative_raw = _mapping(raw.get("speculative", {"algorithm": "off"}), speculative_path)
-    _reject_unknown(
-        speculative_raw,
-        {
-            "algorithm",
-            "draft",
-            "num_steps",
-            "eagle_topk",
-            "num_draft_tokens",
-            "adaptive",
-            "draft_attention_backend",
-        },
-        speculative_path,
-    )
-    algorithm = _string(
-        speculative_raw.get("algorithm", "off"), f"{speculative_path}.algorithm"
-    ).lower()
-    draft_raw = speculative_raw.get("draft")
-    draft: SpeculativeDraftConfig | None = None
-    if draft_raw is not None:
-        draft_mapping = _mapping(draft_raw, f"{speculative_path}.draft")
-        _reject_unknown(draft_mapping, {"kind", "model_ref"}, f"{speculative_path}.draft")
-        try:
-            kind = SpeculativeDraftKind(
-                _string(draft_mapping.get("kind"), f"{speculative_path}.draft.kind").lower()
-            )
-        except ValueError as exc:
-            raise OptimizationConfigError(
-                f"{speculative_path}.draft.kind must be 'embedded' or 'external'"
-            ) from exc
-        model_ref = _safe_id(draft_mapping.get("model_ref"), f"{speculative_path}.draft.model_ref")
-        try:
-            referenced_model = models.by_id(model_ref)
-        except KeyError as exc:
-            raise OptimizationConfigError(
-                f"{speculative_path}.draft.model_ref references unknown model {model_ref!r}"
-            ) from exc
-        if kind is SpeculativeDraftKind.EMBEDDED and referenced_model is not models.target:
-            raise OptimizationConfigError(
-                f"{speculative_path}.draft embedded kind must reference models.target.id"
-            )
-        if kind is SpeculativeDraftKind.EXTERNAL and referenced_model is models.target:
-            raise OptimizationConfigError(
-                f"{speculative_path}.draft external kind must reference a models.drafts entry"
-            )
-        draft = SpeculativeDraftConfig(kind=kind, model_ref=model_ref)
-    if algorithm == "off" and draft is not None:
-        raise OptimizationConfigError(
-            "target.serving.speculative.draft is invalid when algorithm is off"
-        )
-    if algorithm != "off" and draft is None:
-        raise OptimizationConfigError(
-            "target.serving.speculative.draft is required when speculative decoding is enabled"
-        )
-
-    def optional_positive_integer(field_name: str) -> int | None:
-        raw_value = speculative_raw.get(field_name)
-        return (
-            None
-            if raw_value is None
-            else _integer(raw_value, f"{speculative_path}.{field_name}", minimum=1)
-        )
-
-    return ServingConfig(
-        backends=backends,
-        speculative=SpeculativeConfig(
-            algorithm=algorithm,
-            draft=draft,
-            num_steps=optional_positive_integer("num_steps"),
-            eagle_topk=optional_positive_integer("eagle_topk"),
-            num_draft_tokens=optional_positive_integer("num_draft_tokens"),
-            adaptive=_boolean(
-                speculative_raw.get("adaptive", False), f"{speculative_path}.adaptive"
-            ),
-            draft_attention_backend=(
-                None
-                if speculative_raw.get("draft_attention_backend") is None
-                else _string(
-                    speculative_raw.get("draft_attention_backend"),
-                    f"{speculative_path}.draft_attention_backend",
-                )
-            ),
-        ),
-    )
-
-
-def _launch_flag_value(argv: tuple[str, ...], flag: str) -> str | None:
-    try:
-        index = argv.index(flag)
-    except ValueError:
-        return None
-    if index + 1 >= len(argv) or argv[index + 1].startswith("--"):
-        return None
-    return argv[index + 1]
-
-
-def _validate_serving_launch(
-    serving: ServingConfig,
-    models: ModelsConfig,
-    argv: tuple[str, ...],
-) -> None:
-    backend_flags = {
-        "kv_cache_dtype": "--kv-cache-dtype",
-        "dsa_prefill": "--dsa-prefill-backend",
-        "dsa_decode": "--dsa-decode-backend",
-        "linear_attention": "--linear-attn-backend",
-        "moe_runner": "--moe-runner-backend",
-        "moe_a2a": "--moe-a2a-backend",
-    }
-    for backend_name, expected_value in serving.backends.items():
-        flag = backend_flags.get(backend_name)
-        if flag is None or expected_value.casefold() in {"auto", "none"}:
-            continue
-        actual_value = _launch_flag_value(argv, flag)
-        if actual_value != expected_value:
-            raise OptimizationConfigError(
-                f"target.launch.argv must set {flag} to target.serving.backends."
-                f"{backend_name} ({expected_value!r})"
-            )
-    speculative = serving.speculative
-    speculative_flags = tuple(token for token in argv if token.startswith("--speculative-"))
-    if speculative.algorithm == "off":
-        if speculative_flags:
-            raise OptimizationConfigError(
-                "target.launch.argv contains --speculative-* flags while the declared "
-                "algorithm is off"
-            )
-        return
-    launch_algorithm = _launch_flag_value(argv, "--speculative-algorithm")
-    if launch_algorithm is None or launch_algorithm.casefold() != speculative.algorithm.casefold():
-        raise OptimizationConfigError(
-            "target.launch.argv --speculative-algorithm must match "
-            "target.serving.speculative.algorithm"
-        )
-    draft = speculative.draft
-    if draft is not None and draft.kind is SpeculativeDraftKind.EXTERNAL:
-        draft_path = models.by_id(draft.model_ref).path
-        if draft_path not in argv:
-            raise OptimizationConfigError(
-                "target.launch.argv must contain the external speculative draft model path exactly"
-            )
-
-
 def _parse_target(
     value: object,
     framework: Framework,
     *,
     source: Path,
-    models: ModelsConfig,
     schema_version: int,
 ) -> ManagedTargetConfig:
     path = "target"
@@ -1165,9 +1245,10 @@ def _parse_target(
         "readiness",
         "shutdown_timeout_seconds",
         "gpus",
+        "hardware",
         "build",
     }
-    allowed.update({"provenance"} if schema_version == 2 else {"runtime", "serving"})
+    allowed.update({"provenance"} if schema_version == 2 else {"runtime"})
     _reject_unknown(raw, allowed, path)
     provider_value = _string(raw.get("provider"), f"{path}.provider").lower()
     if provider_value != Framework.SGLANG.value:
@@ -1180,16 +1261,9 @@ def _parse_target(
         raise OptimizationConfigError(
             "target.launch.env must not override target.gpus via CUDA_VISIBLE_DEVICES"
         )
-    if schema_version == 3 and models.target.path not in launch.argv:
-        raise OptimizationConfigError("target.launch.argv must contain models.target.path exactly")
     runtime = None if raw.get("runtime") is None else _parse_runtime(raw.get("runtime"), source)
-    serving = None if raw.get("serving") is None else _parse_serving(raw.get("serving"), models)
     if schema_version == 3 and runtime is None:
         raise OptimizationConfigError("target.runtime is required for schema_version 3")
-    if schema_version == 3 and serving is None:
-        raise OptimizationConfigError("target.serving is required for schema_version 3")
-    if serving is not None:
-        _validate_serving_launch(serving, models, launch.argv)
     return ManagedTargetConfig(
         provider=provider,
         launch=launch,
@@ -1200,10 +1274,10 @@ def _parse_target(
             minimum=0.001,
         ),
         gpus=_parse_target_gpus(raw.get("gpus")),
+        hardware=_parse_json_mapping(raw.get("hardware", {}), f"{path}.hardware"),
         build=(None if raw.get("build") is None else _parse_target_build(raw.get("build"))),
         provenance=_parse_json_mapping(raw.get("provenance", {}), f"{path}.provenance"),
         runtime=runtime,
-        serving=serving,
     )
 
 
@@ -1231,7 +1305,7 @@ def _parse_evaluation_tiers(value: object) -> tuple[EvaluationTierConfig, ...]:
             kind = EvaluationTierKind(_string(raw.get("kind"), f"{item_path}.kind"))
         except ValueError as exc:
             raise OptimizationConfigError(
-                f"{item_path}.kind must be smoke, correctness, or performance"
+                f"{item_path}.kind must be smoke, correctness, performance, or accuracy"
             ) from exc
         tiers.append(
             EvaluationTierConfig(
@@ -1254,18 +1328,20 @@ def _parse_evaluation_tiers(value: object) -> tuple[EvaluationTierConfig, ...]:
         raise OptimizationConfigError(f"{path} must not contain duplicate tier kinds")
     ranks = tuple(_TIER_RANK[kind] for kind in kinds)
     if tuple(sorted(ranks)) != ranks:
-        raise OptimizationConfigError(f"{path} must be ordered smoke, correctness, performance")
+        raise OptimizationConfigError(
+            f"{path} must be ordered smoke, correctness, performance, accuracy"
+        )
     if (
         EvaluationTierKind.CORRECTNESS not in kinds
-        or kinds[-1] is not EvaluationTierKind.PERFORMANCE
+        or EvaluationTierKind.PERFORMANCE not in kinds
     ):
         raise OptimizationConfigError(
-            f"{path} must include correctness and finish with performance"
+            f"{path} must include correctness and performance"
         )
     return tuple(tiers)
 
 
-def _parse_promotion(value: object, point_ids: tuple[str, ...]) -> PromotionConfig:
+def _parse_promotion(value: object, point_names: tuple[str, ...]) -> PromotionConfig:
     path = "optimization.evaluation.promotion"
     raw = _mapping(value, path)
     _reject_unknown(
@@ -1283,7 +1359,7 @@ def _parse_promotion(value: object, point_ids: tuple[str, ...]) -> PromotionConf
         _safe_id(item, f"{path}.primary_points[{index}]")
         for index, item in enumerate(
             _string_tuple(
-                raw.get("primary_points", list(point_ids)),
+                raw.get("primary_points", list(point_names)),
                 f"{path}.primary_points",
                 allow_empty=False,
             )
@@ -1291,7 +1367,7 @@ def _parse_promotion(value: object, point_ids: tuple[str, ...]) -> PromotionConf
     )
     if len(primary_points) != len(set(primary_points)):
         raise OptimizationConfigError(f"{path}.primary_points must not contain duplicates")
-    unknown = sorted(set(primary_points) - set(point_ids))
+    unknown = sorted(set(primary_points) - set(point_names))
     if unknown:
         raise OptimizationConfigError(
             f"{path}.primary_points references unknown workload point(s): {', '.join(unknown)}"
@@ -1320,7 +1396,7 @@ def _parse_promotion(value: object, point_ids: tuple[str, ...]) -> PromotionConf
 def _parse_evaluation(
     value: object,
     *,
-    point_ids: tuple[str, ...],
+    point_names: tuple[str, ...],
     schema_version: int,
 ) -> TieredEvaluationConfig:
     path = "optimization.evaluation"
@@ -1354,10 +1430,10 @@ def _parse_evaluation(
         raw.get("noise_tolerance", 0.0), f"{path}.noise_tolerance", minimum=0.0
     )
     promotion = (
-        _parse_promotion(raw.get("promotion", {}), point_ids)
+        _parse_promotion(raw.get("promotion", {}), point_names)
         if schema_version == 3
         else PromotionConfig(
-            primary_points=point_ids,
+            primary_points=point_names,
             min_relative_improvement=min_relative_improvement,
             max_regression_per_point=max_regression,
             noise_tolerance=noise_tolerance,
@@ -1460,7 +1536,7 @@ def _parse_optimization(
     value: object,
     source: Path,
     *,
-    point_ids: tuple[str, ...],
+    point_names: tuple[str, ...],
     schema_version: int,
 ) -> OptimizationPolicyConfig:
     path = "optimization"
@@ -1470,7 +1546,7 @@ def _parse_optimization(
         profiles=_parse_profiles(raw.get("profiles"), source),
         planner=_parse_planner(raw.get("planner"), source),
         evaluation=_parse_evaluation(
-            raw.get("evaluation"), point_ids=point_ids, schema_version=schema_version
+            raw.get("evaluation"), point_names=point_names, schema_version=schema_version
         ),
         budget=_parse_budget(raw.get("budget")),
         workspace=(
@@ -1515,16 +1591,15 @@ def _parse_execution(value: object, source: Path) -> OptimizationExecutionConfig
     )
 
 
-def load_optimization_config(path: str | Path) -> OptimizationConfig:
-    """Load strict v2 or v3 input into one normalized runtime model."""
+def _parse_optimization_document(
+    document_object: object,
+    source: Path,
+    *,
+    input_bindings: Mapping[str, JSONScalar],
+    resolved_document: Mapping[str, JSONValue],
+) -> OptimizationConfig:
+    """Parse one fully resolved document into the normalized runtime model."""
 
-    source = Path(path).expanduser().resolve()
-    try:
-        document_object: object = yaml.safe_load(source.read_text(encoding="utf-8"))
-    except FileNotFoundError as exc:
-        raise OptimizationConfigError(f"configuration does not exist: {source}") from exc
-    except yaml.YAMLError as exc:
-        raise OptimizationConfigError(f"invalid YAML in {source}: {exc}") from exc
     document = _mapping(document_object, "document")
     schema_version = _integer(document.get("schema_version"), "schema_version", minimum=1)
     if schema_version not in {2, 3}:
@@ -1557,6 +1632,10 @@ def load_optimization_config(path: str | Path) -> OptimizationConfig:
         models = _parse_models(document.get("models"))
         workload_suite = _parse_workload_suite(document.get("workload_suite"))
         endpoint = _string(document.get("endpoint"), "endpoint")
+    if document.get("target") is not None:
+        endpoint = _local_http_url(
+            endpoint, "endpoint" if schema_version == 3 else "workload.endpoint"
+        )
     target = (
         None
         if document.get("target") is None
@@ -1564,19 +1643,19 @@ def load_optimization_config(path: str | Path) -> OptimizationConfig:
             document.get("target"),
             framework,
             source=source,
-            models=models,
             schema_version=schema_version,
         )
     )
-    if target is not None:
-        endpoint = _local_http_url(
-            endpoint, "endpoint" if schema_version == 3 else "workload.endpoint"
-        )
     baseline = _parse_baseline(document.get("baseline"))
-    point_ids = tuple(point.point_id for point in workload_suite.points)
+    if schema_version == 3 and target is not None and baseline.target_parameters:
+        raise OptimizationConfigError(
+            "baseline.target_parameters must be empty for a managed schema_version 3 "
+            "target; put SGLang server switches in target.launch.options"
+        )
+    point_names = tuple(point.name for point in workload_suite.points)
     if schema_version == 3 and target is None:
-        missing_values = sorted(set(point_ids) - set(baseline.metric_values))
-        unknown_values = sorted(set(baseline.metric_values) - set(point_ids))
+        missing_values = sorted(set(point_names) - set(baseline.metric_values))
+        unknown_values = sorted(set(baseline.metric_values) - set(point_names))
         if missing_values:
             raise OptimizationConfigError(
                 "baseline.metric_values is missing workload point(s): " + ", ".join(missing_values)
@@ -1598,12 +1677,337 @@ def load_optimization_config(path: str | Path) -> OptimizationConfig:
         optimization=_parse_optimization(
             document.get("optimization"),
             source,
-            point_ids=point_ids,
+            point_names=point_names,
             schema_version=schema_version,
         ),
         execution=_parse_execution(document.get("execution"), source),
         source=source,
         target=target,
+        input_bindings=dict(input_bindings),
+        resolved_document=dict(resolved_document),
+    )
+
+
+def _read_yaml_mapping(path: Path, label: str) -> Mapping[str, JSONValue]:
+    try:
+        loaded: object = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise OptimizationConfigError(f"{label} does not exist: {path}") from exc
+    except yaml.YAMLError as exc:
+        raise OptimizationConfigError(f"invalid YAML in {path}: {exc}") from exc
+    raw = _mapping(loaded, label)
+    return cast(Mapping[str, JSONValue], dict(raw))
+
+
+def _parse_recipe_inputs(value: object) -> Mapping[str, RecipeInputConfig]:
+    if value is None:
+        return {}
+    path = "inputs"
+    raw = _mapping(value, path)
+    result: dict[str, RecipeInputConfig] = {}
+    for raw_name, raw_definition in raw.items():
+        name = _safe_id(raw_name, f"{path} key {raw_name!r}")
+        definition_path = f"{path}.{name}"
+        definition = _mapping(raw_definition, definition_path)
+        _reject_unknown(definition, {"type", "required"}, definition_path)
+        raw_type = _string(definition.get("type"), f"{definition_path}.type")
+        try:
+            input_type = RecipeInputType(raw_type)
+        except ValueError as exc:
+            choices = ", ".join(item.value for item in RecipeInputType)
+            raise OptimizationConfigError(
+                f"{definition_path}.type must be one of: {choices}"
+            ) from exc
+        result[name] = RecipeInputConfig(
+            name=name,
+            type=input_type,
+            required=_boolean(
+                definition.get("required", True), f"{definition_path}.required"
+            ),
+        )
+    return dict(sorted(result.items()))
+
+
+def _normalize_input_value(
+    definition: RecipeInputConfig,
+    value: object,
+    path: str,
+) -> JSONScalar:
+    input_type = definition.type
+    if input_type is RecipeInputType.STRING:
+        return _string(value, path)
+    if input_type is RecipeInputType.INTEGER:
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise OptimizationConfigError(f"{path} must be an integer")
+        return value
+    if input_type is RecipeInputType.NUMBER:
+        return _number(value, path)
+    if input_type is RecipeInputType.BOOLEAN:
+        return _boolean(value, path)
+    normalized = _string(value, path)
+    if input_type is RecipeInputType.GIT_COMMIT:
+        if _GIT_COMMIT.fullmatch(normalized) is None:
+            raise OptimizationConfigError(
+                f"{path} must be a full 40- or 64-character hexadecimal Git commit"
+            )
+        if set(normalized) == {"0"}:
+            raise OptimizationConfigError(f"{path} must not be an all-zero placeholder")
+        return normalized.casefold()
+    if input_type is RecipeInputType.CONTAINER_DIGEST:
+        if _CONTAINER_DIGEST.fullmatch(normalized) is None:
+            raise OptimizationConfigError(
+                f"{path} must be an immutable image reference such as "
+                "'registry/repository@sha256:<64 hex characters>'"
+            )
+        repository, digest = normalized.rsplit("@sha256:", 1)
+        if set(digest) == {"0"}:
+            raise OptimizationConfigError(f"{path} must not contain an all-zero digest")
+        return f"{repository}@sha256:{digest.casefold()}"
+    if _SHA256.fullmatch(normalized) is None:
+        raise OptimizationConfigError(f"{path} must be a 64-character SHA-256 digest")
+    if set(normalized) == {"0"}:
+        raise OptimizationConfigError(f"{path} must not be an all-zero placeholder")
+    return normalized.casefold()
+
+
+def _collect_input_references(
+    value: JSONValue,
+    path: str,
+    references: set[str],
+) -> None:
+    if isinstance(value, str):
+        match = _INPUT_REFERENCE.fullmatch(value)
+        if match is not None:
+            references.add(match.group(1))
+        elif _INPUT_REFERENCE.search(value) is not None or "${" in value:
+            raise OptimizationConfigError(
+                f"{path} input reference must occupy the entire scalar value"
+            )
+        return
+    if isinstance(value, list):
+        for index, item in enumerate(value):
+            _collect_input_references(item, f"{path}[{index}]", references)
+        return
+    if isinstance(value, dict):
+        for key, item in value.items():
+            _collect_input_references(item, f"{path}.{key}", references)
+
+
+def _substitute_inputs(
+    value: JSONValue,
+    bindings: Mapping[str, JSONScalar],
+) -> JSONValue:
+    if isinstance(value, str):
+        match = _INPUT_REFERENCE.fullmatch(value)
+        if match is None:
+            return value
+        return bindings.get(match.group(1), value)
+    if isinstance(value, list):
+        return [_substitute_inputs(item, bindings) for item in value]
+    if isinstance(value, dict):
+        return {key: _substitute_inputs(item, bindings) for key, item in value.items()}
+    return value
+
+
+def resolve_optimization_config(
+    path: str | Path,
+    values: str | Path | None = None,
+    *,
+    allow_unresolved: bool = False,
+) -> OptimizationRecipeResolution:
+    """Bind a recipe template and optionally return its unresolved input inventory."""
+
+    source = Path(path).expanduser().resolve()
+    template = dict(_read_yaml_mapping(source, "document"))
+    inputs = _parse_recipe_inputs(template.pop("inputs", None))
+    values_source = None if values is None else Path(values).expanduser().resolve()
+    supplied = (
+        {}
+        if values_source is None
+        else dict(_read_yaml_mapping(values_source, "values document"))
+    )
+    unknown_values = sorted(set(supplied) - set(inputs))
+    if unknown_values:
+        raise OptimizationConfigError(
+            "values document contains undeclared input(s): " + ", ".join(unknown_values)
+        )
+
+    references: set[str] = set()
+    for key, item in template.items():
+        _collect_input_references(item, f"document.{key}", references)
+    undeclared_references = sorted(references - set(inputs))
+    if undeclared_references:
+        raise OptimizationConfigError(
+            "recipe references undeclared input(s): " + ", ".join(undeclared_references)
+        )
+    unused_inputs = sorted(set(inputs) - references)
+    if unused_inputs:
+        raise OptimizationConfigError(
+            "recipe declares unused input(s): " + ", ".join(unused_inputs)
+        )
+
+    bindings: dict[str, JSONScalar] = {}
+    missing: list[str] = []
+    for name, definition in inputs.items():
+        if name in supplied:
+            bindings[name] = _normalize_input_value(
+                definition, supplied[name], f"values.{name}"
+            )
+        elif definition.required:
+            missing.append(name)
+        else:
+            bindings[name] = None
+
+    resolved_value = _substitute_inputs(template, bindings)
+    if not isinstance(resolved_value, dict):  # pragma: no cover - template is a mapping
+        raise AssertionError("resolved optimization recipe must remain a mapping")
+    resolved_document = resolved_value
+    name_value = resolved_document.get("name")
+    recipe_name = name_value if isinstance(name_value, str) else source.stem
+    missing_inputs = tuple(sorted(missing))
+    if missing_inputs and not allow_unresolved:
+        raise OptimizationConfigError(
+            "missing required input binding(s): " + ", ".join(missing_inputs)
+        )
+    config = (
+        None
+        if missing_inputs
+        else _parse_optimization_document(
+            resolved_document,
+            source,
+            input_bindings=bindings,
+            resolved_document=resolved_document,
+        )
+    )
+    return OptimizationRecipeResolution(
+        source=source,
+        name=recipe_name,
+        inputs=inputs,
+        bindings=dict(sorted(bindings.items())),
+        missing_inputs=missing_inputs,
+        resolved_document=resolved_document,
+        config=config,
+    )
+
+
+def load_optimization_config(
+    path: str | Path,
+    values: str | Path | None = None,
+) -> OptimizationConfig:
+    """Load a fully bound strict v2 or v3 input into the normalized runtime model."""
+
+    resolution = resolve_optimization_config(path, values)
+    if resolution.config is None:  # pragma: no cover - strict resolution raises first
+        raise AssertionError("strict recipe resolution did not produce a configuration")
+    return resolution.config
+
+
+def optimization_execution_lock_issues(config: OptimizationConfig) -> tuple[str, ...]:
+    """Return immutable-identity problems that must block a managed execution."""
+
+    target = config.target
+    if target is None:
+        return ()
+    issues: list[str] = []
+    source_revision = config.baseline.source_revision
+    if _GIT_COMMIT.fullmatch(source_revision) is None or set(source_revision) == {"0"}:
+        issues.append("baseline.source_revision must be a full Git commit")
+
+    if config.schema_version < 3:
+        return tuple(issues)
+    runtime = target.runtime
+    if runtime is None:  # pragma: no cover - schema-v3 parsing already requires this
+        issues.append("target.runtime is required")
+        return tuple(issues)
+    container = runtime.expected.container
+    if container is None:
+        issues.append("target.runtime.expected.container must pin an image digest")
+    else:
+        embedded_digest: str | None = None
+        if "@sha256:" in container.image:
+            _, raw_embedded_digest = container.image.rsplit("@", 1)
+            embedded_digest = _runtime_digest(
+                raw_embedded_digest, "container image digest"
+            )
+            if embedded_digest is None:  # pragma: no cover - value is not None
+                raise AssertionError("embedded container digest did not normalize")
+            if embedded_digest.removeprefix("sha256:") == "0" * 64:
+                issues.append("container image digest must not be an all-zero placeholder")
+        if embedded_digest is None and container.digest is None:
+            issues.append(
+                "target.runtime.expected.container must use image@sha256 or declare digest"
+            )
+        if container.digest == "sha256:" + "0" * 64:
+            issues.append("container.digest must not be an all-zero placeholder")
+        if (
+            embedded_digest is not None
+            and container.digest is not None
+            and embedded_digest != container.digest
+        ):
+            issues.append("container image digest and container.digest must match")
+
+    sglang = runtime.expected.components.get("sglang")
+    if sglang is None or sglang.revision is None:
+        issues.append("target.runtime.expected.components.sglang.revision is required")
+    elif sglang.revision != source_revision:
+        issues.append("SGLang runtime revision must equal baseline.source_revision")
+
+    for name, component in sorted(runtime.expected.components.items()):
+        if component.revision is not None and (
+            _GIT_COMMIT.fullmatch(component.revision) is None
+            or set(component.revision) == {"0"}
+        ):
+            issues.append(
+                f"target.runtime.expected.components.{name}.revision must be a full Git commit"
+            )
+        if (
+            component.path is not None
+            and component.revision is None
+            and component.digest is None
+        ):
+            issues.append(
+                f"target.runtime.expected.components.{name} has a source path but no "
+                "revision or digest"
+            )
+        if (component.path is not None or name == "sglang") and component.dirty is not False:
+            issues.append(
+                f"target.runtime.expected.components.{name}.dirty must be false"
+            )
+    for model in (config.models.target, *config.models.drafts):
+        if model.weights_manifest_sha256 == "0" * 64:
+            issues.append(
+                f"models.{model.name}.weights_manifest_sha256 must not be an all-zero placeholder"
+            )
+        revision_is_commit = (
+            _GIT_COMMIT.fullmatch(model.revision) is not None
+            and set(model.revision) != {"0"}
+        )
+        manifest_is_pinned = (
+            model.weights_manifest_sha256 is not None
+            and model.weights_manifest_sha256 != "0" * 64
+        )
+        if not revision_is_commit and not manifest_is_pinned:
+            issues.append(
+                f"models.{model.name} must pin a full revision commit or weights manifest"
+            )
+    return tuple(issues)
+
+
+def require_optimization_execution_lock(config: OptimizationConfig) -> None:
+    """Fail before active execution when content identity remains floating."""
+
+    issues = optimization_execution_lock_issues(config)
+    if issues:
+        raise OptimizationConfigError("execution recipe is not locked: " + "; ".join(issues))
+
+
+def dump_resolved_optimization_config(config: OptimizationConfig) -> str:
+    """Serialize the exact bound recipe used for identity and execution."""
+
+    return yaml.safe_dump(
+        dict(config.resolved_document),
+        allow_unicode=True,
+        sort_keys=False,
     )
 
 
@@ -1622,21 +2026,20 @@ __all__ = [
     "OptimizationConfigError",
     "OptimizationExecutionConfig",
     "OptimizationPolicyConfig",
+    "OptimizationRecipeResolution",
     "OptimizationWorkloadConfig",
     "PlannerProvider",
     "ProfileArtifactConfig",
     "ProfileProvider",
     "PromotionConfig",
+    "RecipeInputConfig",
+    "RecipeInputType",
     "RulesPlannerConfig",
     "RuntimeCaptureConfig",
     "RuntimeComponentConfig",
     "RuntimeContainerConfig",
     "RuntimeExpectedConfig",
     "RuntimeProvenanceConfig",
-    "ServingConfig",
-    "SpeculativeConfig",
-    "SpeculativeDraftConfig",
-    "SpeculativeDraftKind",
     "TargetBuildConfig",
     "TargetLaunchConfig",
     "TargetReadinessConfig",
@@ -1644,5 +2047,9 @@ __all__ = [
     "WorkloadPointConfig",
     "WorkloadSuiteConfig",
     "WorkspaceConfig",
+    "dump_resolved_optimization_config",
     "load_optimization_config",
+    "optimization_execution_lock_issues",
+    "require_optimization_execution_lock",
+    "resolve_optimization_config",
 ]

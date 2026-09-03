@@ -192,10 +192,16 @@ class ServerArgumentPatch:
 
         baseline = _validate_argv(baseline_argv, "baseline_argv")
         occurrences = _long_option_occurrences(baseline)
-        duplicates = sorted(name for name, spans in occurrences.items() if len(spans) > 1)
-        if duplicates:
+        touched_options = set(self.set).union(self.remove)
+        ambiguous = sorted(
+            name
+            for name, spans in occurrences.items()
+            if len(spans) > 1 and name in touched_options
+        )
+        if ambiguous:
             raise ValueError(
-                "baseline argv contains duplicate long options: " + ", ".join(duplicates)
+                "baseline argv contains duplicate long options targeted by the patch: "
+                + ", ".join(ambiguous)
             )
 
         replacements = dict(self.set)
@@ -1042,7 +1048,18 @@ def _is_sglang_entrypoint(argv: tuple[str, ...]) -> bool:
         return True
     if _PYTHON_EXECUTABLE.fullmatch(executable) is None:
         return False
-    return len(argv) >= 3 and argv[1] == "-m" and argv[2] in _SGLANG_MODULES
+    module_index = 2 if len(argv) >= 2 and argv[1] == "-m" else 3
+    return (
+        len(argv) > module_index
+        and module_index == 3
+        and argv[1:3] == ("-u", "-m")
+        and argv[module_index] in _SGLANG_MODULES
+    ) or (
+        len(argv) > module_index
+        and module_index == 2
+        and argv[1] == "-m"
+        and argv[module_index] in _SGLANG_MODULES
+    )
 
 
 def _source_patch_evidence(path: Path | None, workspace: Path) -> Mapping[str, object] | None:

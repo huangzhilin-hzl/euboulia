@@ -15,21 +15,20 @@ from euboulia.optimization.config import (
     OptimizationConfigError,
     OptimizationExecutionConfig,
     OptimizationPolicyConfig,
+    OptimizationRecipeResolution,
     OptimizationWorkloadConfig,
     PlannerProvider,
     ProfileArtifactConfig,
     ProfileProvider,
     PromotionConfig,
+    RecipeInputConfig,
+    RecipeInputType,
     RulesPlannerConfig,
     RuntimeCaptureConfig,
     RuntimeComponentConfig,
     RuntimeContainerConfig,
     RuntimeExpectedConfig,
     RuntimeProvenanceConfig,
-    ServingConfig,
-    SpeculativeConfig,
-    SpeculativeDraftConfig,
-    SpeculativeDraftKind,
     TargetBuildConfig,
     TargetLaunchConfig,
     TargetReadinessConfig,
@@ -37,7 +36,11 @@ from euboulia.optimization.config import (
     WorkloadPointConfig,
     WorkloadSuiteConfig,
     WorkspaceConfig,
+    dump_resolved_optimization_config,
     load_optimization_config,
+    optimization_execution_lock_issues,
+    require_optimization_execution_lock,
+    resolve_optimization_config,
 )
 from euboulia.optimization.contracts import (
     AnalysisReport,
@@ -75,9 +78,15 @@ from euboulia.optimization.events import (
     EventType,
     OptimizationEvent,
 )
+from euboulia.optimization.facets import derive_sglang_launch_facets
+from euboulia.optimization.identity import (
+    IDENTITY_SCHEMA,
+    ScenarioIdentity,
+    point_digest,
+    scenario_identity,
+)
 from euboulia.optimization.memory import (
     MemoryConflictError,
-    MemorySchemaError,
     SQLiteMemoryStore,
 )
 from euboulia.optimization.planner import (
@@ -86,6 +95,7 @@ from euboulia.optimization.planner import (
     ChangeCatalogError,
 )
 from euboulia.optimization.runner import (
+    BaselineValidationResult,
     OptimizationPlan,
     OptimizationRunner,
     OptimizationRunResult,
@@ -109,10 +119,12 @@ from euboulia.optimization.target import (
 )
 
 __all__ = [
+    "IDENTITY_SCHEMA",
     "AnalysisReport",
     "Analyzer",
     "ArtifactRef",
     "BaselineConfig",
+    "BaselineValidationResult",
     "BudgetConfig",
     "BuildCommandSpec",
     "BuildSpec",
@@ -139,7 +151,6 @@ __all__ = [
     "MemoryConflictError",
     "MemoryEntry",
     "MemoryQuery",
-    "MemorySchemaError",
     "MemoryStore",
     "ModelArtifactConfig",
     "ModelsConfig",
@@ -151,6 +162,7 @@ __all__ = [
     "OptimizationExecutionConfig",
     "OptimizationPlan",
     "OptimizationPolicyConfig",
+    "OptimizationRecipeResolution",
     "OptimizationRunResult",
     "OptimizationRunner",
     "OptimizationRuntimeError",
@@ -167,6 +179,8 @@ __all__ = [
     "Profiler",
     "PromotionConfig",
     "ReadinessSpec",
+    "RecipeInputConfig",
+    "RecipeInputType",
     "RulesPlannerConfig",
     "RunState",
     "RuntimeCaptureConfig",
@@ -176,12 +190,9 @@ __all__ = [
     "RuntimeProvenanceConfig",
     "SGLangTargetController",
     "SQLiteMemoryStore",
+    "ScenarioIdentity",
     "ServerArgumentPatch",
     "ServiceHandle",
-    "ServingConfig",
-    "SpeculativeConfig",
-    "SpeculativeDraftConfig",
-    "SpeculativeDraftKind",
     "StageContext",
     "TargetBuildConfig",
     "TargetBuildError",
@@ -201,5 +212,12 @@ __all__ = [
     "WorkspaceHandle",
     "WorkspaceRequest",
     "WorkspaceSnapshot",
+    "derive_sglang_launch_facets",
+    "dump_resolved_optimization_config",
     "load_optimization_config",
+    "optimization_execution_lock_issues",
+    "point_digest",
+    "require_optimization_execution_lock",
+    "resolve_optimization_config",
+    "scenario_identity",
 ]

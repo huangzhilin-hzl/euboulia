@@ -88,6 +88,7 @@ class EvaluationTierKind(StrEnum):
     SMOKE = "smoke"
     CORRECTNESS = "correctness"
     PERFORMANCE = "performance"
+    ACCURACY = "accuracy"
 
 
 def utc_now() -> str:
@@ -524,9 +525,13 @@ class MemoryEntry:
     model_revision: str
     workload_digest: str
     benchmark_policy_digest: str
+    spec_digest: str
+    run_uid: str
+    compatibility_digest: str
     proposal_id: str
     outcome: OutcomeStatus
     summary: str
+    compatibility_facets: Mapping[str, JSONValue] = field(default_factory=dict)
     patch_digest: str | None = None
     relative_improvement: float | None = None
     created_at: str = field(default_factory=utc_now)
@@ -544,6 +549,9 @@ class MemoryEntry:
             "model_revision",
             "workload_digest",
             "benchmark_policy_digest",
+            "spec_digest",
+            "run_uid",
+            "compatibility_digest",
             "proposal_id",
             "summary",
             "created_at",
@@ -551,6 +559,11 @@ class MemoryEntry:
             object.__setattr__(self, name, _nonempty(getattr(self, name), name))
         if not isinstance(self.outcome, OutcomeStatus):
             object.__setattr__(self, "outcome", OutcomeStatus(self.outcome))
+        object.__setattr__(
+            self,
+            "compatibility_facets",
+            _json_mapping(self.compatibility_facets, "compatibility_facets"),
+        )
         object.__setattr__(
             self, "patch_digest", _optional_nonempty(self.patch_digest, "patch_digest")
         )
@@ -573,6 +586,10 @@ class MemoryEntry:
             "model_revision": self.model_revision,
             "workload_digest": self.workload_digest,
             "benchmark_policy_digest": self.benchmark_policy_digest,
+            "spec_digest": self.spec_digest,
+            "run_uid": self.run_uid,
+            "compatibility_digest": self.compatibility_digest,
+            "compatibility_facets": dict(self.compatibility_facets),
             "proposal_id": self.proposal_id,
             "outcome": self.outcome.value,
             "summary": self.summary,
@@ -596,6 +613,9 @@ class MemoryEntry:
         raw_details = value.get("details", {})
         if not isinstance(raw_details, Mapping):
             raise TypeError("details must be a mapping")
+        raw_facets = value.get("compatibility_facets", {})
+        if not isinstance(raw_facets, Mapping):
+            raise TypeError("compatibility_facets must be a mapping")
         raw_improvement = value.get("relative_improvement")
         return cls(
             memory_id=_nonempty(value.get("memory_id"), "memory_id"),
@@ -612,6 +632,12 @@ class MemoryEntry:
             benchmark_policy_digest=_nonempty(
                 value.get("benchmark_policy_digest"), "benchmark_policy_digest"
             ),
+            spec_digest=_nonempty(value.get("spec_digest"), "spec_digest"),
+            run_uid=_nonempty(value.get("run_uid"), "run_uid"),
+            compatibility_digest=_nonempty(
+                value.get("compatibility_digest"), "compatibility_digest"
+            ),
+            compatibility_facets=_json_mapping(raw_facets, "compatibility_facets"),
             proposal_id=_nonempty(value.get("proposal_id"), "proposal_id"),
             outcome=OutcomeStatus(_nonempty(value.get("outcome"), "outcome")),
             summary=_nonempty(value.get("summary"), "summary"),
@@ -637,6 +663,10 @@ class MemoryQuery:
     model_revision: str | None = None
     workload_digest: str | None = None
     benchmark_policy_digest: str | None = None
+    spec_digest: str | None = None
+    run_uid: str | None = None
+    compatibility_digest: str | None = None
+    compatibility_facets: Mapping[str, JSONValue] = field(default_factory=dict)
     outcomes: tuple[OutcomeStatus, ...] = ()
     limit: int = 20
 
@@ -648,8 +678,16 @@ class MemoryQuery:
             "model_revision",
             "workload_digest",
             "benchmark_policy_digest",
+            "spec_digest",
+            "run_uid",
+            "compatibility_digest",
         ):
             object.__setattr__(self, name, _optional_nonempty(getattr(self, name), name))
+        object.__setattr__(
+            self,
+            "compatibility_facets",
+            _json_mapping(self.compatibility_facets, "compatibility_facets"),
+        )
         object.__setattr__(
             self,
             "outcomes",
