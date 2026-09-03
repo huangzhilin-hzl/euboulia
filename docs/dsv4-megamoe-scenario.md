@@ -14,9 +14,7 @@ Run Euboulia inside the declared single-node H20 container. Before execution:
 - `/home/admin/src/dsv4-megamoe/DeepGEMM` is a clean clone containing the exact commit
   selected in the values file;
 - `lm_eval` with API extras is installed in the image at the exact version selected
-  in the values file;
-- `/home/admin/bench_data/dsv4_sharegpt_exact_seed1` contains the six exact-length
-  datasets and their `manifest.json`; and
+  in the values file; and
 - the result and worktree roots do not already contain the selected run ID.
 
 The checked-in recipe is intentionally unresolved. Create a local values file with the
@@ -33,18 +31,6 @@ sglang_revision: <40-or-64-hex-commit>
 
 A container cannot portably infer its own registry digest, so Euboulia never invents
 one or treats an image tag as immutable identity.
-
-Generate the exact ShareGPT datasets with the script from the source test plan:
-
-```console
-python3 -m euboulia.harnesses.sglang.prepare_sharegpt_exact \
-  --source /home/admin/model/ShareGPT_V3_unfiltered_cleaned_split.json \
-  --tokenizer /home/admin/model/DeepSeek-V4-Flash-0731 \
-  --output-dir /home/admin/bench_data/dsv4_sharegpt_exact_seed1 \
-  --lengths 1024 16384 32768 65536 131072 262144 \
-  --samples 16 \
-  --seed 1
-```
 
 ## Execution boundary
 
@@ -105,6 +91,10 @@ windows are within 2%. Target validation uses the complete 30-point
 `qualification` lane with a 1.5% tolerance and at most five windows. The old fixed
 three-round-per-point report path has been removed.
 
+Performance requests use SGLang's standard `random` dataset with fixed ISL/OSL,
+`random_range_ratio=0`, and seed 1. SGLang generates the requests at benchmark time;
+there is no scenario-specific dataset preparation or manifest format.
+
 ## Fail-closed gates
 
 Execution stops on any of the following:
@@ -113,8 +103,7 @@ Execution stops on any of the following:
 - managed-service readiness or generic OpenAI-chat correctness failure;
 - fewer than eight H20 GPUs or fewer than eight rank traces containing
   `fp8_mxfp4_mega_moe`;
-- a ShareGPT manifest/hash mismatch, non-exact ISL/OSL, incomplete request, failed
-  cache flush, non-zero cache hit, or missing per-round server snapshot; or
+- an incomplete benchmark request or invalid benchmark result; or
 - an incomplete qualification matrix, a point that does not stabilize within its
   window/time budget, or a missing/invalid external accuracy result.
 

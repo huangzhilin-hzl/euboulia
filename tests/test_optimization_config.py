@@ -361,12 +361,15 @@ def test_loads_exact_dsv4_megamoe_target_validation_scenario(tmp_path: Path) -> 
     )
 
     assert config.name == "ds-v4-flash-dspark-cp8-tp8-ep8-megamoe"
-    assert config.workload_suite.dataset == "sharegpt"
+    assert config.workload_suite.dataset == "random"
     assert len(config.workload_suite.points) == 30
     assert [tier.kind for tier in config.optimization.evaluation.tiers] == [
         EvaluationTierKind.CORRECTNESS,
         EvaluationTierKind.PERFORMANCE,
     ]
+    performance_command = config.optimization.evaluation.tiers[-1].commands[0]
+    assert performance_command.env["EUBOULIA_RANDOM_RANGE_RATIO"] == "0"
+    assert not any(name.startswith("EUBOULIA_SHAREGPT") for name in performance_command.env)
     lanes = config.optimization.evaluation.lanes
     assert lanes is not None
     assert len(lanes.fast.points) == 4
