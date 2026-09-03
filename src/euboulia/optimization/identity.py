@@ -213,6 +213,45 @@ def _protocol_payload(config: OptimizationConfig) -> dict[str, object]:
                     "noise_tolerance": promotion.noise_tolerance,
                 }
             ),
+            "lanes": (
+                None
+                if evaluation.lanes is None
+                else {
+                    lane_name: {
+                        "points": [point_references[alias] for alias in lane.points],
+                        "stability": {
+                            "warmup_runs": lane.stability.warmup_runs,
+                            "min_windows": lane.stability.min_windows,
+                            "max_windows": lane.stability.max_windows,
+                            "stable_windows": lane.stability.stable_windows,
+                            "relative_tolerance": lane.stability.relative_tolerance,
+                            "max_seconds": lane.stability.max_seconds,
+                            "adaptive": lane.stability.adaptive,
+                        },
+                    }
+                    for lane_name, lane in (
+                        ("fast", evaluation.lanes.fast),
+                        ("qualification", evaluation.lanes.qualification),
+                    )
+                }
+            ),
+            "accuracy": (
+                None
+                if evaluation.accuracy is None
+                else {
+                    "command": {
+                        "argv": list(evaluation.accuracy.command.argv),
+                        "timeout_seconds": evaluation.accuracy.command.timeout_seconds,
+                        "env": dict(sorted(evaluation.accuracy.command.env.items())),
+                    },
+                    "result": {
+                        "path": str(evaluation.accuracy.result.path),
+                        "metric": evaluation.accuracy.result.metric,
+                        "direction": evaluation.accuracy.result.direction.value,
+                        "threshold": evaluation.accuracy.result.threshold,
+                    },
+                }
+            ),
             "tiers": [
                 {
                     "kind": tier.kind.value,

@@ -45,7 +45,7 @@ shape frequency can erase an isolated kernel win.
 A runnable outer optimization needs:
 
 1. **Scenario contract:** model/runtime identity, endpoint, workload points, metrics,
-   repetitions, and promotion policy.
+   fast/qualification lanes, stability budgets, and promotion policy.
 2. **Profile evidence:** PyTorch Chrome, Nsight Systems CSV, or Nsight Compute CSV
    exported from the relevant workload.
 3. **Pinned source:** an SGLang repository and baseline Git revision.
@@ -67,16 +67,17 @@ inner-loop capabilities are built.
 ## Current executable slice
 
 ```text
-import existing profile -> rule-ranked finding -> reviewed catalog change
-  -> authorization -> isolated baseline/candidate trial -> suite gate -> memory
+authorization -> owned champion service -> bounded SGLang Torch profile
+  -> streaming summary -> rule-ranked finding -> reviewed catalog change
+  -> isolated baseline/candidate trial -> unprofiled suite gate -> memory
 ```
 
 - Profile data is diagnostic and can select a hypothesis.
 - Baseline and candidate performance is measured without profiling.
 - Every failure and rejection is retained; the planner can use that memory to avoid
   repeating the same change in the same context.
-- Active NSYS capture, real-shape extraction, kernel generation/repair, and automatic
-  champion re-profile are not yet connected.
+- Each new optimization run profiles the current reviewed champion. Active NSYS/NCU
+  escalation, real-shape extraction, and kernel generation/repair are not yet connected.
 
 ## Inspect before execution
 
@@ -89,11 +90,12 @@ uv run euboulia optimize plan \
   --recipe examples/optimization-sglang.yaml
 ```
 
-`optimize plan` imports and analyzes the declared profile, proposes a catalog entry,
-and prints the plan. It creates no worktree and starts no process.
+`optimize plan` prints the selected profile workload, bounded step window, disk budget,
+retention policy, and required capabilities. It does not profile, analyze, propose,
+create a worktree, or start a process.
 
-Running without all required permissions records the deliberation and pauses at the
-capability boundary:
+Running without all required permissions records the run boundary and pauses before
+the active profile or any other declared side effect:
 
 ```console
 uv run euboulia optimize run --recipe your-scenario.yaml
@@ -105,6 +107,7 @@ uv run euboulia optimize run --recipe your-scenario.yaml
 uv run euboulia optimize run \
   --recipe your-scenario.yaml \
   --apply-patches \
+  --run-profiles \
   --run-builds \
   --manage-services \
   --run-evaluations
@@ -115,6 +118,7 @@ Permissions are independent:
 | Flag | Permits |
 | --- | --- |
 | `--apply-patches` | Create isolated worktrees and materialize the selected reviewed change |
+| `--run-profiles` | Call `/start_profile` and `/stop_profile` on the owned SGLang champion and capture bounded traces |
 | `--run-builds` | Run only the finite argv commands declared in `target.build` |
 | `--manage-services` | Start, readiness-check, and stop only SGLang processes created by this run |
 | `--run-evaluations` | Run the declared finite correctness and benchmark commands |
@@ -134,15 +138,41 @@ or deployment.
 | `benchmark` | Benchmark mode and typed parameters |
 | `baseline` | Baseline identity, pinned SGLang revision, and optional external-target parameters |
 | `target` | SGLang build, native launch options, declared hardware, GPUs, readiness, and runtime identity |
-| `optimization.profiles` | Imported profile artifacts and formats |
+| `optimization.profiling` | Active SGLang profile point, step window, trace checks, size limits, and retention |
 | `optimization.planner` | Reviewed catalog and proposal/deduplication policy |
 | `optimization.workspace` | Repository, detached-worktree root, and patch limits |
-| `optimization.evaluation` | Correctness/performance commands, objective, repetitions, and suite gates |
-| `optimization.budget` | Iteration, wall-time, failure, patience, and profile-size limits |
+| `optimization.evaluation` | Correctness/performance commands, lanes, adaptive stability, external accuracy contract, objective, and suite gates |
+| `optimization.budget` | Iteration, wall-time, failure, and patience limits |
 | `execution` | Artifact directory, event ledger, experiment ledger, and memory database |
 
-Paths are resolved relative to the recipe. Build and evaluation commands are argv
-arrays, never shell strings. Environment changes are explicit key/value mappings.
+Paths are resolved relative to the recipe. Commands are compiled to argument arrays
+and never passed through a shell. Environment changes are explicit key/value mappings.
+
+### Active profile and trace retention
+
+```yaml
+optimization:
+  profiling:
+    provider: sglang_torch
+    workload_point: isl16k-osl256-c1
+    warmup_runs: 1
+    start_step: 1
+    num_steps: 3
+    activities: [GPU]
+    with_stack: false
+    record_shapes: false
+    max_raw_bytes: 8589934592
+    min_free_disk_bytes: 17179869184
+    max_summary_rows: 5000
+    keep_raw: false
+```
+
+The runtime checks free space before capture, asks SGLang for a finite profiler step
+window, and hashes every per-rank trace. Chrome trace events are decoded incrementally
+and aggregated by activity/name/device/rank/phase, so the full decompressed JSON is
+never held in memory. With `keep_raw: false`, raw traces are removed only after the
+bounded summary and manifest are durable. A failed capture keeps raw evidence for
+diagnosis. Profile-derived values remain diagnostic and cannot pass a promotion gate.
 
 ### Template resolution and execution lock
 
@@ -188,7 +218,7 @@ uv run euboulia target resolve \
 
 uv run euboulia target run \
   --recipe scenario.lock.yaml \
-  --prepare-workspace --run-builds --manage-services --run-evaluations
+  --prepare-workspace --run-profiles --run-builds --manage-services --run-evaluations
 ```
 
 The lock file must be written beside its template so relative paths keep the same
@@ -196,6 +226,8 @@ meaning. It contains concrete values and no `inputs` section. Managed schema-v3 
 also require an image digest, a full baseline Git commit, and a matching pinned SGLang
 runtime revision. Each model must provide either a full revision commit or a non-zero
 weights-manifest SHA-256. Source-backed runtime components must declare `dirty: false`;
+declared accelerator model/count and local node count are checked generically against
+the captured host inventory.
 reviewed candidate patches remain separate experiment inputs. Every active run writes
 the exact bound document to
 `<artifacts>/<run-id>/resolved-recipe.yaml` (or the target-validation subdirectory for
@@ -330,18 +362,56 @@ The runner supplies evaluator commands with explicit environment values for:
 - active endpoint and model/served name;
 - suite and point identity;
 - input/output tokens, concurrency, prompt count, dataset, and request rate;
-- warmup and repetition counts; and
+- measurement phase/window plus one-sample harness controls; and
 - metrics output path.
 
 The built-in SGLang correctness harness checks routing, response shape, and non-empty
-output. This is a smoke check, not semantic accuracy. Scenario-specific commands may
-run task evaluation such as GSM8K when a model, quantization path, or
-numerics-affecting kernel changes; the runtime does not yet provide a generic
-champion-only accuracy state.
+output. This is a smoke check, not semantic accuracy. Qualification may declare one
+external accuracy command and a JSON result contract (`path`, dotted `metric`,
+`direction`, and `threshold`). The external tool owns datasets, prompts, scoring,
+and task-specific dependencies; Euboulia only executes it and evaluates the result.
+`{endpoint}`, `{served_name}`, `{model_path}`, `{workspace}`, and `{result_path}`
+are expanded as argv values without a shell.
 
-The performance harness runs repeated samples, validates complete requests and
-finite metrics, and emits normalized results for the gate. Dataset-specific harness
-rules may additionally enforce exact lengths, cache state, or evidence snapshots.
+External accuracy commands use a structured declaration rather than hand-written
+argv. All tool switches stay together under `options`; a mapping value is compiled
+to the comma-separated `key=value` form used by tools such as lm-eval:
+
+```yaml
+accuracy:
+  command:
+    name: lm-eval-gsm8k
+    executable: python3
+    module: lm_eval
+    timeout_seconds: 7200
+    options:
+      --model: local-chat-completions
+      --apply_chat_template: true
+      --model_args:
+        model: "{served_name}"
+        base_url: "{endpoint}/v1/chat/completions"
+        num_concurrent: 64
+      --tasks: gsm8k
+      --output_path: "{result_path}"
+  result:
+    path: accuracy.json
+    metric: results.gsm8k.exact_match,flexible-extract
+    direction: maximize
+    threshold: 0.8
+```
+
+The performance harness emits one normalized sample per invocation. The generic
+evaluator performs warmups, records objective windows, and stops as soon as the
+configured number of recent windows are within the relative tolerance. A point
+fails closed if it does not stabilize before `max_windows` or `max_seconds`.
+Dataset-specific harness rules may additionally enforce exact lengths, cache state,
+or evidence snapshots.
+
+The `fast` lane is used for baseline/candidate iterations and should contain a small
+representative point set. The `qualification` lane must contain `all` workload
+points and is used by target validation; only qualification runs the external
+accuracy command. This follows the same separation used by InferenceX: standardized
+serving measurements are distinct from lm-evaluation-harness task evaluation.
 
 ## Promotion policy
 
@@ -402,16 +472,10 @@ The event log and linked artifacts are the audit source. SQLite is a rebuildable
 query index. Failed worktrees are retained for inspection and require a separate,
 operator-controlled cleanup action.
 
-## External-service compatibility
-
-When `target` is absent, Euboulia can evaluate reviewed patch-only changes against an
-already-running service. It may send requests to the configured endpoint but never
-discovers, starts, restarts, signals, or stops that service. This path supports older
-SGLang/vLLM workflows; new engine optimization work should prefer managed SGLang.
-
 ## Gap to the primary workflow
 
-- NSYS/NCU artifacts are imported rather than captured at the correct loop stage.
+- Bounded Torch traces are captured at the champion-profile stage, but automatic
+  NSYS/NCU escalation is not yet implemented.
 - ROI selection does not yet combine end-to-end contribution, call frequency,
   optimization headroom, and implementation cost.
 - A hotspot is not yet converted into a kernel task with reference semantics and
@@ -420,8 +484,6 @@ SGLang/vLLM workflows; new engine optimization work should prefer managed SGLang
   correctness, microbenchmark, and NCU-guided iteration.
 - Validated kernels are not automatically integrated into SGLang, and a promoted
   champion is not automatically re-profiled to select the next hotspot.
-- Scenario-specific accuracy harnesses exist, but semantic accuracy lacks a generic
-  champion-only state.
 - Trial scheduling is local and sequential; remote workers, interleaved pairs,
   confidence intervals, and crash-safe resume remain future work.
 - Euboulia ends at evidence and a recommendation. Merge, rollout, and production

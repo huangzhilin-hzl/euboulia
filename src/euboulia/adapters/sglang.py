@@ -191,21 +191,23 @@ def _reject_profile_controls(
     """Keep the serving benchmark from mutating the server profiler state.
 
     SGLang's ``--profile`` family calls the server's start/stop profiling
-    endpoints. Euboulia currently imports profiler artifacts produced by an
-    explicitly managed, out-of-band workflow, so these options fail closed.
+    endpoints. The optimization runner owns that lifecycle and keeps it out of
+    scored benchmark commands, so these adapter options fail closed.
     """
 
     if not isinstance(base_args, str | bytes):
         for arg in base_args:
             if isinstance(arg, str) and _is_profile_control(arg):
                 raise AdapterError(
-                    "serving profile controls are disabled; use offline profile import"
+                    "serving profile controls are disabled in the benchmark adapter; "
+                    "use managed optimize run profiling"
                 )
     if isinstance(parameters, Mapping):
         for name in parameters:
             if isinstance(name, str) and _is_profile_parameter(name):
                 raise AdapterError(
-                    "serving profile controls are disabled; use offline profile import"
+                    "serving profile controls are disabled in the benchmark adapter; "
+                    "use managed optimize run profiling"
                 )
 
 

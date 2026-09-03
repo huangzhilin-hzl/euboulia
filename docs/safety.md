@@ -12,17 +12,16 @@ SGLang processes created for an explicitly authorized run.**
 | Action | Authorization | Status |
 | --- | --- | --- |
 | Validate a recipe and inspect a plan | None | Supported |
-| Import existing profiler artifacts | None | Supported |
 | Run a schema-v1 benchmark client | `run --execute` | Supported |
 | Create detached trial worktrees and apply a reviewed change | `--apply-patches` | Supported |
 | Run declared build argv | `--run-builds` | Supported |
 | Start/readiness-check/stop a fresh local SGLang child | `--manage-services` | Supported |
 | Run finite correctness and performance commands | `--run-evaluations` | Supported |
+| Start/stop a bounded profile on the owned SGLang service | `--run-profiles` | Supported |
 | Generate and iteratively repair CUDA/Triton code | No dedicated authorization exists | Planned; not yet implemented |
 | Discover or take over an existing service | No authorization exists | Forbidden |
 | Edit the user's branch, commit, push, or deploy | No authorization exists | Forbidden |
 | Manage vLLM lifecycle | No authorization exists | Not implemented |
-| Start or stop profiling | No authorization exists | Not implemented |
 
 `optimize plan` is read-only. `optimize run` may record its deliberation, but it
 pauses before the first missing capability. One flag never implies another, and a
@@ -36,7 +35,8 @@ Before a run, review:
 - pinned SGLang/runtime revisions and observed provenance;
 - exact source patch and server-argument delta;
 - build, launch, readiness, correctness, and benchmark argv;
-- timeouts, worktree/artifact paths, objective, repetitions, and regression gates.
+- timeouts, worktree/artifact paths, objective, lane/stability budgets, external
+  accuracy command/result contract, and regression gates.
 
 After a run, review raw results, failures, noise, provenance drift, per-point
 regressions, and semantic accuracy before any separate merge or rollout decision.

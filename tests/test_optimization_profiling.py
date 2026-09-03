@@ -1,15 +1,30 @@
+import gzip
 import json
 from pathlib import Path
 
-from euboulia.optimization.config import ProfileArtifactConfig
-from euboulia.optimization.contracts import ProfileRequest, StageContext
-from euboulia.optimization.profiling import ImportedProfiler, RuleAnalyzer
+import pytest
+
+from euboulia.execution import ExecutionResult
+from euboulia.optimization.config import ProfileProvider, SGLangProfilingConfig
+from euboulia.optimization.contracts import Capability, ProfileRequest, StageContext
+from euboulia.optimization.profiling import ProfileCaptureError, RuleAnalyzer, SGLangProfiler
 
 
-def _trace(path: Path) -> None:
+class _LocalProfiler(SGLangProfiler):
+    raw_dir: Path | None = None
+    start_payload: dict[str, object] | None = None
+
+    def _post_json(self, endpoint: str, path: str, payload: dict[str, object]) -> None:
+        del endpoint
+        if path == "/start_profile":
+            self.start_payload = payload
+            self.raw_dir = Path(str(payload["output_dir"]))
+
+
+def _trace(path: Path, *, kernel: str = "fp8_mxfp4_mega_moe") -> None:
     events = [
         {
-            "name": "decode_kernel",
+            "name": kernel,
             "cat": "kernel",
             "ph": "X",
             "ts": index * 10,
@@ -19,43 +34,146 @@ def _trace(path: Path) -> None:
         }
         for index in range(110)
     ]
-    path.write_text(json.dumps({"traceEvents": events}), encoding="utf-8")
+    with gzip.open(path, "wt", encoding="utf-8") as handle:
+        json.dump({"traceEvents": events}, handle)
 
 
-def test_imported_profiler_and_rule_analyzer_bridge_contracts(tmp_path: Path) -> None:
-    path = tmp_path / "trace.json"
-    _trace(path)
-    profiler = ImportedProfiler((ProfileArtifactConfig(path=path, source="torch_chrome_trace"),))
-    context = StageContext(run_id="run", iteration_id="iteration", artifact_dir=tmp_path)
-    profile = profiler.capture(
-        ProfileRequest(
-            candidate_id="champion",
-            source_revision="abc",
-            workload_digest="workload",
-            max_bytes=1_000_000,
-        ),
-        context,
+def _execution(tmp_path: Path) -> ExecutionResult:
+    stdout = tmp_path / "workload.stdout.log"
+    stderr = tmp_path / "workload.stderr.log"
+    stdout.write_text("", encoding="utf-8")
+    stderr.write_text("", encoding="utf-8")
+    return ExecutionResult(
+        command_id="profile-workload",
+        argv=("benchmark",),
+        cwd=tmp_path,
+        returncode=0,
+        started_at="2026-01-01T00:00:00Z",
+        finished_at="2026-01-01T00:00:01Z",
+        duration_seconds=1.0,
+        stdout_path=stdout,
+        stderr_path=stderr,
+        environment_keys=(),
     )
 
-    report = RuleAnalyzer(profiler).analyze(profile, (), context)
 
-    assert profile.metadata["gate_eligible"] is False
-    assert profile.metrics["observation_count"] == 110
+def _context(tmp_path: Path) -> StageContext:
+    return StageContext(
+        run_id="run",
+        iteration_id="iteration",
+        artifact_dir=tmp_path,
+        authorizations=frozenset(
+            {Capability.PROFILE_EXECUTION, Capability.BENCHMARK_EXECUTION}
+        ),
+    )
+
+
+def _config(**overrides: object) -> SGLangProfilingConfig:
+    values = {
+        "provider": ProfileProvider.SGLANG_TORCH,
+        "workload_point": "profile-point",
+        "warmup_runs": 0,
+        "settle_timeout_seconds": 2,
+        "min_free_disk_bytes": 1_000_000,
+        "max_raw_bytes": 1_000_000,
+        "max_summary_rows": 100,
+        "expected_rank_traces": 2,
+        "required_kernel_pattern": "fp8_mxfp4_mega_moe",
+    }
+    values.update(overrides)
+    return SGLangProfilingConfig(**values)  # type: ignore[arg-type]
+
+
+def test_active_profiler_streams_summary_validates_ranks_and_evicts_raw(
+    tmp_path: Path,
+) -> None:
+    profiler = _LocalProfiler(_config())
+
+    def workload() -> ExecutionResult:
+        assert profiler.raw_dir is not None
+        _trace(profiler.raw_dir / "rank-0.trace.json.gz")
+        _trace(profiler.raw_dir / "rank-1.trace.json.gz")
+        return _execution(tmp_path)
+
+    profile = profiler.capture(
+        ProfileRequest("champion", "abc", "workload", max_bytes=1_000_000),
+        _context(tmp_path),
+        endpoint="http://127.0.0.1:30000",
+        run_workload=workload,
+    )
+    report = RuleAnalyzer(profiler).analyze(profile, (), _context(tmp_path))
+
+    assert profile.provider == "sglang_torch"
+    assert profiler.start_payload is not None
+    assert profiler.start_payload["num_steps"] == 3
+    assert profiler.start_payload["with_stack"] is False
+    assert profiler.start_payload["record_shapes"] is False
+    assert profile.metrics["raw_observation_count"] == 220
+    assert profile.metrics["summary_row_count"] == 2
+    assert profile.metadata["raw_retained"] is False
+    assert not tuple((tmp_path / "profile/raw").glob("*.trace.json.gz"))
+    assert (tmp_path / "profile/summary.json").is_file()
+    assert (tmp_path / "profile/manifest.json").is_file()
     assert any(finding.category == "launch" for finding in report.findings)
-    assert report.metadata["measurement_lane"] == "profile_diagnostic"
 
 
-def test_imported_profiler_enforces_total_byte_budget(tmp_path: Path) -> None:
-    path = tmp_path / "trace.json"
-    _trace(path)
-    profiler = ImportedProfiler((ProfileArtifactConfig(path=path, source="torch_chrome_trace"),))
+def test_active_profiler_keeps_failed_capture_for_diagnosis(tmp_path: Path) -> None:
+    profiler = _LocalProfiler(_config(max_raw_bytes=1))
 
-    try:
+    def workload() -> ExecutionResult:
+        assert profiler.raw_dir is not None
+        _trace(profiler.raw_dir / "rank-0.trace.json.gz")
+        _trace(profiler.raw_dir / "rank-1.trace.json.gz")
+        return _execution(tmp_path)
+
+    with pytest.raises(ProfileCaptureError, match="raw byte budget"):
         profiler.capture(
-            ProfileRequest("candidate", "abc", "workload", max_bytes=1),
-            StageContext("run", "iteration", tmp_path),
+            ProfileRequest("champion", "abc", "workload", max_bytes=1),
+            _context(tmp_path),
+            endpoint="http://127.0.0.1:30000",
+            run_workload=workload,
         )
-    except ValueError as exc:
-        assert "byte budget" in str(exc)
-    else:  # pragma: no cover - makes a missing exception explicit
-        raise AssertionError("expected imported profile byte budget failure")
+
+    assert len(tuple((tmp_path / "profile/raw").glob("*.trace.json.gz"))) == 2
+
+
+def test_active_profiler_rejects_traces_without_complete_events(tmp_path: Path) -> None:
+    profiler = _LocalProfiler(
+        _config(expected_rank_traces=1, required_kernel_pattern=None)
+    )
+
+    def workload() -> ExecutionResult:
+        assert profiler.raw_dir is not None
+        with gzip.open(
+            profiler.raw_dir / "rank-0.trace.json.gz", "wt", encoding="utf-8"
+        ) as handle:
+            json.dump({"traceEvents": [{"name": "metadata", "ph": "M"}]}, handle)
+        return _execution(tmp_path)
+
+    with pytest.raises(ProfileCaptureError, match="no complete-duration"):
+        profiler.capture(
+            ProfileRequest("champion", "abc", "workload", max_bytes=1_000_000),
+            _context(tmp_path),
+            endpoint="http://127.0.0.1:30000",
+            run_workload=workload,
+        )
+
+    assert (tmp_path / "profile/raw/rank-0.trace.json.gz").is_file()
+
+
+def test_active_profiler_requires_an_exact_rank_set(tmp_path: Path) -> None:
+    profiler = _LocalProfiler(_config())
+
+    def workload() -> ExecutionResult:
+        assert profiler.raw_dir is not None
+        _trace(profiler.raw_dir / "TP-0-a.trace.json.gz")
+        _trace(profiler.raw_dir / "TP-0-b.trace.json.gz")
+        return _execution(tmp_path)
+
+    with pytest.raises(ProfileCaptureError, match="duplicate rank"):
+        profiler.capture(
+            ProfileRequest("champion", "abc", "workload", max_bytes=1_000_000),
+            _context(tmp_path),
+            endpoint="http://127.0.0.1:30000",
+            run_workload=workload,
+        )

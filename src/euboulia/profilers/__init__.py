@@ -1,4 +1,4 @@
-"""Offline profiler artifact import and conservative bottleneck analysis."""
+"""Profiler normalization and conservative bottleneck analysis."""
 
 from .analysis import AnalysisThresholds, analyze_observations
 from .models import (
@@ -15,6 +15,7 @@ from .models import (
 )
 from .parsers import (
     ProfileParseError,
+    iter_torch_chrome_trace,
     parse_ncu_csv,
     parse_nsys_stats_csv,
     parse_profile,
@@ -34,6 +35,7 @@ __all__ = [
     "ProfileSource",
     "SubjectKind",
     "analyze_observations",
+    "iter_torch_chrome_trace",
     "parse_ncu_csv",
     "parse_nsys_stats_csv",
     "parse_profile",

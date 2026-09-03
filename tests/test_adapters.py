@@ -277,7 +277,7 @@ def test_parameter_names_and_nested_values_fail_closed() -> None:
 def test_serving_profile_control_base_args_fail_closed(
     adapter: SGLangAdapter | VLLMAdapter, base_args: tuple[str, ...]
 ) -> None:
-    with pytest.raises(AdapterError, match="offline profile import"):
+    with pytest.raises(AdapterError, match="benchmark adapter"):
         adapter.build_serve_command(
             model="m",
             result_path="result.json",
@@ -290,7 +290,7 @@ def test_serving_profile_control_base_args_fail_closed(
 def test_serving_profile_control_parameters_fail_closed(
     adapter: SGLangAdapter | VLLMAdapter, parameter: str
 ) -> None:
-    with pytest.raises(AdapterError, match="offline profile import"):
+    with pytest.raises(AdapterError, match="benchmark adapter"):
         adapter.build_serve_command(
             model="m",
             result_path="result.json",
@@ -310,7 +310,7 @@ def test_vllm_offline_benchmark_profile_controls_fail_closed(
         "num_prompts": 2,
     }
 
-    with pytest.raises(AdapterError, match="offline profile import"):
+    with pytest.raises(AdapterError, match="benchmark adapter"):
         VLLMAdapter().build_command(
             mode,
             workload,

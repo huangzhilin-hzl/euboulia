@@ -29,7 +29,7 @@ def test_event_json_round_trip_preserves_typed_artifacts() -> None:
         run_id="run-1",
         iteration_id="iteration-1",
         input_digest="input-digest",
-        payload={"provider": "imported", "count": 1},
+        payload={"provider": "sglang_torch", "count": 1},
         artifacts=(artifact(),),
     )
 
