@@ -3,23 +3,27 @@
 Euboulia is designed to help an operator reason about inference performance
 without quietly becoming an infrastructure controller. Its central safety
 property is simple: **inspection is the default, every side-effect class is
-explicit, and service mutation remains outside the runtime.**
+explicit, external services remain untouched, and managed SGLang processes are
+limited to children created and owned by the current run.**
 
 ## Action boundary
 
 | Action | Inspection default | Narrow authorization | Status |
 | --- | --- | --- | --- |
-| Validate configuration, gates, trace, and patch catalog | Allowed | None needed | Supported |
+| Validate configuration, gates, trace, and reviewed change catalog | Allowed | None needed | Supported |
 | Render argument vectors, paths, and trial order | Allowed | None needed | Supported |
 | Invoke a schema-v1 benchmark client | No | `run --execute` | Supported |
 | Import existing profiler artifacts | Allowed | None needed | Supported |
 | Start or stop server profiling | No | None exists | Not permitted |
 | Prepare and check a patch in a detached worktree | No | Active optimize run | Supported |
-| Apply a reviewed schema-v2 patch in that worktree | No | `--apply-patches` | Supported |
+| Apply a reviewed optimization patch in that worktree | No | `--apply-patches` | Supported |
 | Run finite preflight/correctness/benchmark commands | No | `--run-evaluations` | Supported |
+| Run declared build argv in pinned baseline/candidate worktrees | No | `--run-builds` | Supported only when `target.build.commands` is declared |
+| Start, readiness-check, and stop a fresh local SGLang child | No | `--manage-services` | Supported only for an explicit schema-v2/v3 `target` |
 | Apply a schema-v1 candidate `patch` field | No | None exists | Not permitted |
 | Edit the user's branch or auto-commit/push | No | None exists | Not permitted |
-| Launch, restart, signal, or kill an inference service | No | None exists | Not permitted |
+| Discover, adopt, restart, signal, or kill an external inference service | No | None exists | Not permitted |
+| Manage a vLLM service | No | None exists | Not permitted in the MVP |
 | Deploy, promote, or alter infrastructure | No | None exists | Not permitted |
 
 `run` without `--execute` must remain non-executing. `--dry-run` is an explicit
@@ -27,9 +31,11 @@ way to request the same safe inspection behavior. A future feature cannot reuse
 `--execute` as blanket permission for a broader class of changes.
 
 Likewise, `optimize plan` is zero-write and zero-process. `optimize run` records
-its deliberation but pauses before a worktree is created unless both active
-capabilities are present. Neither flag authorizes service lifecycle, external
-model calls, deployment, or mutation outside the fresh worktree.
+its deliberation but pauses before a worktree is created unless all capabilities
+required by the configuration are present. Workspace, benchmark, owned service,
+and build authorization do not imply one another. None authorizes external
+service control, external model calls, deployment, or mutation of the user's
+branch.
 
 ## Human checkpoints
 
@@ -39,8 +45,10 @@ There are three mandatory decision points:
    request rate, concurrency, command arguments, environment, timeout, artifact
    location, and estimated resource impact.
 2. **Before an optimization trial:** inspect the pinned revision, exact patch and
-   digest, changed paths and budgets, all finite argv commands, objective,
-   baseline, profiler separation, workspace root, and cost limit.
+   digest, structured server-argument delta, changed paths and budgets, build,
+   launch, readiness, shutdown, correctness, and benchmark argv, objective,
+   per-point baseline/promotion policy, GPU IDs, image/dependency provenance,
+   profiler separation, workspace root, and cost limit.
 3. **After evaluation:** inspect raw evidence, correctness, noise, regressions,
    and provenance before making any separate server or deployment change.
 
@@ -55,10 +63,15 @@ authorization.
   visible during planning.
 - Execution inherits only the required environment plus explicitly declared
   string overrides. Sensitive values should be redacted in displays and records.
-- Every benchmark has a finite timeout. On timeout, Euboulia may terminate only
-  the exact benchmark child process it created and its owned descendants.
-- Euboulia must never discover, signal, restart, or kill the SGLang/vLLM server
-  at the configured endpoint.
+- Every build and benchmark has a finite timeout. On timeout, Euboulia may
+  terminate only the exact child process it created and its owned descendants.
+- A managed target records its exact SGLang child/process-group identity at
+  creation. Readiness timeout, evaluation failure, interruption, and exceptions
+  all enter `finally` teardown for that identity.
+- Euboulia must never use port scans, `pgrep`, `pkill`, name matching, a stale PID
+  file, or the configured endpoint to discover or kill a process. An external
+  SGLang/vLLM service is never signaled.
+- The managed MVP does not start or stop vLLM.
 - A partial result, nonzero exit, timeout, or parse failure is retained as a
   failed experiment and cannot be promoted to a passing verdict.
 - SGLang/vLLM `--profile` and `--profile-*` controls are rejected by serving
@@ -67,7 +80,7 @@ authorization.
 ## Filesystem safety
 
 - Artifact and ledger paths are resolved before execution and shown in the plan.
-- Writes are limited to the declared campaign locations and use unique run
+- Writes are limited to the declared recipe locations and use unique run
   identities rather than broad cleanup or in-place reuse.
 - Existing evidence should not be overwritten silently. Completed records are
   append-only from the operator's perspective.
@@ -76,17 +89,20 @@ authorization.
   by a framework.
 - Never point an artifact directory at a source tree, home directory, filesystem
   root, model store, or other valuable shared location.
-- Each active proposal gets a detached worktree outside the repository. Patch
-  paths cannot be absolute, contain `..`/`.git`, traverse symlinks, create a
-  symlink or binary object, or exceed declared byte/file/line budgets.
+- The external-service path gives each proposal a detached candidate worktree.
+  Managed mode creates separate baseline and candidate worktrees at the same
+  pinned revision. Patch paths cannot be absolute, contain `..`/`.git`, traverse
+  symlinks, create a symlink or binary object, or exceed byte/file/line budgets.
 - Worktrees and failed patch evidence are not automatically deleted. The operator
   removes them later through a separately reviewed maintenance action.
 
 ## Network and resource safety
 
-The endpoint is explicit; Euboulia does not scan for a server. The examples use
-loopback addresses intentionally. Before targeting a remote environment, confirm
-authorization, isolation, rate limits, budget, and an observability/abort plan.
+The endpoint is explicit; Euboulia does not scan for a server. Managed target
+readiness is restricted to localhost or a loopback IP address. The external-
+service recipe examples also use loopback intentionally. Before benchmarking a
+remote external environment, confirm authorization, isolation, rate limits,
+budget, and an observability/abort plan.
 
 Benchmark traffic can exhaust GPU memory, saturate accelerators and networks,
 increase latency for other tenants, or create significant cloud cost. Begin with
@@ -107,8 +123,9 @@ a third-party endpoint merely because it is reachable.
 ## Evidence integrity
 
 An experiment record should bind together the validated configuration, generated
-argument vector, environment/provenance, timestamps, process status, raw native
-result, normalized metrics, and gate verdict. Unknown raw fields are retained so
+argument vector, expected/observed runtime provenance, timestamps, process status,
+per-workload-point raw results, normalized metrics, and suite gate verdict.
+Unknown raw fields are retained so
 a parser update can be audited. Failed and rejected records stay visible.
 
 Cryptographic artifact manifests, signed ledgers, isolated workers, and stronger
@@ -121,16 +138,18 @@ than embedded. SQLite memory is a derived index and may be deleted/rebuilt; it i
 not the canonical audit record. Profile observations are permanently labeled
 `profile_diagnostic` and `gate_eligible=false`.
 
-## Candidate patches
+## Reviewed changes
 
 Schema v1 permits a nullable `patch` field so a candidate can refer to a proposed
 change in evidence. It remains inert metadata forever under that schema.
 
-Schema v2 uses a separate reviewed patch catalog. The planner cannot write code;
-it selects a catalog entry whose trigger matches a finding. The workspace treats
-that result as untrusted, repeats exact-apply validation at the mutation boundary,
-and edits only its detached worktree. Euboulia never commits the patch, touches
-the user's dirty changes, or treats an accepted benchmark as deployment approval.
+Schema v2/v3 uses a separate reviewed change catalog. Cookbook or recipe conversion
+is the operator's responsibility. The planner cannot write code or invent a
+launch option; it selects an args-only, patch-only, or composite entry whose
+trigger matches a finding. The workspace treats that result as untrusted, repeats
+exact-apply validation at the mutation boundary, and edits only its detached
+candidate worktree. Euboulia never commits the patch, touches the user's dirty
+changes, or treats an accepted benchmark as deployment approval.
 
 ## Expanding the boundary
 

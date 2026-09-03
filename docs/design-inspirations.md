@@ -12,6 +12,7 @@ runtime. The source of truth remains Euboulia's own typed events and evidence.
 | [Optuna](https://optuna.readthedocs.io/en/stable/tutorial/20_recipes/009_ask_and_tell.html) | Trial states, ask/tell-shaped search policies, hard budgets, duplicate rejection, and fail-fast pruning | Optuna may become an adapter, but it is not the audit log or scheduler |
 | [MLflow](https://mlflow.org/docs/latest/ml/tracking/) | Separate small run metadata and metrics from large content-addressed artifacts; model parent run and child trials | Tracking is a one-way projection and cannot decide or block a trial |
 | [LangGraph](https://docs.langchain.com/oss/python/langgraph/persistence) | Checkpoint-oriented thinking, deterministic replay, and explicit pause/resume boundaries | The first runtime uses a small explicit state machine instead of adding LangGraph |
+| [InferenceX](https://github.com/SemiAnalysisAI/InferenceX) | A shared serving benchmark driver, fixed workload identity, fail-closed request accounting, and a separate semantic-eval path | Euboulia keeps local process ownership and per-candidate gates; it does not import InferenceX's CI matrix, deployment assumptions, or model-specific eval policy |
 
 ## Components, not branding
 
@@ -24,10 +25,13 @@ imported profile
 Profiler -> Analyzer -> HypothesisPlanner -> approval
                                            |
                                            v
-                                    PatchWorkspace
+                              Reviewed ChangeWorkspace
                                            |
                                            v
-                        preflight -> correctness -> benchmark
+                      RuntimeProvenance -> TargetController
+                                           |
+                                           v
+                 correctness once -> unprofiled point matrix
                                            |
                                            v
                              EventLedger + Memory index
@@ -43,7 +47,7 @@ added as an adapter.
 ## Why the event log is separate
 
 The existing experiment ledger contains only benchmark `Experiment` snapshots.
-Optimization events use a separate append-only log so old campaign readers stay
+Optimization events use a separate append-only log so old recipe readers stay
 compatible. An event contains IDs and small JSON data; trace files, patches,
 stdout, and benchmark output remain artifacts referenced by path, size, and
 SHA-256 digest.
@@ -56,23 +60,41 @@ event log as the audit record.
 ## Safety and evidence rules
 
 1. Profile captures diagnose a candidate but are ineligible for promotion.
-2. A patch is untrusted input until path, symlink, size, file-count, line-count,
-   base-revision, and exact-apply checks pass.
-3. A fresh detached Git worktree is created for each trial; the user's branch is
-   never edited or automatically committed.
-4. Checks are fail-fast and ordered from cheap to expensive: preflight,
-   correctness, then an unprofiled benchmark.
+2. A reviewed change is still untrusted input. Structured arguments are validated;
+   a patch must pass path, symlink, size, file-count, line-count, base-revision,
+   and exact-apply checks.
+3. Managed baseline and candidate trials use separate detached Git worktrees at
+   the same pinned revision; the user's branch is never edited or automatically
+   committed.
+4. Checks are fail-fast and ordered from cheap to expensive: preflight and
+   correctness once per fresh service, then an unprofiled benchmark for every
+   declared workload point.
 5. The reference baseline is immutable. An accepted candidate becomes the
    current champion, and the next candidate is compared with that champion.
-6. Planning, workspace writes, evaluator commands, service ownership, and any
-   external model call are separate capabilities. Configuration may request a
-   capability but cannot authorize itself.
+6. Planning, workspace writes, evaluator commands, owned service lifecycle,
+   optional builds, and any external model call are separate capabilities.
+   Configuration may request a capability but cannot authorize itself.
+
+## Why benchmark and semantic accuracy are separate
+
+InferenceX centralizes serving measurement instead of maintaining a benchmark
+script per model, while lm-eval tasks and thresholds live on a separate path.
+Euboulia adopts that separation. Its built-in SGLang performance harness consumes
+the framework-neutral workload contract, verifies complete request accounting,
+and aggregates repeated measurements. Its built-in correctness command is only a
+fast endpoint/output-shape smoke check.
+
+Semantic accuracy is intentionally not inferred from that smoke response. Model
+task selection, answer extraction, tokenizer/chat-template behavior, and score
+thresholds are versioned evaluation policy. In the MVP they remain an external
+reviewed command. A later accuracy component can reuse lm-eval-style tasks, but it
+must have an explicit onboarding or champion-promotion state rather than forcing
+the same expensive suite into every mechanically equivalent candidate trial.
 
 ## Deferred integrations
 
-The first implementation intentionally stops short of controlling an SGLang or
-vLLM server. Owned service lifecycle, repeated interleaved GPU trials,
-statistical pruning, container/remote workspaces, Optuna policies, and MLflow
-tracking remain adapters for later phases. This keeps the initial loop useful for
-offline profile analysis and isolated patch validation without weakening the
-existing service-control boundary.
+The MVP owns a narrowly scoped local SGLang lifecycle: fresh baseline and
+candidate children are built, started, checked, evaluated, and finally stopped.
+It does not adopt an existing SGLang process and does not manage vLLM. Managed
+vLLM, interleaved GPU scheduling, statistical pruning, container/remote
+workspaces, Optuna policies, and MLflow tracking remain later integrations.

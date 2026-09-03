@@ -53,15 +53,102 @@ ITERATION_TRANSITIONS: Mapping[IterationState, frozenset[IterationState]] = {
         }
     ),
     IterationState.WAITING_FOR_APPROVAL: frozenset(
-        {IterationState.PREPARING_WORKSPACE, IterationState.RECORDING_MEMORY}
+        {
+            IterationState.PREPARING_BASELINE,
+            IterationState.PREPARING_WORKSPACE,
+            IterationState.RECORDING_MEMORY,
+        }
+    ),
+    IterationState.PREPARING_BASELINE: frozenset(
+        {
+            IterationState.BUILDING_BASELINE,
+            IterationState.RECORDING_MEMORY,
+            IterationState.FAILED,
+        }
+    ),
+    IterationState.BUILDING_BASELINE: frozenset(
+        {
+            IterationState.STARTING_BASELINE,
+            IterationState.RECORDING_MEMORY,
+            IterationState.FAILED,
+        }
+    ),
+    IterationState.STARTING_BASELINE: frozenset(
+        {
+            IterationState.WAITING_FOR_BASELINE,
+            IterationState.STOPPING_BASELINE,
+            IterationState.RECORDING_MEMORY,
+            IterationState.FAILED,
+        }
+    ),
+    IterationState.WAITING_FOR_BASELINE: frozenset(
+        {
+            IterationState.EVALUATING_BASELINE,
+            IterationState.STOPPING_BASELINE,
+            IterationState.RECORDING_MEMORY,
+            IterationState.FAILED,
+        }
+    ),
+    IterationState.EVALUATING_BASELINE: frozenset(
+        {
+            IterationState.STOPPING_BASELINE,
+            IterationState.RECORDING_MEMORY,
+            IterationState.FAILED,
+        }
+    ),
+    IterationState.STOPPING_BASELINE: frozenset(
+        {
+            IterationState.PREPARING_WORKSPACE,
+            IterationState.RECORDING_MEMORY,
+            IterationState.FAILED,
+        }
     ),
     IterationState.PREPARING_WORKSPACE: frozenset(
         {IterationState.APPLYING_PATCH, IterationState.INVALID, IterationState.FAILED}
     ),
     IterationState.APPLYING_PATCH: frozenset(
-        {IterationState.EVALUATING, IterationState.INVALID, IterationState.FAILED}
+        {
+            IterationState.BUILDING,
+            IterationState.EVALUATING,
+            IterationState.INVALID,
+            IterationState.FAILED,
+        }
+    ),
+    IterationState.BUILDING: frozenset(
+        {
+            IterationState.STARTING_SERVICE,
+            IterationState.RECORDING_MEMORY,
+            IterationState.INVALID,
+            IterationState.FAILED,
+        }
+    ),
+    IterationState.STARTING_SERVICE: frozenset(
+        {
+            IterationState.WAITING_FOR_READY,
+            IterationState.STOPPING_SERVICE,
+            IterationState.RECORDING_MEMORY,
+            IterationState.INVALID,
+            IterationState.FAILED,
+        }
+    ),
+    IterationState.WAITING_FOR_READY: frozenset(
+        {
+            IterationState.EVALUATING,
+            IterationState.STOPPING_SERVICE,
+            IterationState.RECORDING_MEMORY,
+            IterationState.INVALID,
+            IterationState.FAILED,
+        }
     ),
     IterationState.EVALUATING: frozenset(
+        {
+            IterationState.STOPPING_SERVICE,
+            IterationState.RECORDING_MEMORY,
+            IterationState.INVALID,
+            IterationState.FAILED,
+        }
+    ),
+    IterationState.STOPPING_SERVICE: frozenset(
         {
             IterationState.RECORDING_MEMORY,
             IterationState.INVALID,

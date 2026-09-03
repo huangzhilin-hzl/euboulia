@@ -1,0 +1,6 @@
+diff --git a/python/sglang/example_scheduler.py b/python/sglang/example_scheduler.py
+--- a/python/sglang/example_scheduler.py
++++ b/python/sglang/example_scheduler.py
+@@ -1 +1 @@
+-PREFILL_DISPATCH_LIMIT = 1
++PREFILL_DISPATCH_LIMIT = 2

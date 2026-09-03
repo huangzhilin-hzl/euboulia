@@ -4,7 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "euboulia"
-version = "0.2.0"
+# MVP policy: keep this stable until a release version bump is explicitly requested.
+version = "0.1.0"
 description = "Evidence-driven, human-governed optimization agents for LLM inference systems."
 readme = "README.md"
 requires-python = ">=3.11"

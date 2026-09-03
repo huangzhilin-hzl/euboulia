@@ -201,6 +201,29 @@ def test_plan_is_read_only_and_run_waits_at_capability_boundary(tmp_path: Path) 
         runner.run(config, run_id="waiting-run")
 
 
+def test_external_service_mode_excludes_server_argument_changes(tmp_path: Path) -> None:
+    config_path = _project(tmp_path)
+    (tmp_path / "catalog.yaml").write_text(
+        """schema_version: 1
+entries:
+  - id: managed-only-arguments
+    title: Managed target arguments
+    rationale: Requires ownership of the server launch.
+    triggers: [launch]
+    server_args:
+      set:
+        --max-running-requests: 64
+""",
+        encoding="utf-8",
+    )
+    config = load_optimization_config(config_path)
+
+    plan = OptimizationRunner().plan(config)
+
+    assert plan.proposals == ()
+    assert any("server-argument changes are ineligible" in item for item in plan.warnings)
+
+
 def test_runner_applies_in_detached_workspace_and_records_accepted_memory(
     tmp_path: Path,
 ) -> None:

@@ -201,6 +201,45 @@ class TieredEvaluationResult:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class WorkloadSuiteEvaluationResult:
+    """Aggregate result for multiple workload points against one service instance."""
+
+    trial_id: str
+    outcome: EvaluationOutcome
+    point_results: Mapping[str, TieredEvaluationResult]
+    primary_points: tuple[str, ...]
+    objective_values: Mapping[str, float]
+    relative_improvements: Mapping[str, float]
+    relative_improvement: float | None
+    gate_passed: bool
+    promotable: bool
+    artifact_dir: Path
+    reason: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "point_results", dict(self.point_results))
+        object.__setattr__(self, "objective_values", dict(self.objective_values))
+        object.__setattr__(self, "relative_improvements", dict(self.relative_improvements))
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "trial_id": self.trial_id,
+            "outcome": self.outcome.value,
+            "point_results": {
+                point_id: result.to_dict() for point_id, result in self.point_results.items()
+            },
+            "primary_points": list(self.primary_points),
+            "objective_values": dict(self.objective_values),
+            "relative_improvements": dict(self.relative_improvements),
+            "relative_improvement": self.relative_improvement,
+            "gate_passed": self.gate_passed,
+            "promotable": self.promotable,
+            "artifact_dir": str(self.artifact_dir),
+            "reason": self.reason,
+        }
+
+
 class TieredEvaluator:
     """Run preflight, correctness, and benchmark tiers with fail-fast semantics."""
 
@@ -604,5 +643,6 @@ __all__ = [
     "StageResult",
     "TieredEvaluationResult",
     "TieredEvaluator",
+    "WorkloadSuiteEvaluationResult",
     "parse_metrics",
 ]

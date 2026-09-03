@@ -1,0 +1,42 @@
+# Reviewed-change catalog example. Cookbook/recipe conversion happens outside
+# Euboulia; an operator must review every entry against the pinned SGLang revision.
+schema_version: 1
+entries:
+  - id: example-chunked-prefill-args
+    title: Test a bounded chunked-prefill size
+    rationale: >-
+      The imported NCU export shows compute pressure. This args-only entry changes
+      one reviewed SGLang launch option without editing source. Replace the value
+      with one justified for the declared model, workload, and accelerator.
+    triggers: [compute]
+    server_args:
+      set:
+        "--chunked-prefill-size": 4096
+      remove: []
+    predicted_metric: output_throughput
+    risk: medium
+
+  - id: example-launch-batch-patch
+    title: Test a reviewed launch-batch source patch
+    rationale: >-
+      This patch-only entry demonstrates the catalog shape. The checked-in diff is
+      illustrative and must be replaced with a patch that applies to the pinned
+      SGLang revision before an active run.
+    triggers: [compute]
+    patch: ../patches/sglang-launch-batch.example.diff
+    predicted_metric: output_throughput
+    risk: high
+
+  - id: example-composite-launch-change
+    title: Test a reviewed patch and memory-pool argument together
+    rationale: >-
+      This composite entry treats the patch and server argument as one atomic
+      hypothesis. Both parts must be reviewed and evaluated together.
+    triggers: [compute]
+    patch: ../patches/sglang-composite.example.diff
+    server_args:
+      set:
+        "--mem-fraction-static": 0.82
+      remove: []
+    predicted_metric: output_throughput
+    risk: high

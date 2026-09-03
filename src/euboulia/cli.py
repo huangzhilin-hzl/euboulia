@@ -12,14 +12,6 @@ from typing import Any
 
 from euboulia import __version__
 from euboulia.adapters import AdapterError
-from euboulia.campaign import (
-    CampaignRunResult,
-    CampaignSafetyError,
-    evaluate_existing_results,
-    plan_campaign,
-    run_campaign,
-)
-from euboulia.config import ConfigError, load_config
 from euboulia.doctor import required_checks_pass, run_doctor
 from euboulia.ledger import ExperimentLedger, LedgerCorruptionError
 from euboulia.optimization.config import OptimizationConfigError, load_optimization_config
@@ -29,7 +21,17 @@ from euboulia.optimization.events import EventLedger, EventLedgerCorruptionError
 from euboulia.optimization.memory import MemoryConflictError, MemorySchemaError
 from euboulia.optimization.planner import PatchCatalogError
 from euboulia.optimization.runner import OptimizationRunner, OptimizationRuntimeError
+from euboulia.optimization.target import TargetError
 from euboulia.optimization.workspace import WorkspaceError
+from euboulia.recipe import (
+    ConfigError,
+    RecipeRunResult,
+    RecipeSafetyError,
+    evaluate_recipe_results,
+    load_recipe,
+    plan_recipe,
+    run_recipe,
+)
 
 Command = Callable[[argparse.Namespace], int]
 
@@ -46,14 +48,14 @@ def build_parser() -> argparse.ArgumentParser:
     doctor_parser.add_argument("--json", action="store_true", help="emit machine-readable JSON")
     doctor_parser.set_defaults(handler=_doctor)
 
-    plan_parser = subparsers.add_parser("plan", help="render a campaign without executing it")
-    _add_config_argument(plan_parser)
+    plan_parser = subparsers.add_parser("plan", help="render a recipe without executing it")
+    _add_recipe_argument(plan_parser)
     plan_parser.add_argument("--run-id", default="preview", help="artifact path label")
     plan_parser.add_argument("--json", action="store_true", help="emit machine-readable JSON")
     plan_parser.set_defaults(handler=_plan)
 
-    run_parser = subparsers.add_parser("run", help="plan or explicitly execute a campaign")
-    _add_config_argument(run_parser)
+    run_parser = subparsers.add_parser("run", help="plan or explicitly execute a recipe")
+    _add_recipe_argument(run_parser)
     authorization = run_parser.add_mutually_exclusive_group()
     authorization.add_argument(
         "--execute",
@@ -70,9 +72,9 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.set_defaults(handler=_run)
 
     evaluate_parser = subparsers.add_parser(
-        "evaluate", help="apply campaign gates to existing benchmark results"
+        "evaluate", help="apply recipe gates to existing benchmark results"
     )
-    _add_config_argument(evaluate_parser)
+    _add_recipe_argument(evaluate_parser)
     evaluate_parser.add_argument("--baseline", required=True, type=Path)
     evaluate_parser.add_argument("--candidate", required=True, type=Path)
     evaluate_parser.add_argument("--json", action="store_true", help="emit machine-readable JSON")
@@ -92,9 +94,9 @@ def build_parser() -> argparse.ArgumentParser:
     optimize_commands = optimize_parser.add_subparsers(dest="optimize_command", required=True)
 
     optimize_plan_parser = optimize_commands.add_parser(
-        "plan", help="import profiles and propose reviewed patches without writing"
+        "plan", help="import profiles and propose reviewed changes without writing"
     )
-    _add_config_argument(optimize_plan_parser)
+    _add_recipe_argument(optimize_plan_parser)
     optimize_plan_parser.add_argument(
         "--json", action="store_true", help="emit machine-readable JSON"
     )
@@ -103,7 +105,7 @@ def build_parser() -> argparse.ArgumentParser:
     optimize_run_parser = optimize_commands.add_parser(
         "run", help="run until completion or an explicit capability boundary"
     )
-    _add_config_argument(optimize_run_parser)
+    _add_recipe_argument(optimize_run_parser)
     optimize_run_parser.add_argument("--run-id", help="optional deterministic run identifier")
     optimize_run_parser.add_argument(
         "--apply-patches",
@@ -114,6 +116,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--run-evaluations",
         action="store_true",
         help="authorize finite evaluator commands; does not authorize service control",
+    )
+    optimize_run_parser.add_argument(
+        "--run-builds",
+        action="store_true",
+        help="authorize declared argv-based build commands inside detached worktrees",
+    )
+    optimize_run_parser.add_argument(
+        "--manage-services",
+        action="store_true",
+        help="authorize start/readiness/stop for services owned by this run",
     )
     optimize_run_parser.add_argument(
         "--json", action="store_true", help="emit machine-readable JSON"
@@ -135,8 +147,20 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _add_config_argument(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--config", required=True, type=Path, help="campaign YAML or JSON")
+def _add_recipe_argument(parser: argparse.ArgumentParser) -> None:
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument(
+        "--recipe",
+        dest="recipe",
+        type=Path,
+        help="Euboulia recipe YAML or JSON",
+    )
+    source.add_argument(
+        "--config",
+        dest="recipe",
+        type=Path,
+        help=argparse.SUPPRESS,
+    )
 
 
 def _doctor(args: argparse.Namespace) -> int:
@@ -153,18 +177,18 @@ def _doctor(args: argparse.Namespace) -> int:
 
 
 def _plan(args: argparse.Namespace) -> int:
-    config = load_config(args.config)
-    plans = plan_campaign(config, run_id=args.run_id)
+    config = load_recipe(args.recipe)
+    plans = plan_recipe(config, run_id=args.run_id)
     if args.json:
-        _print_json({"campaign": config.name, "plans": [plan.to_dict() for plan in plans]})
+        _print_json({"recipe": config.name, "plans": [plan.to_dict() for plan in plans]})
     else:
         _print_plan(config.name, plans)
     return 0
 
 
 def _run(args: argparse.Namespace) -> int:
-    config = load_config(args.config)
-    result = run_campaign(config, execute=args.execute, run_id=args.run_id)
+    config = load_recipe(args.recipe)
+    result = run_recipe(config, execute=args.execute, run_id=args.run_id)
     if args.json:
         _print_json(result.to_dict())
     elif not result.executed:
@@ -176,8 +200,8 @@ def _run(args: argparse.Namespace) -> int:
 
 
 def _evaluate(args: argparse.Namespace) -> int:
-    config = load_config(args.config)
-    evaluation = evaluate_existing_results(config, args.baseline, args.candidate)
+    config = load_recipe(args.recipe)
+    evaluation = evaluate_recipe_results(config, args.baseline, args.candidate)
     if args.json:
         _print_json(evaluation.to_dict())
     else:
@@ -215,12 +239,12 @@ def _history(args: argparse.Namespace) -> int:
 
 
 def _optimize_plan(args: argparse.Namespace) -> int:
-    config = load_optimization_config(args.config)
+    config = load_optimization_config(args.recipe)
     plan = OptimizationRunner().plan(config)
     if args.json:
         _print_json(plan.to_dict())
     else:
-        print(f"Optimization campaign: {plan.campaign} ({plan.framework})")
+        print(f"Optimization recipe: {plan.recipe} ({plan.framework})")
         observation_count = plan.profile.metrics.get("observation_count", 0)
         print(f"Profile: {plan.profile.profile_id}; observations={observation_count}")
         print(f"Analysis: {plan.analysis.summary}")
@@ -238,12 +262,16 @@ def _optimize_plan(args: argparse.Namespace) -> int:
 
 
 def _optimize_run(args: argparse.Namespace) -> int:
-    config = load_optimization_config(args.config)
+    config = load_optimization_config(args.recipe)
     authorizations: set[Capability] = set()
     if args.apply_patches:
         authorizations.add(Capability.WORKSPACE_WRITE)
     if args.run_evaluations:
         authorizations.add(Capability.BENCHMARK_EXECUTION)
+    if args.run_builds:
+        authorizations.add(Capability.BUILD_EXECUTION)
+    if args.manage_services:
+        authorizations.add(Capability.OWNED_SERVICE_LIFECYCLE)
     result = OptimizationRunner().run(
         config,
         frozenset(authorizations),
@@ -261,11 +289,18 @@ def _optimize_run(args: argparse.Namespace) -> int:
         if result.stop_reason:
             print(f"Reason: {result.stop_reason}")
         if result.waiting_for_approval:
-            missing: list[str] = []
-            if not args.apply_patches:
-                missing.append("--apply-patches")
-            if not args.run_evaluations:
-                missing.append("--run-evaluations")
+            capability_flags = {
+                Capability.WORKSPACE_WRITE: "--apply-patches",
+                Capability.BENCHMARK_EXECUTION: "--run-evaluations",
+                Capability.BUILD_EXECUTION: "--run-builds",
+                Capability.OWNED_SERVICE_LIFECYCLE: "--manage-services",
+            }
+            required = OptimizationRunner.required_capabilities(config)
+            missing = [
+                capability_flags[item]
+                for item in required
+                if item not in authorizations and item in capability_flags
+            ]
             print("Review the proposal, then start a new run with: " + " ".join(missing))
     if result.run_state in {RunState.COMPLETED, RunState.WAITING_FOR_APPROVAL}:
         return 0
@@ -288,7 +323,7 @@ def _optimize_events(args: argparse.Namespace) -> int:
 
 
 def _print_plan(name: str, plans: Sequence[Any]) -> None:
-    print(f"Campaign: {name}")
+    print(f"Recipe: {name}")
     print(f"Candidates: {len(plans)}")
     for plan in plans:
         label = "baseline" if plan.ordinal == 0 else "candidate"
@@ -299,7 +334,7 @@ def _print_plan(name: str, plans: Sequence[Any]) -> None:
             print("safety:  plan only; this command manages a service lifecycle")
 
 
-def _print_run_summary(ledger: Path, result: CampaignRunResult) -> None:
+def _print_run_summary(ledger: Path, result: RecipeRunResult) -> None:
     print(f"Run: {result.run_id}")
     print(
         f"Experiments: {len(result.experiments)}; accepted={result.accepted}; "
@@ -329,7 +364,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return handler(args)
     except (
         AdapterError,
-        CampaignSafetyError,
+        RecipeSafetyError,
         ConfigError,
         EventLedgerCorruptionError,
         EvaluationError,
@@ -341,6 +376,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         OptimizationConfigError,
         OptimizationRuntimeError,
         PatchCatalogError,
+        TargetError,
         TypeError,
         ValueError,
         WorkspaceError,

@@ -1,4 +1,4 @@
-# Euboulia campaign schema v1. This capacity-search example varies benchmark-
+# Euboulia recipe schema v1. This capacity-search example varies benchmark-
 # client load only; it is not a code-speedup comparison. The vLLM server at the
 # endpoint is externally managed and remains untouched.
 schema_version: 1

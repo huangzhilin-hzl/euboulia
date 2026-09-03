@@ -32,6 +32,34 @@ def test_lifecycle_refuses_to_skip_approval() -> None:
         lifecycle.move_iteration(IterationState.PREPARING_WORKSPACE)
 
 
+def test_lifecycle_walks_managed_baseline_and_candidate_services() -> None:
+    lifecycle = Lifecycle().move_run(RunState.ITERATING).begin_iteration()
+    for state in (
+        IterationState.PROFILING,
+        IterationState.ANALYZING,
+        IterationState.PLANNING,
+        IterationState.WAITING_FOR_APPROVAL,
+        IterationState.PREPARING_BASELINE,
+        IterationState.BUILDING_BASELINE,
+        IterationState.STARTING_BASELINE,
+        IterationState.WAITING_FOR_BASELINE,
+        IterationState.EVALUATING_BASELINE,
+        IterationState.STOPPING_BASELINE,
+        IterationState.PREPARING_WORKSPACE,
+        IterationState.APPLYING_PATCH,
+        IterationState.BUILDING,
+        IterationState.STARTING_SERVICE,
+        IterationState.WAITING_FOR_READY,
+        IterationState.EVALUATING,
+        IterationState.STOPPING_SERVICE,
+        IterationState.RECORDING_MEMORY,
+        IterationState.ACCEPTED,
+    ):
+        lifecycle = lifecycle.move_iteration(state)
+
+    assert lifecycle.iteration is IterationState.ACCEPTED
+
+
 def test_terminal_run_cannot_restart() -> None:
     lifecycle = Lifecycle().move_run(RunState.ITERATING).move_run(RunState.COMPLETED)
 

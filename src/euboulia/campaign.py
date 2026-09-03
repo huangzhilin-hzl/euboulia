@@ -417,7 +417,7 @@ def _workload_model(config: CampaignConfig, values: dict[str, object]) -> Worklo
             "endpoint": str(values["endpoint"]),
             "benchmark_mode": config.benchmark.mode,
         },
-        metadata={"campaign": config.name},
+        metadata={"recipe": config.name},
     )
 
 
