@@ -27,6 +27,7 @@ def test_sglang_builds_public_serving_benchmark_argv(tmp_path: Path) -> None:
         num_prompts=64,
         random_input_len=128,
         random_output_len=32,
+        random_range_ratio=0,
         request_rate="inf",
         max_concurrency=16,
         output_details=True,
@@ -37,6 +38,7 @@ def test_sglang_builds_public_serving_benchmark_argv(tmp_path: Path) -> None:
     assert command.argv[:3] == ("python3", "-m", "sglang.bench_serving")
     assert _option(command.argv, "--output-file") == str(result_path)
     assert _option(command.argv, "--request-rate") == "inf"
+    assert _option(command.argv, "--random-range-ratio") == "0"
     assert _option(command.argv, "--seed") == "42"
     assert "--output-details" in command.argv
     assert "--disable-tqdm" in command.argv

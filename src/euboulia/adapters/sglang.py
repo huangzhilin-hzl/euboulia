@@ -135,9 +135,9 @@ class SGLangAdapter(BaseAdapter):
                 isinstance(random_range_ratio, bool)
                 or not isinstance(random_range_ratio, int | float)
                 or not math.isfinite(random_range_ratio)
-                or not 0 < random_range_ratio <= 1
+                or not 0 <= random_range_ratio <= 1
             ):
-                raise AdapterError("random_range_ratio must be in the interval (0, 1]")
+                raise AdapterError("random_range_ratio must be in the interval [0, 1]")
             argv.extend(("--random-range-ratio", str(random_range_ratio)))
         if request_rate is not None:
             argv.extend(("--request-rate", cli_number(request_rate, "request_rate")))
