@@ -10,7 +10,7 @@ import pytest
 import yaml
 
 from euboulia.optimization.config import load_optimization_config
-from euboulia.optimization.contracts import Capability, RunState
+from euboulia.optimization.contracts import Capability, MemoryQuery, RunState
 from euboulia.optimization.events import EventLedger, EventType
 from euboulia.optimization.memory import SQLiteMemoryStore
 from euboulia.optimization.runner import OptimizationRunner, OptimizationRuntimeError
@@ -108,7 +108,7 @@ entries:
         },
         "benchmark": {"mode": "serve", "result_filename": "result.json"},
         "baseline": {
-            "id": "baseline",
+            "name": "baseline",
             "source_revision": "HEAD",
             "target_parameters": {},
         },
@@ -194,6 +194,9 @@ def test_plan_is_read_only_and_run_waits_at_capability_boundary(tmp_path: Path) 
     assert result.run_state is RunState.WAITING_FOR_APPROVAL
     assert result.waiting_for_approval is True
     assert not workspace.root_dir.exists()
+    assert (
+        config.execution.artifacts_dir / "waiting-run" / "resolved-recipe.yaml"
+    ).is_file()
     assert EventLedger(config.execution.event_ledger).latest("waiting-run").event_type is (
         EventType.APPROVAL_REQUESTED
     )
@@ -239,12 +242,21 @@ def test_runner_applies_in_detached_workspace_and_records_accepted_memory(
     )
 
     assert result.run_state is RunState.COMPLETED
+    assert result.run_uid.startswith("run-")
+    assert result.run_uid != result.run_id
     assert len(result.outcomes) == 1
     assert result.outcomes[0].accepted is True
+    assert result.analysis is not None
+    assert result.analysis.metadata["exact_recalled_memory_count"] == 0
+    assert result.analysis.metadata["compatible_recalled_memory_count"] == 0
     assert (repository / "value.txt").read_text(encoding="utf-8") == "old\n"
     candidate = workspace.root_dir / "accepted-run/iteration-001/worktree/value.txt"
     assert candidate.read_text(encoding="utf-8") == "new\n"
-    assert len(SQLiteMemoryStore(config.execution.memory)) == 1
+    memory = SQLiteMemoryStore(config.execution.memory)
+    assert len(memory) == 1
+    recorded = memory.recall(MemoryQuery(limit=1))[0]
+    assert recorded.run_uid == result.run_uid
+    assert recorded.spec_digest == result.identity.spec_digest
     events = EventLedger(config.execution.event_ledger).by_run("accepted-run")
     event_types = {event.event_type for event in events}
     assert {

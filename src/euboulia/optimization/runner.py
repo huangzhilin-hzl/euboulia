@@ -8,7 +8,7 @@ import re
 import uuid
 from collections.abc import Mapping
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import cast
 
@@ -19,6 +19,8 @@ from euboulia.optimization.config import (
     OptimizationCommandConfig,
     OptimizationConfig,
     WorkloadPointConfig,
+    dump_resolved_optimization_config,
+    require_optimization_execution_lock,
 )
 from euboulia.optimization.contracts import (
     AnalysisReport,
@@ -52,6 +54,8 @@ from euboulia.optimization.events import (
     EventType,
     OptimizationEvent,
 )
+from euboulia.optimization.facets import derive_sglang_launch_facets
+from euboulia.optimization.identity import ScenarioIdentity, scenario_identity
 from euboulia.optimization.memory import SQLiteMemoryStore
 from euboulia.optimization.planner import PatchCatalog, RulePlanner
 from euboulia.optimization.profiling import ImportedProfiler, RuleAnalyzer
@@ -90,6 +94,7 @@ class OptimizationRuntimeError(RuntimeError):
 class OptimizationPlan:
     campaign: str
     framework: str
+    identity: ScenarioIdentity
     profile: ProfileResult
     analysis: AnalysisReport
     proposals: tuple[ChangeProposal, ...]
@@ -106,6 +111,7 @@ class OptimizationPlan:
         return {
             "recipe": self.recipe,
             "framework": self.framework,
+            "identity": self.identity.to_dict(),
             "profile": _profile_dict(self.profile),
             "analysis": _analysis_dict(self.analysis),
             "proposals": [_proposal_dict(proposal) for proposal in self.proposals],
@@ -117,6 +123,7 @@ class OptimizationPlan:
 @dataclass(frozen=True, slots=True)
 class OptimizationRunResult:
     run_id: str
+    run_uid: str
     run_state: RunState
     iteration_state: IterationState | None
     champion_id: str
@@ -126,6 +133,7 @@ class OptimizationRunResult:
     outcomes: tuple[IterationOutcome, ...]
     event_ledger: Path
     memory: Path
+    identity: ScenarioIdentity
     stop_reason: str | None = None
 
     @property
@@ -135,6 +143,7 @@ class OptimizationRunResult:
     def to_dict(self) -> dict[str, JSONValue]:
         return {
             "run_id": self.run_id,
+            "run_uid": self.run_uid,
             "run_state": self.run_state.value,
             "iteration_state": (
                 self.iteration_state.value if self.iteration_state is not None else None
@@ -146,8 +155,36 @@ class OptimizationRunResult:
             "outcomes": [outcome.to_dict() for outcome in self.outcomes],
             "event_ledger": str(self.event_ledger),
             "memory": str(self.memory),
+            "identity": self.identity.to_dict(),
             "stop_reason": self.stop_reason,
             "waiting_for_approval": self.waiting_for_approval,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class BaselineValidationResult:
+    """Evidence from one candidate-free managed baseline validation."""
+
+    run_id: str
+    run_uid: str
+    evaluation: TieredEvaluationResult | WorkloadSuiteEvaluationResult
+    workspace_path: Path
+    artifact_dir: Path
+    identity: ScenarioIdentity
+
+    @property
+    def passed(self) -> bool:
+        return self.evaluation.outcome is EvaluationOutcome.PASSED
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "run_id": self.run_id,
+            "run_uid": self.run_uid,
+            "passed": self.passed,
+            "workspace_path": str(self.workspace_path),
+            "artifact_dir": str(self.artifact_dir),
+            "identity": self.identity.to_dict(),
+            "evaluation": self.evaluation.to_dict(),
         }
 
 
@@ -176,6 +213,138 @@ class OptimizationRunner:
         """Return the deterministic side-effect boundary for ``config``."""
 
         return _required_capabilities(config)
+
+    @staticmethod
+    def identity(config: OptimizationConfig) -> ScenarioIdentity:
+        """Return aliases, semantic digests, and compatibility facets for a scenario."""
+
+        hardware_fingerprint = _hardware_fingerprint(config)
+        return scenario_identity(config, hardware_fingerprint)
+
+    @staticmethod
+    def baseline_validation_capabilities(
+        config: OptimizationConfig,
+    ) -> tuple[Capability, ...]:
+        """Return capabilities for a candidate-free managed baseline run."""
+
+        if config.target is None:
+            raise OptimizationRuntimeError("target configuration is required for validation")
+        required = [
+            Capability.WORKSPACE_WRITE,
+            Capability.BENCHMARK_EXECUTION,
+            Capability.OWNED_SERVICE_LIFECYCLE,
+        ]
+        if config.target.build is not None and config.target.build.commands:
+            required.append(Capability.BUILD_EXECUTION)
+        return tuple(required)
+
+    def validate_baseline(
+        self,
+        config: OptimizationConfig,
+        authorizations: frozenset[Capability] = frozenset(),
+        *,
+        run_id: str | None = None,
+    ) -> BaselineValidationResult:
+        """Build, start, validate, measure, and stop exactly one declared baseline."""
+
+        require_optimization_execution_lock(config)
+        selected_run_id = _run_id(run_id)
+        run_uid = _run_uid()
+        required = self.baseline_validation_capabilities(config)
+        missing = [capability.value for capability in required if capability not in authorizations]
+        if missing:
+            raise OptimizationRuntimeError(
+                "baseline validation requires explicit capabilities: " + ", ".join(missing)
+            )
+        target = config.target
+        workspace_config = config.optimization.workspace
+        if target is None:  # guarded by baseline_validation_capabilities
+            raise OptimizationRuntimeError("target configuration is required for validation")
+        if workspace_config is None:
+            raise OptimizationRuntimeError("optimization.workspace is required for validation")
+
+        artifact_dir = config.execution.artifacts_dir / selected_run_id / "target-validation"
+        if artifact_dir.exists() or artifact_dir.is_symlink():
+            raise OptimizationRuntimeError(
+                f"validation artifact path already exists: {artifact_dir}"
+            )
+        artifact_dir.mkdir(parents=True)
+        _write_resolved_recipe_snapshot(config, artifact_dir)
+
+        provenance_record: RuntimeProvenanceRecord | None = None
+        if target.runtime is not None:
+            provenance_record = capture_runtime_provenance(
+                target.runtime,
+                repository=workspace_config.repository,
+            )
+            write_runtime_provenance(
+                provenance_record,
+                artifact_dir / "runtime-provenance.json",
+            )
+            validate_runtime_provenance(target.runtime, provenance_record)
+        target_spec = _target_spec(config, provenance_record)
+        workspace = GitWorktreeWorkspace.create(
+            workspace_config.repository,
+            workspace_config.root_dir / selected_run_id / "validation" / "baseline",
+            revision=config.baseline.source_revision,
+            timeout_seconds=workspace_config.timeout_seconds,
+        )
+        controller = self._target_controller or SGLangTargetController()
+        if target_spec.build is not None:
+            controller.build(workspace.path, target_spec.build, artifact_dir / "build")
+        handle = controller.start(
+            workspace.path,
+            target_spec,
+            TargetChangeSet(),
+            artifact_dir / "service",
+            run_id=selected_run_id,
+            trial_id="baseline-validation",
+        )
+        evaluation: TieredEvaluationResult | WorkloadSuiteEvaluationResult | None = None
+        try:
+            controller.wait_ready(handle)
+            runtime_environment = {
+                "EUBOULIA_TARGET_ENDPOINT": handle.endpoint,
+                "EUBOULIA_TARGET_MANIFEST_PATH": str(handle.manifest_path),
+                "EUBOULIA_TARGET_PID": str(handle.pid),
+                "EUBOULIA_TARGET_ROLE": "baseline-validation",
+                "EUBOULIA_TARGET_STDERR_PATH": str(handle.stderr_path),
+                "EUBOULIA_TARGET_STDOUT_PATH": str(handle.stdout_path),
+                "EUBOULIA_TARGET_TRIAL_ID": "baseline-validation",
+                "EUBOULIA_TARGET_WORKSPACE": str(workspace.path),
+                "EUBOULIA_TARGET_ARTIFACT_DIR": str(artifact_dir),
+            }
+            evaluator = TieredEvaluator(artifact_dir / "evaluations")
+            evaluation = _execute_workload_suite(
+                config,
+                trial_id="baseline-validation",
+                workspace=workspace.path,
+                baseline_values={},
+                apply_promotion_gate=False,
+                evaluator=evaluator,
+                artifact_dir=artifact_dir / "evaluations" / "baseline-validation",
+                runtime_environment=runtime_environment,
+            )
+        finally:
+            try:
+                controller.stop(handle)
+            finally:
+                _preserve_service_log(handle, artifact_dir)
+        if evaluation is None:  # pragma: no cover - evaluation returns or raises
+            raise AssertionError("baseline validation completed without an evaluation")
+        result = BaselineValidationResult(
+            run_id=selected_run_id,
+            run_uid=run_uid,
+            evaluation=evaluation,
+            workspace_path=workspace.path,
+            artifact_dir=artifact_dir,
+            identity=self.identity(config),
+        )
+        (artifact_dir / "validation.json").write_text(
+            json.dumps(result.to_dict(), indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        return result
 
     def plan(self, config: OptimizationConfig) -> OptimizationPlan:
         """Analyze declared artifacts and select catalog proposals without writes."""
@@ -207,6 +376,7 @@ class OptimizationRunner:
         return OptimizationPlan(
             campaign=config.name,
             framework=config.framework.value,
+            identity=self.identity(config),
             profile=profile,
             analysis=analysis,
             proposals=proposals,
@@ -223,24 +393,30 @@ class OptimizationRunner:
     ) -> OptimizationRunResult:
         """Run bounded iterations or pause before the first unauthorized side effect."""
 
+        require_optimization_execution_lock(config)
         selected_run_id = _run_id(run_id)
+        run_uid = _run_uid()
         ledger = EventLedger(config.execution.event_ledger, fsync=True)
         if ledger.by_run(selected_run_id):
             raise OptimizationRuntimeError(
                 f"run_id {selected_run_id!r} already exists; resume is not implemented, "
                 "choose a new run id"
             )
+        _write_resolved_recipe_snapshot(
+            config, config.execution.artifacts_dir / selected_run_id
+        )
         memory = SQLiteMemoryStore(config.execution.memory)
         lifecycle = Lifecycle()
-        champion_id = config.baseline.candidate_id
+        champion_id = config.baseline.name
         profile: ProfileResult | None = None
         analysis: AnalysisReport | None = None
         observed_proposals: list[ChangeProposal] = []
         outcomes: list[IterationOutcome] = []
-        config_digest = _config_digest(config)
-        workload_digest = _workload_digest(config)
-        policy_digest = _policy_digest(config)
         hardware_fingerprint = _hardware_fingerprint(config)
+        identity = scenario_identity(config, hardware_fingerprint)
+        config_digest = _config_digest(config)
+        workload_digest = identity.workload_digest
+        policy_digest = identity.protocol_digest
         budget_config = config.optimization.budget
         budget = BudgetTracker(
             BudgetLimits(
@@ -254,7 +430,12 @@ class OptimizationRunner:
                 EventType.RUN_PLANNED,
                 selected_run_id,
                 input_digest=config_digest,
-                payload={"campaign": config.name, "framework": config.framework.value},
+                payload={
+                    "campaign": config.name,
+                    "framework": config.framework.value,
+                    "run_uid": run_uid,
+                    "identity": identity.to_dict(),
+                },
             )
         )
         ledger.append(
@@ -262,7 +443,7 @@ class OptimizationRunner:
                 EventType.RUN_STARTED,
                 selected_run_id,
                 input_digest=config_digest,
-                payload={"reference_baseline": config.baseline.candidate_id},
+                payload={"reference_baseline": config.baseline.name},
             )
         )
         lifecycle = lifecycle.move_run(RunState.ITERATING)
@@ -301,15 +482,35 @@ class OptimizationRunner:
                     authorizations=authorizations,
                     input_digest=config_digest,
                 )
-                recalled = memory.recall(
+                exact_recalled = memory.recall(
                     MemoryQuery(
-                        framework=config.framework.value,
-                        framework_revision=config.baseline.source_revision,
-                        hardware_fingerprint=hardware_fingerprint,
-                        model_revision=config.models.target.revision,
-                        workload_digest=workload_digest,
-                        benchmark_policy_digest=policy_digest,
+                        spec_digest=identity.spec_digest,
                         limit=100,
+                    )
+                )
+                compatible_recalled = memory.recall(
+                    MemoryQuery(
+                        compatibility_digest=identity.compatibility_digest,
+                        limit=100,
+                    )
+                )
+                exact_memory_ids = {entry.memory_id for entry in exact_recalled}
+                recalled = exact_recalled + tuple(
+                    entry
+                    for entry in compatible_recalled
+                    if entry.memory_id not in exact_memory_ids
+                )
+                ledger.append(
+                    OptimizationEvent.create(
+                        EventType.MEMORY_RECALLED,
+                        selected_run_id,
+                        iteration_id=iteration_id,
+                        payload={
+                            "spec_digest": identity.spec_digest,
+                            "compatibility_digest": identity.compatibility_digest,
+                            "exact_count": len(exact_recalled),
+                            "compatible_count": len(recalled) - len(exact_recalled),
+                        },
                     )
                 )
                 lifecycle = lifecycle.move_iteration(IterationState.PROFILING)
@@ -322,7 +523,11 @@ class OptimizationRunner:
                     )
                 )
                 profile, analysis, proposals = self._deliberate(
-                    config, context, recalled, candidate_id=champion_id
+                    config,
+                    context,
+                    recalled,
+                    candidate_id=champion_id,
+                    attempted_memory=exact_recalled,
                 )
                 ledger.append(
                     OptimizationEvent.create(
@@ -380,6 +585,7 @@ class OptimizationRunner:
                     )
                     return self._result(
                         selected_run_id,
+                        run_uid,
                         lifecycle,
                         champion_id,
                         profile,
@@ -407,6 +613,7 @@ class OptimizationRunner:
                     lifecycle = lifecycle.move_run(RunState.WAITING_FOR_APPROVAL)
                     return self._result(
                         selected_run_id,
+                        run_uid,
                         lifecycle,
                         champion_id,
                         profile,
@@ -482,6 +689,8 @@ class OptimizationRunner:
                         hardware_fingerprint,
                         workload_digest,
                         policy_digest,
+                        identity,
+                        run_uid,
                     )
                     ledger.append(
                         OptimizationEvent.create(
@@ -537,6 +746,7 @@ class OptimizationRunner:
                         )
                         return self._result(
                             selected_run_id,
+                            run_uid,
                             lifecycle,
                             champion_id,
                             profile,
@@ -572,6 +782,8 @@ class OptimizationRunner:
                         hardware_fingerprint,
                         workload_digest,
                         policy_digest,
+                        identity,
+                        run_uid,
                     )
                     budget.record_failure()
                     ledger.append(
@@ -613,6 +825,7 @@ class OptimizationRunner:
             )
             return self._result(
                 selected_run_id,
+                run_uid,
                 lifecycle,
                 champion_id,
                 profile,
@@ -639,11 +852,12 @@ class OptimizationRunner:
         recalled: tuple[MemoryEntry, ...],
         *,
         candidate_id: str | None = None,
+        attempted_memory: tuple[MemoryEntry, ...] | None = None,
     ) -> tuple[ProfileResult, AnalysisReport, tuple[ChangeProposal, ...]]:
         profiler = ImportedProfiler(config.optimization.profiles.artifacts)
         profile = profiler.capture(
             ProfileRequest(
-                candidate_id=candidate_id or config.baseline.candidate_id,
+                candidate_id=candidate_id or config.baseline.name,
                 source_revision=config.baseline.source_revision,
                 workload_digest=_workload_digest(config),
                 max_bytes=config.optimization.budget.max_profile_bytes,
@@ -651,6 +865,15 @@ class OptimizationRunner:
             context,
         )
         analysis = RuleAnalyzer(profiler).analyze(profile, recalled, context)
+        if attempted_memory is not None:
+            analysis = replace(
+                analysis,
+                metadata={
+                    **analysis.metadata,
+                    "exact_recalled_memory_count": len(attempted_memory),
+                    "compatible_recalled_memory_count": len(recalled) - len(attempted_memory),
+                },
+            )
         planner_config = config.optimization.planner
         catalog = PatchCatalog.load(planner_config.patch_catalog)
         if config.target is None:
@@ -667,7 +890,11 @@ class OptimizationRunner:
             max_proposals=planner_config.max_proposals_per_iteration,
             reject_duplicates=planner_config.reject_duplicate_diffs,
         )
-        proposals = planner.propose(analysis, recalled, context)
+        proposals = planner.propose(
+            analysis,
+            recalled if attempted_memory is None else attempted_memory,
+            context,
+        )
         return profile, analysis, proposals
 
     def _execute_candidate(
@@ -765,7 +992,7 @@ class OptimizationRunner:
         if config.schema_version == 2:
             legacy_baseline = config.optimization.evaluation.baseline_value
             if legacy_baseline is not None:
-                configured_baselines[config.workload_suite.points[0].point_id] = legacy_baseline
+                configured_baselines[config.workload_suite.points[0].name] = legacy_baseline
         evaluation = _execute_workload_suite(
             config,
             trial_id=iteration_id,
@@ -1344,8 +1571,14 @@ class OptimizationRunner:
             lifecycle = lifecycle.move_iteration(evaluation_state)
             runtime_environment = {
                 "EUBOULIA_TARGET_ENDPOINT": handle.endpoint,
+                "EUBOULIA_TARGET_MANIFEST_PATH": str(handle.manifest_path),
+                "EUBOULIA_TARGET_PID": str(handle.pid),
                 "EUBOULIA_TARGET_ROLE": role,
+                "EUBOULIA_TARGET_STDERR_PATH": str(handle.stderr_path),
+                "EUBOULIA_TARGET_STDOUT_PATH": str(handle.stdout_path),
                 "EUBOULIA_TARGET_TRIAL_ID": trial_id,
+                "EUBOULIA_TARGET_WORKSPACE": str(workspace.path),
+                "EUBOULIA_TARGET_ARTIFACT_DIR": str(evidence_dir.parent),
             }
             ledger.append(
                 OptimizationEvent.create(
@@ -1421,6 +1654,8 @@ class OptimizationRunner:
                         )
                     )
                 raise
+            finally:
+                _preserve_service_log(handle, evidence_dir.parent)
             ledger.append(
                 OptimizationEvent.create(
                     EventType.SERVICE_STOPPED,
@@ -1449,6 +1684,8 @@ class OptimizationRunner:
         hardware_fingerprint: str,
         workload_digest: str,
         policy_digest: str,
+        identity: ScenarioIdentity,
+        run_uid: str,
     ) -> MemoryEntry:
         entry = MemoryEntry(
             memory_id=f"memory-{hashlib.sha256(outcome.outcome_id.encode()).hexdigest()[:20]}",
@@ -1461,6 +1698,10 @@ class OptimizationRunner:
             model_revision=config.models.target.revision,
             workload_digest=workload_digest,
             benchmark_policy_digest=policy_digest,
+            spec_digest=identity.spec_digest,
+            run_uid=run_uid,
+            compatibility_digest=identity.compatibility_digest,
+            compatibility_facets=identity.compatibility_facets,
             proposal_id=outcome.proposal_id,
             outcome=outcome.status,
             summary=outcome.summary,
@@ -1470,6 +1711,7 @@ class OptimizationRunner:
                 "champion_before": outcome.champion_before,
                 "champion_after": outcome.champion_after,
                 "evidence_outcome_id": outcome.outcome_id,
+                "identity": identity.to_dict(),
             },
         )
         return memory.record(entry)
@@ -1501,6 +1743,7 @@ class OptimizationRunner:
     @staticmethod
     def _result(
         run_id: str,
+        run_uid: str,
         lifecycle: Lifecycle,
         champion_id: str,
         profile: ProfileResult | None,
@@ -1512,6 +1755,7 @@ class OptimizationRunner:
     ) -> OptimizationRunResult:
         return OptimizationRunResult(
             run_id=run_id,
+            run_uid=run_uid,
             run_state=lifecycle.run,
             iteration_state=lifecycle.iteration,
             champion_id=champion_id,
@@ -1521,6 +1765,7 @@ class OptimizationRunner:
             outcomes=tuple(outcomes),
             event_ledger=config.execution.event_ledger,
             memory=config.execution.memory,
+            identity=scenario_identity(config, _hardware_fingerprint(config)),
             stop_reason=stop_reason,
         )
 
@@ -1574,33 +1819,13 @@ def _target_spec(
                 }
             }
         )
-    if target.serving is not None:
-        speculative = target.serving.speculative
-        draft = speculative.draft
-        provenance["serving"] = {
-            "backends": dict(target.serving.backends),
-            "speculative": {
-                "algorithm": speculative.algorithm,
-                "draft": (
-                    None
-                    if draft is None
-                    else {
-                        "kind": draft.kind.value,
-                        "model_ref": draft.model_ref,
-                        "model_path": config.models.by_id(draft.model_ref).path,
-                    }
-                ),
-                "num_steps": speculative.num_steps,
-                "eagle_topk": speculative.eagle_topk,
-                "num_draft_tokens": speculative.num_draft_tokens,
-                "adaptive": speculative.adaptive,
-                "draft_attention_backend": speculative.draft_attention_backend,
-            },
-        }
+    provenance["launch_facets"] = dict(
+        derive_sglang_launch_facets(target.launch.options)
+    )
     return TargetSpec(
         provider=target.provider.value,
         model=config.models.target.path,
-        launch_argv=target.launch.argv,
+        launch_argv=config.target_launch_argv,
         launch_env=target.launch.env,
         endpoint=config.endpoint,
         readiness=ReadinessSpec(
@@ -1641,6 +1866,22 @@ def _service_artifacts(handle: ServiceHandle) -> tuple[ArtifactRef, ...]:
     return tuple(artifacts)
 
 
+def _preserve_service_log(handle: ServiceHandle, artifact_dir: Path) -> None:
+    """Materialize one complete combined server log after owned teardown."""
+
+    try:
+        stdout = handle.stdout_path.read_text(encoding="utf-8", errors="replace")
+        stderr = handle.stderr_path.read_text(encoding="utf-8", errors="replace")
+        logs = artifact_dir / "logs"
+        logs.mkdir(parents=True, exist_ok=True)
+        combined = stdout + ("\n--- stderr ---\n" if stderr else "") + stderr
+        (logs / "server.log").write_text(combined, encoding="utf-8")
+    except OSError as exc:
+        raise OptimizationRuntimeError(
+            f"failed to preserve the complete owned service log: {exc}"
+        ) from exc
+
+
 def _evaluation_plan(
     config: OptimizationConfig,
     iteration_id: str,
@@ -1651,6 +1892,7 @@ def _evaluation_plan(
     baseline_value: float | None,
     apply_promotion_gate: bool,
     include_checks: bool,
+    include_accuracy: bool,
     runtime_environment: Mapping[str, str] | None = None,
 ) -> EvaluationPlan:
     evaluation = config.optimization.evaluation
@@ -1680,14 +1922,15 @@ def _evaluation_plan(
             config.workload_suite.request_rate if point.request_rate is None else point.request_rate
         ),
         "EUBOULIA_TARGET_ENDPOINT": config.endpoint,
-        "EUBOULIA_WORKLOAD_NAME": config.workload_suite.suite_id,
-        "EUBOULIA_WORKLOAD_POINT_ID": point.point_id,
+        "EUBOULIA_WORKLOAD_SUITE_NAME": config.workload_suite.name,
+        "EUBOULIA_WORKLOAD_POINT_NAME": point.name,
     }
     if runtime_environment is not None:
         evaluation_environment.update(runtime_environment)
     preflight: list[CommandSpec] = []
     correctness: list[CommandSpec] = []
     performance: list[CommandSpec] = []
+    accuracy: list[CommandSpec] = []
     for tier in evaluation.tiers:
         commands = [
             _command_spec(command, tier, evaluation_environment) for command in tier.commands
@@ -1699,7 +1942,10 @@ def _evaluation_plan(
             if include_checks:
                 correctness.extend(commands)
         else:
-            performance.extend(commands)
+            if tier.kind.value == "performance":
+                performance.extend(commands)
+            elif include_accuracy:
+                accuracy.extend(commands)
     if include_checks and not correctness:
         raise OptimizationRuntimeError(
             "active evaluation requires at least one correctness command"
@@ -1711,7 +1957,7 @@ def _evaluation_plan(
         raise OptimizationRuntimeError("optimization.evaluation.promotion is required")
     minimum = 0.0
     if apply_promotion_gate:
-        if point.point_id in promotion.primary_points:
+        if point.name in promotion.primary_points:
             minimum = max(0.0, promotion.min_relative_improvement - promotion.noise_tolerance)
         else:
             minimum = -(promotion.max_regression_per_point + promotion.noise_tolerance)
@@ -1728,6 +1974,7 @@ def _evaluation_plan(
         correctness=tuple(correctness),
         benchmark=BenchmarkSpec(performance[0], metrics_path),
         objective=objective,
+        accuracy=tuple(accuracy),
         profiler_trial=False,
     )
 
@@ -1753,7 +2000,7 @@ def _execute_workload_suite(
         point_trial_id = (
             trial_id
             if config.schema_version == 2 and len(config.workload_suite.points) == 1
-            else f"{trial_id}-{point.point_id}"
+            else f"{trial_id}-{point.name}"
         )
         plan = _evaluation_plan(
             config,
@@ -1762,16 +2009,17 @@ def _execute_workload_suite(
             point=point,
             metrics_path=_point_metrics_path(
                 evaluation.metrics_path,
-                point.point_id,
+                point.name,
                 single_point=len(config.workload_suite.points) == 1,
             ),
-            baseline_value=baseline_values.get(point.point_id),
+            baseline_value=baseline_values.get(point.name),
             apply_promotion_gate=apply_promotion_gate,
             include_checks=index == 0,
+            include_accuracy=index == len(config.workload_suite.points) - 1,
             runtime_environment=runtime_environment,
         )
         point_result = evaluator.execute(evaluator.authorize(plan, approved=True))
-        point_results[point.point_id] = point_result
+        point_results[point.name] = point_result
         promotion = evaluation.promotion
         if point_result.outcome is EvaluationOutcome.FAILED and (
             index == 0 or promotion is None or promotion.require_all_points_valid
@@ -1788,10 +2036,10 @@ def _execute_workload_suite(
     )
 
 
-def _point_metrics_path(base: Path, point_id: str, *, single_point: bool) -> Path:
+def _point_metrics_path(base: Path, point_name: str, *, single_point: bool) -> Path:
     if single_point:
         return base
-    return base.parent / "workload-points" / point_id / base.name
+    return base.parent / "workload-points" / point_name / base.name
 
 
 def _evaluation_artifact(
@@ -1813,7 +2061,7 @@ def _objective_values(
         return dict(result.objective_values)
     if result.objective_value is None:
         return {}
-    return {config.workload_suite.points[0].point_id: result.objective_value}
+    return {config.workload_suite.points[0].name: result.objective_value}
 
 
 def _command_spec(
@@ -1846,29 +2094,32 @@ def _aggregate_suite_result(
     if promotion is None:
         raise OptimizationRuntimeError("optimization.evaluation.promotion is required")
     objective_values = {
-        point_id: result.objective_value
-        for point_id, result in point_results.items()
+        point_name: result.objective_value
+        for point_name, result in point_results.items()
         if result.objective_value is not None
     }
     relative_improvements = {
-        point_id: result.relative_improvement
-        for point_id, result in point_results.items()
+        point_name: result.relative_improvement
+        for point_name, result in point_results.items()
         if result.relative_improvement is not None
     }
-    required_ids = (
-        tuple(point.point_id for point in config.workload_suite.points)
+    required_names = (
+        tuple(point.name for point in config.workload_suite.points)
         if not apply_promotion_gate or promotion.require_all_points_valid
         else promotion.primary_points
     )
-    missing_required = tuple(point_id for point_id in required_ids if point_id not in point_results)
+    missing_required = tuple(
+        point_name for point_name in required_names if point_name not in point_results
+    )
     failed_required = tuple(
-        point_id
-        for point_id in required_ids
-        if point_id in point_results and point_results[point_id].outcome is EvaluationOutcome.FAILED
+        point_name
+        for point_name in required_names
+        if point_name in point_results
+        and point_results[point_name].outcome is EvaluationOutcome.FAILED
     )
     rejected_points = tuple(
-        point_id
-        for point_id, result in point_results.items()
+        point_name
+        for point_name, result in point_results.items()
         if result.outcome is EvaluationOutcome.REJECTED
     )
     if missing_required or failed_required:
@@ -1881,9 +2132,9 @@ def _aggregate_suite_result(
         outcome = EvaluationOutcome.PASSED
         reason = None
     primary_relatives = tuple(
-        relative_improvements[point_id]
-        for point_id in promotion.primary_points
-        if point_id in relative_improvements
+        relative_improvements[point_name]
+        for point_name in promotion.primary_points
+        if point_name in relative_improvements
     )
     relative_improvement = min(primary_relatives) if primary_relatives else None
     gate_passed = outcome is EvaluationOutcome.PASSED
@@ -2005,6 +2256,10 @@ def _run_id(value: str | None) -> str:
     return selected
 
 
+def _run_uid() -> str:
+    return f"run-{uuid.uuid4().hex}"
+
+
 def _required_capabilities(config: OptimizationConfig) -> tuple[Capability, ...]:
     required = {
         Capability.WORKSPACE_WRITE,
@@ -2023,122 +2278,33 @@ def _stable_digest(value: Mapping[str, object]) -> str:
 
 
 def _config_digest(config: OptimizationConfig) -> str:
-    return hashlib.sha256(config.source.read_bytes()).hexdigest()
+    encoded = json.dumps(
+        config.resolved_document,
+        ensure_ascii=False,
+        allow_nan=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _write_resolved_recipe_snapshot(config: OptimizationConfig, directory: Path) -> Path:
+    directory.mkdir(parents=True, exist_ok=True)
+    destination = directory / "resolved-recipe.yaml"
+    if destination.exists() or destination.is_symlink():
+        raise OptimizationRuntimeError(
+            f"resolved recipe snapshot already exists: {destination}"
+        )
+    destination.write_text(dump_resolved_optimization_config(config), encoding="utf-8")
+    return destination
 
 
 def _workload_digest(config: OptimizationConfig) -> str:
-    target = config.target
-    target_payload: Mapping[str, object] | None = None
-    if target is not None:
-        target_payload = {
-            "provider": target.provider.value,
-            "launch_argv": list(target.launch.argv),
-            "launch_env": dict(sorted(target.launch.env.items())),
-            "gpus": list(target.gpus),
-            "provenance": dict(_target_spec(config).provenance),
-            "build": (
-                None
-                if target.build is None
-                else [
-                    {
-                        "name": command.name,
-                        "argv": list(command.argv),
-                        "timeout_seconds": command.timeout_seconds,
-                        "env": dict(sorted(command.env.items())),
-                    }
-                    for command in target.build.commands
-                ]
-            ),
-        }
-    return _stable_digest(
-        {
-            "models": {
-                "target": {
-                    "id": config.models.target.model_id,
-                    "path": config.models.target.path,
-                    "served_name": config.models.target.served_name,
-                    "revision": config.models.target.revision,
-                    "weights_manifest_sha256": config.models.target.weights_manifest_sha256,
-                },
-                "drafts": [
-                    {
-                        "id": draft.model_id,
-                        "path": draft.path,
-                        "served_name": draft.served_name,
-                        "revision": draft.revision,
-                        "weights_manifest_sha256": draft.weights_manifest_sha256,
-                    }
-                    for draft in config.models.drafts
-                ],
-            },
-            "workload_suite": {
-                "id": config.workload_suite.suite_id,
-                "dataset": config.workload_suite.dataset,
-                "request_rate": config.workload_suite.request_rate,
-                "points": [
-                    {
-                        "id": point.point_id,
-                        "input_tokens": point.input_tokens,
-                        "output_tokens": point.output_tokens,
-                        "concurrency": point.concurrency,
-                        "num_prompts": point.num_prompts,
-                        "request_rate": point.request_rate,
-                    }
-                    for point in config.workload_suite.points
-                ],
-            },
-            "endpoint": config.endpoint,
-            "baseline_target_parameters": dict(config.baseline.target_parameters),
-            "managed_target": target_payload,
-        }
-    )
+    return scenario_identity(config, _hardware_fingerprint(config)).workload_digest
 
 
 def _policy_digest(config: OptimizationConfig) -> str:
-    evaluation = config.optimization.evaluation
-    promotion = evaluation.promotion
-    return _stable_digest(
-        {
-            "metric": evaluation.metric,
-            "direction": evaluation.direction.value,
-            "minimum": evaluation.min_relative_improvement,
-            "regression": evaluation.max_regression,
-            "noise": evaluation.noise_tolerance,
-            "tiers": [
-                {
-                    "kind": tier.kind.value,
-                    "warmups": tier.warmups,
-                    "repetitions": tier.repetitions,
-                    "timeout_seconds": tier.timeout_seconds,
-                    "required_metrics": list(tier.required_metrics),
-                    "commands": [
-                        {
-                            "name": command.name,
-                            "argv": list(command.argv),
-                            "timeout_seconds": command.timeout_seconds,
-                            "env": dict(sorted(command.env.items())),
-                        }
-                        for command in tier.commands
-                    ],
-                }
-                for tier in evaluation.tiers
-            ],
-            "metrics_path": str(evaluation.metrics_path),
-            "baseline_value": (None if config.target is not None else evaluation.baseline_value),
-            "baseline_values": dict(config.baseline.metric_values),
-            "promotion": (
-                None
-                if promotion is None
-                else {
-                    "primary_points": list(promotion.primary_points),
-                    "require_all_points_valid": promotion.require_all_points_valid,
-                    "min_relative_improvement": promotion.min_relative_improvement,
-                    "max_regression_per_point": promotion.max_regression_per_point,
-                    "noise_tolerance": promotion.noise_tolerance,
-                }
-            ),
-        }
-    )
+    return scenario_identity(config, _hardware_fingerprint(config)).protocol_digest
 
 
 def _hardware_fingerprint(config: OptimizationConfig) -> str:
@@ -2147,6 +2313,7 @@ def _hardware_fingerprint(config: OptimizationConfig) -> str:
 
 
 __all__ = [
+    "BaselineValidationResult",
     "OptimizationPlan",
     "OptimizationRunResult",
     "OptimizationRunner",

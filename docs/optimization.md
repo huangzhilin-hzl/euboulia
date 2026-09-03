@@ -127,12 +127,13 @@ or deployment.
 
 | Section | Purpose |
 | --- | --- |
+| `inputs` | Typed values that a reusable template requires before execution |
 | `models` | Target and optional draft model identities, paths, revisions, and manifests |
 | `endpoint` | Loopback endpoint used by the managed target and evaluator |
 | `workload_suite` | Dataset/request-rate policy and named ISL/OSL/concurrency points |
 | `benchmark` | Benchmark mode and typed parameters |
-| `baseline` | Baseline identity, pinned SGLang revision, and declared target parameters |
-| `target` | SGLang build, launch environment/argv, GPUs, readiness, runtime, and serving identity |
+| `baseline` | Baseline identity, pinned SGLang revision, and optional external-target parameters |
+| `target` | SGLang build, native launch options, declared hardware, GPUs, readiness, and runtime identity |
 | `optimization.profiles` | Imported profile artifacts and formats |
 | `optimization.planner` | Reviewed catalog and proposal/deduplication policy |
 | `optimization.workspace` | Repository, detached-worktree root, and patch limits |
@@ -140,8 +141,129 @@ or deployment.
 | `optimization.budget` | Iteration, wall-time, failure, patience, and profile-size limits |
 | `execution` | Artifact directory, event ledger, experiment ledger, and memory database |
 
-Paths are resolved relative to the recipe. Commands are argv arrays, never shell
-strings. Environment changes are explicit key/value mappings.
+Paths are resolved relative to the recipe. Build and evaluation commands are argv
+arrays, never shell strings. Environment changes are explicit key/value mappings.
+
+### Template resolution and execution lock
+
+A reusable recipe may declare values that must be supplied by the user:
+
+```yaml
+inputs:
+  container_image:
+    type: container_digest
+    required: true
+  sglang_revision:
+    type: git_commit
+    required: true
+
+baseline:
+  source_revision: ${sglang_revision}
+
+target:
+  runtime:
+    expected:
+      container:
+        image: ${container_image}
+      components:
+        sglang:
+          revision: ${sglang_revision}
+```
+
+Input references must occupy an entire YAML scalar. Supported types are `string`,
+`integer`, `number`, `boolean`, `git_commit`, `container_digest`, and `sha256`.
+`git_commit` requires a full 40- or 64-character hexadecimal commit;
+`container_digest` requires an immutable `repository@sha256:...` reference. All-zero
+commit and digest placeholders are rejected.
+
+`target plan` and `optimize plan` may inspect an unresolved template and report its
+missing inputs. Active runs reject missing bindings before creating events, memory,
+worktrees, or artifacts. Bind values directly with `--values`, or create a lock recipe:
+
+```console
+uv run euboulia target resolve \
+  --recipe scenario.yaml \
+  --values h20-values.yaml \
+  --output scenario.lock.yaml
+
+uv run euboulia target run \
+  --recipe scenario.lock.yaml \
+  --prepare-workspace --run-builds --manage-services --run-evaluations
+```
+
+The lock file must be written beside its template so relative paths keep the same
+meaning. It contains concrete values and no `inputs` section. Managed schema-v3 runs
+also require an image digest, a full baseline Git commit, and a matching pinned SGLang
+runtime revision. Each model must provide either a full revision commit or a non-zero
+weights-manifest SHA-256. Source-backed runtime components must declare `dirty: false`;
+reviewed candidate patches remain separate experiment inputs. Every active run writes
+the exact bound document to
+`<artifacts>/<run-id>/resolved-recipe.yaml` (or the target-validation subdirectory for
+`target run`); configuration digests and memory identity are calculated from that
+resolved content, not from template text or the values file.
+
+### Structured SGLang launch
+
+The recipe declares SGLang launch intent as typed options instead of interleaved argv
+tokens:
+
+```yaml
+target:
+  launch:
+    python: python3
+    python_options: [-u]
+    module: sglang.launch_server
+    bind_host: 0.0.0.0  # optional; defaults to the endpoint host
+    options:
+      --tp-size: 8
+      --mem-fraction-static: 0.88
+      --trust-remote-code: true
+    env:
+      SGLANG_ENABLE_JIT_DEEPGEMM: "1"
+```
+
+`true` emits a bare flag, `false` or `null` omits it, and a string or number emits a
+flag/value pair. `extra_argv` is the explicit escape hatch for positional or repeated
+arguments. `--model-path` and `--served-model-name` come from `models.target`; `--port`
+comes from `endpoint`; and `--host` defaults to the endpoint host unless `bind_host`
+explicitly declares a different listen address. Those generated options cannot be
+overridden in `launch.options` or `launch.extra_argv`.
+
+The executable must be Python, the module must be an approved SGLang server entrypoint,
+and `python_options` is currently limited to `[]` or `[-u]`.
+
+Options are normalized by long-option name and compiled to an internal argv tuple only
+at the execution boundary. This keeps semantic identity stable when YAML key order
+changes while preserving `subprocess` execution without a shell. The removed
+`target.launch.argv` field is rejected rather than interpreted as a compatibility form.
+
+### Identity and memory recall
+
+Schema v3 separates four identity roles:
+
+| Role | Representation | Memory behavior |
+| --- | --- | --- |
+| Display alias | Optional `name` | Never enters a semantic digest |
+| Content identity | Versioned `spec_digest` plus model/workload/protocol/runtime/hardware digests | Exact recall |
+| Execution identity | Generated `run_uid` (`run_id` compatibility name) | Audit and artifact lineage only |
+| Compatibility | Structured hard/soft facets and a hard-facet digest | Cross-workload RSI recall |
+
+Model, suite, baseline, and point names are optional. The `id` field is not accepted.
+A point without `name` gets a deterministic display key such as
+`isl16384-osl256-c1-n1`. Renaming a name, including every reference to it in
+baseline or promotion policy, does not
+change `spec_digest`. Changing tokens, concurrency, model revision, executable
+commands, policy, runtime, or hardware does.
+
+Memory first recalls exact `spec_digest` matches. It then supplies compatible
+hard-facet matches to analysis as transfer evidence, while duplicate-change
+rejection uses exact matches only. This prevents a failure on a merely similar
+workload from permanently suppressing a valid experiment in the current scenario.
+Hard facets include framework, model content, declared accelerator topology,
+derived launch semantics, container identity, and runtime-component ABI.
+SQLite memory is a disposable projection of canonical events and artifacts. A
+database whose schema version does not match the runtime is dropped and rebuilt
+empty; no in-place schema migration or legacy-ID fallback is performed.
 
 See [examples/optimization-sglang.yaml](../examples/optimization-sglang.yaml) for a
 complete shape.
@@ -246,8 +368,14 @@ Some values, such as a container digest, may be declared but unobservable from a
 local process. `capture.require_observed` decides whether that absence is fatal;
 Euboulia never labels an unobserved value as verified.
 
-`target.serving` separately records backend and speculative-decoding identity so a
-launch cannot silently drift from the scenario declaration.
+`target.launch.options` is the single author-facing source for SGLang switches,
+including backend and speculative-decoding flags. Euboulia derives normalized
+`launch_facets` from `--*-backend`, `--speculative-*`, parallelism, quantization,
+and cache-format options for compatibility recall. Unrecognized options still
+participate in the full scenario digest through the compiled launch argv, so a new
+SGLang switch cannot silently collapse two distinct executions into one identity.
+For a managed schema-v3 target, non-empty `baseline.target_parameters` is rejected
+to prevent a second, drifting copy of launch state.
 
 ## Evidence and inspection
 

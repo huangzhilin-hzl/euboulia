@@ -5,19 +5,21 @@
 # values observed in the exact image/model/SGLang checkout used on the H20 host.
 # The high-throughput baseline keeps speculative decoding off. An external
 # DFlash2 draft is declared so enabling it later has a first-class model identity.
+# To test it, put every reviewed --speculative-* switch directly under
+# target.launch.options; there is no second serving declaration to keep in sync.
 schema_version: 3
 name: glm-5.3-flash-h20-tp8-baseline
 framework: sglang
 
 models:
   target:
-    id: glm-5.3-flash
+    name: glm-5.3-flash
     path: /models/GLM-5.3-Flash
     served_name: glm-5.3-flash
     revision: REPLACE_WITH_PINNED_GLM_5_3_FLASH_REVISION
     weights_manifest_sha256: "0000000000000000000000000000000000000000000000000000000000000000"
   drafts:
-    - id: glm-5.3-flash-dflash2
+    - name: glm-5.3-flash-dflash2
       path: /models/GLM-5.3-Flash-DFlash2
       served_name: glm-5.3-flash-dflash2
       revision: REPLACE_WITH_PINNED_DFLASH2_REVISION
@@ -26,26 +28,26 @@ models:
 endpoint: http://127.0.0.1:30000
 
 workload_suite:
-  id: serving-shape-matrix
+  name: serving-shape-matrix
   dataset: random
   request_rate: inf
   points:
-    - id: isl1k-osl256-c1
+    - name: isl1k-osl256-c1
       input_tokens: 1024
       output_tokens: 256
       concurrency: 1
       num_prompts: 32
-    - id: isl1k-osl256-c32
+    - name: isl1k-osl256-c32
       input_tokens: 1024
       output_tokens: 256
       concurrency: 32
       num_prompts: 320
-    - id: isl1k-osl256-c64
+    - name: isl1k-osl256-c64
       input_tokens: 1024
       output_tokens: 256
       concurrency: 64
       num_prompts: 640
-    - id: isl8k-osl1k-c16
+    - name: isl8k-osl1k-c16
       input_tokens: 8192
       output_tokens: 1024
       concurrency: 16
@@ -60,11 +62,8 @@ benchmark:
     seed: 42
 
 baseline:
-  id: baseline
+  name: baseline
   source_revision: REPLACE_WITH_PINNED_SGLANG_COMMIT
-  target_parameters:
-    tensor_parallel_size: 8
-    expert_parallel_size: 8
 
 target:
   provider: sglang
@@ -77,39 +76,20 @@ target:
         env:
           PYTHONDONTWRITEBYTECODE: "0"
   launch:
-    argv:
-      - python
-      - -m
-      - sglang.launch_server
-      - --model-path
-      - /models/GLM-5.3-Flash
-      - --served-model-name
-      - glm-5.3-flash
-      - --tp-size
-      - "8"
-      - --ep-size
-      - "8"
-      - --quantization
-      - fp8
-      - --kv-cache-dtype
-      - bfloat16
-      - --dsa-prefill-backend
-      - tilelang
-      - --dsa-decode-backend
-      - tilelang
-      - --linear-attn-backend
-      - triton
-      - --moe-runner-backend
-      - deep_gemm
-      - --disable-shared-experts-fusion
-      - --reasoning-parser
-      - glm45
-      - --tool-call-parser
-      - glm47
-      - --host
-      - 127.0.0.1
-      - --port
-      - "30000"
+    python: python
+    module: sglang.launch_server
+    options:
+      --tp-size: 8
+      --ep-size: 8
+      --quantization: fp8
+      --kv-cache-dtype: bfloat16
+      --dsa-prefill-backend: tilelang
+      --dsa-decode-backend: tilelang
+      --linear-attn-backend: triton
+      --moe-runner-backend: deep_gemm
+      --disable-shared-experts-fusion: true
+      --reasoning-parser: glm45
+      --tool-call-parser: glm47
     env:
       PYTHONPATH: python
       HF_HUB_OFFLINE: "1"
@@ -164,20 +144,6 @@ target:
       fail_on_mismatch: true
       # The image digest is declared-only unless the execution environment injects it.
       require_observed: false
-
-  serving:
-    backends:
-      kv_cache_dtype: bfloat16
-      dsa_prefill: tilelang
-      dsa_decode: tilelang
-      linear_attention: triton
-      moe_runner: deep_gemm
-      moe_a2a: none
-    speculative:
-      algorithm: "off"
-      # To test DFlash2, set algorithm to DFLASH2, add:
-      # draft: {kind: external, model_ref: glm-5.3-flash-dflash2}
-      # and add the matching reviewed --speculative-* launch arguments above.
 
 optimization:
   profiles:

@@ -70,6 +70,7 @@ class EventType(StrEnum):
     EVALUATION_INVALID = "evaluation.invalid"
     VERDICT_RECORDED = "verdict.recorded"
     CHAMPION_UPDATED = "champion.updated"
+    MEMORY_RECALLED = "memory.recalled"
     MEMORY_RECORDED = "memory.recorded"
 
 

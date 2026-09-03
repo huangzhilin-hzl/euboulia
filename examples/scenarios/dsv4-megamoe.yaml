@@ -1,0 +1,285 @@
+# Exact baseline contract for:
+# ds-v4-flash-dspark-cp8-tp8-ep8_megamoe_test_plan.md
+#
+# This command assumes it runs inside the declared H20 container after the model,
+# ShareGPT source-derived datasets, SGLang checkout, and DeepGEMM checkout exist.
+# Inspect required bindings without side effects:
+#   euboulia target plan --recipe examples/scenarios/dsv4-megamoe.yaml
+# Bind the immutable image, model, SGLang, and DeepGEMM identities before execution:
+#   euboulia target resolve --recipe examples/scenarios/dsv4-megamoe.yaml \
+#     --values dsv4-values.yaml --output examples/scenarios/dsv4-megamoe.lock.yaml
+schema_version: 3
+name: ds-v4-flash-dspark-cp8-tp8-ep8-megamoe
+framework: sglang
+
+inputs:
+  container_image:
+    type: container_digest
+    required: true
+  deepgemm_revision:
+    type: git_commit
+    required: true
+  model_revision:
+    type: git_commit
+    required: true
+  sglang_revision:
+    type: git_commit
+    required: true
+
+models:
+  target:
+    path: /home/admin/model/DeepSeek-V4-Flash-0731
+    served_name: /home/admin/model/DeepSeek-V4-Flash-0731
+    revision: ${model_revision}
+  drafts: []
+
+endpoint: http://127.0.0.1:8188
+
+workload_suite:
+  dataset: sharegpt
+  request_rate: inf
+  points:
+    - {input_tokens: 16384, output_tokens: 256, concurrency: 1, num_prompts: 1}
+    - {input_tokens: 32768, output_tokens: 256, concurrency: 1, num_prompts: 1}
+    - {input_tokens: 65536, output_tokens: 256, concurrency: 1, num_prompts: 1}
+    - {input_tokens: 131072, output_tokens: 256, concurrency: 1, num_prompts: 1}
+    - {input_tokens: 262144, output_tokens: 256, concurrency: 1, num_prompts: 1}
+    - {input_tokens: 1024, output_tokens: 1024, concurrency: 1, num_prompts: 1}
+    - {input_tokens: 1024, output_tokens: 1024, concurrency: 2, num_prompts: 2}
+    - {input_tokens: 1024, output_tokens: 1024, concurrency: 4, num_prompts: 4}
+    - {input_tokens: 1024, output_tokens: 1024, concurrency: 8, num_prompts: 8}
+    - {input_tokens: 1024, output_tokens: 1024, concurrency: 16, num_prompts: 16}
+    - {input_tokens: 32768, output_tokens: 1024, concurrency: 1, num_prompts: 1}
+    - {input_tokens: 32768, output_tokens: 1024, concurrency: 2, num_prompts: 2}
+    - {input_tokens: 32768, output_tokens: 1024, concurrency: 4, num_prompts: 4}
+    - {input_tokens: 32768, output_tokens: 1024, concurrency: 8, num_prompts: 8}
+    - {input_tokens: 32768, output_tokens: 1024, concurrency: 16, num_prompts: 16}
+    - {input_tokens: 65536, output_tokens: 1024, concurrency: 1, num_prompts: 1}
+    - {input_tokens: 65536, output_tokens: 1024, concurrency: 2, num_prompts: 2}
+    - {input_tokens: 65536, output_tokens: 1024, concurrency: 4, num_prompts: 4}
+    - {input_tokens: 65536, output_tokens: 1024, concurrency: 8, num_prompts: 8}
+    - {input_tokens: 65536, output_tokens: 1024, concurrency: 16, num_prompts: 16}
+    - {input_tokens: 131072, output_tokens: 1024, concurrency: 1, num_prompts: 1}
+    - {input_tokens: 131072, output_tokens: 1024, concurrency: 2, num_prompts: 2}
+    - {input_tokens: 131072, output_tokens: 1024, concurrency: 4, num_prompts: 4}
+    - {input_tokens: 131072, output_tokens: 1024, concurrency: 8, num_prompts: 8}
+    - {input_tokens: 131072, output_tokens: 1024, concurrency: 16, num_prompts: 16}
+    - {input_tokens: 262144, output_tokens: 1024, concurrency: 1, num_prompts: 1}
+    - {input_tokens: 262144, output_tokens: 1024, concurrency: 2, num_prompts: 2}
+    - {input_tokens: 262144, output_tokens: 1024, concurrency: 4, num_prompts: 4}
+    - {input_tokens: 262144, output_tokens: 1024, concurrency: 8, num_prompts: 8}
+    - {input_tokens: 262144, output_tokens: 1024, concurrency: 16, num_prompts: 16}
+
+benchmark:
+  mode: serve
+  result_filename: euboulia-result.json
+  parameters:
+    protocol: exact-sharegpt-cache-clean
+    seed: 1
+
+baseline:
+  source_revision: ${sglang_revision}
+
+target:
+  provider: sglang
+  gpus: ["0", "1", "2", "3", "4", "5", "6", "7"]
+  hardware:
+    accelerator: NVIDIA-H20
+    accelerator_count: 8
+    node_count: 1
+  build:
+    commands:
+      - name: uninstall-image-sglang
+        argv: [python3, -m, pip, uninstall, -y, sglang]
+        timeout_seconds: 300
+      - name: install-pinned-sglang-worktree
+        argv: [python3, -m, pip, install, --no-deps, --no-build-isolation, --force-reinstall, -e, "{workspace}/python"]
+        timeout_seconds: 1800
+      - name: uninstall-image-deepgemm
+        argv: [python3, -m, pip, uninstall, -y, sgl-deep-gemm, deep-gemm]
+        timeout_seconds: 300
+      - name: install-pinned-deepgemm
+        argv: [/usr/bin/env, -C, /home/admin/src/dsv4-megamoe/DeepGEMM, DG_FORCE_BUILD=1, bash, ./install.sh]
+        timeout_seconds: 3600
+  launch:
+    python: python3
+    python_options: [-u]
+    module: sglang.launch_server
+    bind_host: 0.0.0.0
+    options:
+      --trust-remote-code: true
+      --nnodes: 1
+      --pp-size: 1
+      --tp-size: 8
+      --mem-fraction-static: 0.88
+      --max-running-requests: 64
+      --cuda-graph-max-bs-decode: 64
+      --chunked-prefill-size: 8192
+      --tool-call-parser: deepseekv4
+      --reasoning-parser: deepseek-v4
+      --enable-prefill-cp: true
+      --cp-strategy: interleave
+      --moe-a2a-backend: megamoe
+      --enable-cache-report: true
+      --enable-metrics: true
+      --log-level: info
+      --allow-auto-output-truncate: true
+      --thinking-trigger: thinking
+      --enable-repetition-detection: true
+      --speculative-algorithm: DSPARK
+      --speculative-dspark-block-size: 5
+      --enable-cp-decode-attn-tp: true
+      --swa-full-tokens-ratio: 0.05
+    env:
+      TORCHINDUCTOR_CACHE_DIR: /home/admin/inductor_root_cache
+      SGLANG_HEALTH_CHECK_TIMEOUT: "60"
+      SGLANG_OPT_USE_DEEPGEMM_MEGA_MOE: "1"
+      SGLANG_OPT_DEEPGEMM_MEGA_MOE_NUM_MAX_TOKENS_PER_RANK: "1024"
+      SGLANG_JIT_DEEPGEMM_PRECOMPILE: "1"
+      SGLANG_OPT_USE_JIT_INDEXER_METADATA: "1"
+      SGLANG_OPT_SWA_EVICT_KEEP_WINDOW: "1"
+      SGLANG_JIT_DEEPGEMM_TILE_BUCKET_WARMUP: "1"
+      SGLANG_CP_DISABLE_DECODE_UNPADDING: "0"
+      SGLANG_CP_DISABLE_DECODE_SLICE: "0"
+      SGLANG_RAGGED_VERIFY_MODE: static
+      FLASHINFER_DISABLE_VERSION_CHECK: "1"
+      SGLANG_OPT_FP8_WO_A_GEMM: "1"
+      SGLANG_ENABLE_JIT_DEEPGEMM: "1"
+      SGLANG_DSPARK_VERIFY_WO_A_EINSUM_LIMIT: "8"
+      SGLANG_DSV4_DEEPGEMM_SMALL_M_TRITON_LIMIT: "8"
+      SGLANG_DSPARK_VERIFY_COMPRESS_BF16_FP32_LIMIT: "8"
+      SGLANG_DSPARK_VERIFY_WO_B_BF16_LIMIT: "8"
+      # For a multi-node variant this must be replaced by the routable Pod IP.
+      SGLANG_HOST_IP: 127.0.0.1
+      NCCL_IB_TC: "136"
+      NCCL_IB_RETRY_CNT: "7"
+      NCCL_SOCKET_IFNAME: bond0
+      NCCL_DEBUG: WARN
+      NCCL_IB_GID_INDEX: "3"
+      NCCL_IB_SL: "5"
+      NCCL_IB_TIMEOUT: "22"
+      NCCL_SET_THREAD_NAME: "1"
+      NCCL_IB_HCA: mlx5_bond
+      NCCL_DEBUG_SUBSYS: INIT,TUNING,GRAPH
+      NCCL_IB_QPS_PER_CONNECTION: "8"
+  readiness:
+    url: http://127.0.0.1:8188/health
+    timeout_seconds: 1800
+    interval_seconds: 2
+  shutdown_timeout_seconds: 120
+  runtime:
+    expected:
+      container:
+        image: ${container_image}
+      components:
+        sglang:
+          path: /home/admin/src/dsv4-megamoe/SGLang
+          revision: ${sglang_revision}
+          dirty: false
+        deepgemm:
+          path: /home/admin/src/dsv4-megamoe/DeepGEMM
+          revision: ${deepgemm_revision}
+          dirty: false
+    capture:
+      collect_observed: true
+      fail_on_mismatch: true
+      require_observed: false
+optimization:
+  # These inputs are unused by `euboulia target run`; they become active only
+  # when this validated baseline is deliberately promoted into `optimize run`.
+  profiles:
+    provider: imported
+    artifacts:
+      - path: /home/admin/profiles/dsv4-megamoe/profile.json
+        source: torch_chrome_trace
+  planner:
+    provider: rules
+    patch_catalog: dsv4-megamoe-catalog.yaml
+    max_proposals_per_iteration: 1
+  workspace:
+    repository: /home/admin/src/dsv4-megamoe/SGLang
+    root_dir: /home/admin/euboulia-worktrees/dsv4-megamoe
+    timeout_seconds: 300
+    max_patch_bytes: 262144
+    max_changed_files: 8
+    max_changed_lines: 500
+  evaluation:
+    metric: output_throughput
+    direction: maximize
+    metrics_path: euboulia-result.json
+    promotion:
+      primary_points: [isl262144-osl256-c1-n1, isl262144-osl1024-c16-n16]
+      require_all_points_valid: true
+      min_relative_improvement: 0.03
+      max_regression_per_point: 0.01
+      noise_tolerance: 0.01
+    tiers:
+      - kind: smoke
+        warmups: 0
+        repetitions: 1
+        timeout_seconds: 300
+        commands:
+          - name: dsv4-megamoe-startup-gate
+            argv: [python3, -m, euboulia.harnesses.sglang.dsv4_megamoe_gate]
+            env:
+              EUBOULIA_DEEPGEMM_SOURCE: /home/admin/src/dsv4-megamoe/DeepGEMM
+      - kind: correctness
+        warmups: 0
+        repetitions: 1
+        timeout_seconds: 300
+        commands:
+          - name: dsv4-megamoe-8-rank-kernel-path
+            argv: [python3, -m, euboulia.harnesses.sglang.dsv4_megamoe_profile_gate]
+            timeout_seconds: 14400
+            env:
+              EUBOULIA_SHAREGPT_DATASET_ROOT: /home/admin/bench_data/dsv4_sharegpt_exact_seed1
+              EUBOULIA_SHAREGPT_MANIFEST_PATH: /home/admin/bench_data/dsv4_sharegpt_exact_seed1/manifest.json
+              EUBOULIA_SHAREGPT_SAMPLES: "16"
+              EUBOULIA_BENCHMARK_SEED: "1"
+              EUBOULIA_SGLANG_BENCHMARK_BACKEND: sglang-oai-chat
+              EUBOULIA_SGLANG_BENCHMARK_MODULE: sglang.bench_serving
+          - name: deterministic-chat-smoke
+            argv: [python3, -m, euboulia.harnesses.sglang.correctness]
+            env:
+              EUBOULIA_SMOKE_API: openai-chat
+              EUBOULIA_SMOKE_REQUESTS: "1"
+      - kind: performance
+        warmups: 1
+        repetitions: 3
+        timeout_seconds: 7200
+        required_metrics: [output_throughput, mean_ttft_ms, mean_tpot_ms]
+        commands:
+          - name: exact-sharegpt-cache-clean
+            argv: [python3, -m, euboulia.harnesses.sglang.benchmark]
+            env:
+              EUBOULIA_SHAREGPT_DATASET_ROOT: /home/admin/bench_data/dsv4_sharegpt_exact_seed1
+              EUBOULIA_SHAREGPT_MANIFEST_PATH: /home/admin/bench_data/dsv4_sharegpt_exact_seed1/manifest.json
+              EUBOULIA_SHAREGPT_SAMPLES: "16"
+              EUBOULIA_BENCHMARK_SEED: "1"
+              EUBOULIA_SGLANG_BENCHMARK_BACKEND: sglang-oai-chat
+              EUBOULIA_SGLANG_BENCHMARK_MODULE: sglang.bench_serving
+      - kind: accuracy
+        warmups: 0
+        repetitions: 1
+        timeout_seconds: 7200
+        commands:
+          - name: gsm8k-200-8shot
+            argv: [python3, -m, euboulia.harnesses.sglang.gsm8k]
+            env:
+              EUBOULIA_GSM8K_NUM_EXAMPLES: "200"
+              EUBOULIA_GSM8K_NUM_SHOTS: "8"
+              EUBOULIA_GSM8K_NUM_THREADS: "64"
+              EUBOULIA_GSM8K_MAX_TOKENS: "512"
+              EUBOULIA_DSV4_MEGAMOE_REPORT: "1"
+  budget:
+    max_iterations: 1
+    max_wall_time_seconds: 86400
+    max_consecutive_failures: 1
+    no_improvement_patience: 1
+    max_profile_bytes: 53687091200
+
+execution:
+  artifacts_dir: /home/admin/results/euboulia-dsv4-megamoe
+  ledger: /home/admin/results/euboulia-dsv4-megamoe/experiments.jsonl
+  events: /home/admin/results/euboulia-dsv4-megamoe/events.jsonl
+  memory: /home/admin/results/euboulia-dsv4-megamoe/memory.sqlite3

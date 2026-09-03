@@ -1,9 +1,9 @@
 """Authorized, fail-fast evaluation of optimization candidates.
 
 The evaluator deliberately knows nothing about SGLang, vLLM, or optimization
-contracts.  It runs already-approved argv command specifications in three fixed
-tiers and emits a small, serializable result that an orchestrator can adapt to its
-own ledger types.
+contracts. It runs already-approved argv command specifications in fixed tiers
+and emits a small, serializable result that an orchestrator can adapt to its own
+ledger types.
 """
 
 from __future__ import annotations
@@ -38,6 +38,7 @@ class EvaluationStage(StrEnum):
     PREFLIGHT = "preflight"
     CORRECTNESS = "correctness"
     BENCHMARK = "benchmark"
+    ACCURACY = "accuracy"
 
 
 class ObjectiveDirection(StrEnum):
@@ -123,6 +124,7 @@ class EvaluationPlan:
     correctness: tuple[CommandSpec, ...]
     benchmark: BenchmarkSpec
     objective: ObjectiveSpec
+    accuracy: tuple[CommandSpec, ...] = ()
     profiler_trial: bool = False
 
     def __post_init__(self) -> None:
@@ -137,6 +139,7 @@ class EvaluationPlan:
             raise TypeError("benchmark must be a BenchmarkSpec")
         if not isinstance(self.objective, ObjectiveSpec):
             raise TypeError("objective must be an ObjectiveSpec")
+        object.__setattr__(self, "accuracy", _commands(self.accuracy, "accuracy"))
         if not isinstance(self.profiler_trial, bool):
             raise TypeError("profiler_trial must be a bool")
 
@@ -227,7 +230,8 @@ class WorkloadSuiteEvaluationResult:
             "trial_id": self.trial_id,
             "outcome": self.outcome.value,
             "point_results": {
-                point_id: result.to_dict() for point_id, result in self.point_results.items()
+                point_name: result.to_dict()
+                for point_name, result in self.point_results.items()
             },
             "primary_points": list(self.primary_points),
             "objective_values": dict(self.objective_values),
@@ -339,6 +343,18 @@ class TieredEvaluator:
             return result
 
         stages.append(benchmark_result)
+        accuracy_result = self._run_commands(
+            EvaluationStage.ACCURACY,
+            plan.accuracy,
+            workspace,
+            artifact_dir,
+        )
+        if plan.accuracy:
+            stages.append(accuracy_result)
+        if not accuracy_result.succeeded:
+            result = self._failed_result(plan, artifact_dir, stages, accuracy_result)
+            self._write_summary(result)
+            return result
         relative = _relative_improvement(objective_value, plan.objective)
         gate_passed, gate_reason = _gate(objective_value, relative, plan.objective)
         if plan.profiler_trial:
@@ -380,12 +396,17 @@ class TieredEvaluator:
             default_timeout_seconds=self.default_timeout_seconds,
         )
         executions: list[ExecutionResult] = []
-        for command in commands:
+        for index, command in enumerate(commands, start=1):
+            environment = dict(command.env_overrides)
+            evidence_label = re.sub(r"[^A-Za-z0-9_.-]+", "-", command.name).strip("-_")
+            environment["EUBOULIA_COMMAND_EVIDENCE_DIR"] = str(
+                artifact_dir / stage.value / f"{index:02d}-{evidence_label}-evidence"
+            )
             execution = executor.run(
                 command.argv,
                 cwd=workspace,
                 timeout_seconds=command.timeout_seconds,
-                env_overrides=command.env_overrides,
+                env_overrides=environment,
                 artifact_prefix=command.name,
             )
             executions.append(execution)
@@ -550,6 +571,7 @@ def _plan_digest(plan: EvaluationPlan) -> str:
             "minimum_relative_improvement": plan.objective.minimum_relative_improvement,
             "absolute_threshold": plan.objective.absolute_threshold,
         },
+        "accuracy": [command_payload(command) for command in plan.accuracy],
         "profiler_trial": plan.profiler_trial,
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()

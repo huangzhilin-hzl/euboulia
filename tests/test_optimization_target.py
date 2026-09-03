@@ -151,6 +151,9 @@ def test_server_argument_patch_overlays_semantically_and_is_immutable() -> None:
         ServerArgumentPatch(set={"--tp-size": "2"}, remove=("--tp-size",))
     with pytest.raises(ValueError, match="duplicate long options"):
         patch.apply(("sglang", "--tp-size=1", "--tp-size", "2"))
+    assert ServerArgumentPatch(set={"--tp-size": "2"}).apply(
+        ("sglang", "--lora-path", "a", "--lora-path", "b")
+    ) == ("sglang", "--lora-path", "a", "--lora-path", "b", "--tp-size", "2")
     assert ServerArgumentPatch(remove=("--trust-remote-code",)).apply(
         ("sglang", "--trust-remote-code", "--", "--trust-remote-code")
     ) == ("sglang", "--", "--trust-remote-code")

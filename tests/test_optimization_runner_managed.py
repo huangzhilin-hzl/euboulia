@@ -56,6 +56,7 @@ def _managed_project(tmp_path: Path) -> OptimizationConfig:
     (repository / "source.txt").write_text("same pinned source\n", encoding="utf-8")
     _git(repository, "add", "source.txt")
     _git(repository, "commit", "-m", "baseline")
+    source_revision = _git(repository, "rev-parse", "HEAD")
 
     trace = tmp_path / "trace.json"
     trace.write_text(
@@ -99,7 +100,8 @@ entries:
     correctness_source = (
         "import os; "
         "assert os.environ['EUBOULIA_TARGET_ENDPOINT'] == 'http://127.0.0.1:30000'; "
-        "assert os.environ['EUBOULIA_TARGET_ROLE'] in {'baseline', 'candidate'}; "
+        "assert os.environ['EUBOULIA_TARGET_ROLE'] in "
+        "{'baseline', 'candidate', 'baseline-validation'}; "
         "assert os.environ['EUBOULIA_FRAMEWORK'] == 'sglang'; "
         "assert os.environ['EUBOULIA_MODEL'] == 'test/model'; "
         "assert os.environ['EUBOULIA_INPUT_TOKENS'] == '128'; "
@@ -122,16 +124,12 @@ entries:
         "target": {
             "provider": "sglang",
             "launch": {
-                "argv": [
-                    sys.executable,
-                    "-m",
-                    "sglang.launch_server",
-                    "--model-path",
-                    "test/model",
-                    "--schedule-policy",
-                    "fcfs",
-                    "--disable-cuda-graph",
-                ]
+                "python": sys.executable,
+                "module": "sglang.launch_server",
+                "options": {
+                    "--schedule-policy": "fcfs",
+                    "--disable-cuda-graph": True,
+                },
             },
             "readiness": {
                 "url": "http://127.0.0.1:30000/health_generate",
@@ -163,8 +161,8 @@ entries:
         },
         "benchmark": {"mode": "serve", "result_filename": "result.json"},
         "baseline": {
-            "id": "baseline",
-            "source_revision": "HEAD",
+            "name": "baseline",
+            "source_revision": source_revision,
             "target_parameters": {},
         },
         "optimization": {
@@ -242,27 +240,27 @@ def _managed_v3_project(tmp_path: Path) -> OptimizationConfig:
     document["schema_version"] = 3
     document["models"] = {
         "target": {
-            "id": "target",
+            "name": "target",
             "path": workload["model"],
             "served_name": workload["model"],
-            "revision": "model-revision",
+            "revision": "e" * 40,
         }
     }
     document["endpoint"] = workload["endpoint"]
     document["workload_suite"] = {
-        "id": "two-point-suite",
+        "name": "two-point-suite",
         "dataset": "random",
         "request_rate": "inf",
         "points": [
             {
-                "id": "short-c4",
+                "name": "short-c4",
                 "input_tokens": 128,
                 "output_tokens": 32,
                 "concurrency": 4,
                 "num_prompts": 16,
             },
             {
-                "id": "long-c8",
+                "name": "long-c8",
                 "input_tokens": 512,
                 "output_tokens": 64,
                 "concurrency": 8,
@@ -273,11 +271,27 @@ def _managed_v3_project(tmp_path: Path) -> OptimizationConfig:
     target = document["target"]
     assert isinstance(target, dict)
     target.pop("provenance")
-    target["runtime"] = {
-        "expected": {"components": {"python": {"version": platform.python_version()}}},
-        "capture": {"require_observed": True, "fail_on_mismatch": True},
+    baseline = document["baseline"]
+    assert isinstance(baseline, dict)
+    source_revision = baseline["source_revision"]
+    assert isinstance(source_revision, str)
+    document["inputs"] = {
+        "container_image": {"type": "container_digest", "required": True},
+        "sglang_revision": {"type": "git_commit", "required": True},
     }
-    target["serving"] = {"backends": {}, "speculative": {"algorithm": "off"}}
+    baseline["source_revision"] = "${sglang_revision}"
+    target["runtime"] = {
+        "expected": {
+            "container": {
+                "image": "${container_image}",
+            },
+            "components": {
+                "python": {"version": platform.python_version()},
+                "sglang": {"revision": "${sglang_revision}", "dirty": False},
+            },
+        },
+        "capture": {"require_observed": False, "fail_on_mismatch": True},
+    }
     evaluation = document["optimization"]["evaluation"]
     evaluation.pop("baseline_value")
     evaluation.pop("min_relative_improvement")
@@ -293,7 +307,7 @@ def _managed_v3_project(tmp_path: Path) -> OptimizationConfig:
         "-c",
         (
             "import os; "
-            "assert os.environ['EUBOULIA_WORKLOAD_POINT_ID']=='short-c4'; "
+            "assert os.environ['EUBOULIA_WORKLOAD_POINT_NAME']=='short-c4'; "
             "assert os.environ['EUBOULIA_MODEL_SERVED_NAME']=='test/model'"
         ),
     ]
@@ -311,7 +325,18 @@ def _managed_v3_project(tmp_path: Path) -> OptimizationConfig:
         ),
     ]
     config_path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
-    return load_optimization_config(config_path)
+    values_path = tmp_path / "values.yaml"
+    values_path.write_text(
+        yaml.safe_dump(
+            {
+                "container_image": "registry.example/test@sha256:" + "a" * 64,
+                "sglang_revision": source_revision,
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    return load_optimization_config(config_path, values_path)
 
 
 class FakeTargetController:
@@ -450,9 +475,15 @@ def test_managed_args_only_trial_uses_fresh_services_and_measured_baseline(
         "sglang.launch_server",
         "--model-path",
         "test/model",
+        "--served-model-name",
+        "test/model",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "30000",
+        "--disable-cuda-graph",
         "--schedule-policy",
         "fcfs",
-        "--disable-cuda-graph",
     )
     assert controller.argv["candidate"] == (
         sys.executable,
@@ -460,6 +491,12 @@ def test_managed_args_only_trial_uses_fresh_services_and_measured_baseline(
         "sglang.launch_server",
         "--model-path",
         "test/model",
+        "--served-model-name",
+        "test/model",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "30000",
         "--schedule-policy",
         "lpm",
         "--max-running-requests",
@@ -490,6 +527,35 @@ def test_managed_args_only_trial_uses_fresh_services_and_measured_baseline(
         (EventType.SERVICE_STOPPING, "candidate"),
         (EventType.SERVICE_STOPPED, "candidate"),
     ]
+
+
+def test_target_validation_runs_one_baseline_without_candidate(tmp_path: Path) -> None:
+    config = _managed_project(tmp_path)
+    controller = FakeTargetController()
+
+    result = OptimizationRunner(controller).validate_baseline(
+        config,
+        _ALL_MANAGED_CAPABILITIES,
+        run_id="baseline-only",
+    )
+
+    assert result.passed is True
+    assert result.run_uid.startswith("run-")
+    assert result.run_uid != result.run_id
+    assert result.evaluation.objective_value == 106.0
+    assert controller.calls == [
+        "build:baseline",
+        "start:baseline",
+        "ready:baseline",
+        "stop:baseline",
+    ]
+    assert (result.artifact_dir / "validation.json").is_file()
+    resolved_recipe = result.artifact_dir / "resolved-recipe.yaml"
+    assert resolved_recipe.is_file()
+    resolved_text = resolved_recipe.read_text(encoding="utf-8")
+    assert "inputs:" not in resolved_text
+    assert "${" not in resolved_text
+    assert (result.artifact_dir / "logs" / "server.log").is_file()
 
 
 def test_managed_v3_runs_two_points_per_service_and_captures_runtime(

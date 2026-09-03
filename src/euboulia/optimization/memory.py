@@ -4,15 +4,11 @@ from __future__ import annotations
 
 import os
 import sqlite3
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import cast
 
 from euboulia.optimization.contracts import MemoryEntry, MemoryQuery
-
-
-class MemorySchemaError(RuntimeError):
-    """Raised when an existing database has an unsupported schema."""
 
 
 class MemoryConflictError(ValueError):
@@ -27,7 +23,7 @@ class SQLiteMemoryStore:
     recoverable operation when canonical outcomes remain available.
     """
 
-    SCHEMA_VERSION = 1
+    SCHEMA_VERSION = 2
 
     def __init__(
         self,
@@ -49,10 +45,8 @@ class SQLiteMemoryStore:
     def _initialize(self) -> None:
         with self._connect() as connection:
             current = cast(int, connection.execute("PRAGMA user_version").fetchone()[0])
-            if current not in {0, self.SCHEMA_VERSION}:
-                raise MemorySchemaError(
-                    f"unsupported memory schema version {current}; expected {self.SCHEMA_VERSION}"
-                )
+            if current != self.SCHEMA_VERSION:
+                connection.execute("DROP TABLE IF EXISTS memory_entries")
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS memory_entries (
@@ -66,6 +60,9 @@ class SQLiteMemoryStore:
                     model_revision TEXT NOT NULL,
                     workload_digest TEXT NOT NULL,
                     benchmark_policy_digest TEXT NOT NULL,
+                    spec_digest TEXT NOT NULL,
+                    run_uid TEXT NOT NULL,
+                    compatibility_digest TEXT NOT NULL,
                     proposal_id TEXT NOT NULL,
                     outcome TEXT NOT NULL,
                     patch_digest TEXT,
@@ -89,7 +86,19 @@ class SQLiteMemoryStore:
                 )
                 """
             )
-            if current == 0:
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS memory_spec_idx
+                ON memory_entries (spec_digest, created_at DESC)
+                """
+            )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS memory_compatibility_idx
+                ON memory_entries (compatibility_digest, created_at DESC)
+                """
+            )
+            if current != self.SCHEMA_VERSION:
                 connection.execute(f"PRAGMA user_version = {self.SCHEMA_VERSION}")
 
     def record(self, entry: MemoryEntry) -> MemoryEntry:
@@ -119,13 +128,16 @@ class SQLiteMemoryStore:
                 model_revision,
                 workload_digest,
                 benchmark_policy_digest,
+                spec_digest,
+                run_uid,
+                compatibility_digest,
                 proposal_id,
                 outcome,
                 patch_digest,
                 relative_improvement,
                 created_at,
                 entry_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 entry.memory_id,
@@ -138,6 +150,9 @@ class SQLiteMemoryStore:
                 entry.model_revision,
                 entry.workload_digest,
                 entry.benchmark_policy_digest,
+                entry.spec_digest,
+                entry.run_uid,
+                entry.compatibility_digest,
                 entry.proposal_id,
                 entry.outcome.value,
                 entry.patch_digest,
@@ -180,6 +195,9 @@ class SQLiteMemoryStore:
             "model_revision",
             "workload_digest",
             "benchmark_policy_digest",
+            "spec_digest",
+            "run_uid",
+            "compatibility_digest",
         ):
             value = getattr(query, column)
             if value is not None:
@@ -190,16 +208,25 @@ class SQLiteMemoryStore:
             clauses.append(f"outcome IN ({placeholders})")
             parameters.extend(outcome.value for outcome in query.outcomes)
         where = "" if not clauses else " WHERE " + " AND ".join(clauses)
-        parameters.append(query.limit)
         sql = (
             "SELECT entry_json FROM memory_entries"
             + where
-            + " ORDER BY created_at DESC, memory_id DESC LIMIT ?"
+            + " ORDER BY created_at DESC, memory_id DESC"
         )
+        if not query.compatibility_facets:
+            parameters.append(query.limit)
+            sql += " LIMIT ?"
         with self._connect() as connection:
             raw_rows = connection.execute(sql, parameters).fetchall()
         rows = cast(list[tuple[str]], raw_rows)
-        return tuple(MemoryEntry.from_json(row[0]) for row in rows)
+        entries = (MemoryEntry.from_json(row[0]) for row in rows)
+        if query.compatibility_facets:
+            entries = (
+                entry
+                for entry in entries
+                if _facets_contain(entry.compatibility_facets, query.compatibility_facets)
+            )
+        return tuple(entry for _, entry in zip(range(query.limit), entries, strict=False))
 
     def rebuild(self, entries: Iterable[MemoryEntry]) -> int:
         if isinstance(entries, str | bytes):
@@ -227,6 +254,22 @@ class SQLiteMemoryStore:
 
 __all__ = [
     "MemoryConflictError",
-    "MemorySchemaError",
     "SQLiteMemoryStore",
 ]
+
+
+def _facets_contain(actual: Mapping[str, object], expected: Mapping[str, object]) -> bool:
+    """Return whether nested actual facets contain every expected facet."""
+
+    for key, expected_value in expected.items():
+        if key not in actual:
+            return False
+        actual_value = actual[key]
+        if isinstance(expected_value, Mapping):
+            if not isinstance(actual_value, Mapping) or not _facets_contain(
+                actual_value, expected_value
+            ):
+                return False
+        elif actual_value != expected_value:
+            return False
+    return True

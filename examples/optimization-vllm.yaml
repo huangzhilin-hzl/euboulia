@@ -6,7 +6,7 @@ framework: vllm
 
 models:
   target:
-    id: target
+    name: target
     path: your-org/your-model
     served_name: your-model
     revision: REPLACE_WITH_PINNED_MODEL_REVISION
@@ -14,16 +14,16 @@ models:
 endpoint: http://127.0.0.1:8000
 
 workload_suite:
-  id: serving-shape-matrix
+  name: serving-shape-matrix
   dataset: random
   request_rate: inf
   points:
-    - id: isl1k-osl256-c1
+    - name: isl1k-osl256-c1
       input_tokens: 1024
       output_tokens: 256
       concurrency: 1
       num_prompts: 32
-    - id: isl1k-osl256-c32
+    - name: isl1k-osl256-c32
       input_tokens: 1024
       output_tokens: 256
       concurrency: 32
@@ -36,7 +36,7 @@ benchmark:
   parameters: {}
 
 baseline:
-  id: baseline
+  name: baseline
   source_revision: REPLACE_WITH_PINNED_COMMIT
   target_parameters: {}
   # External mode cannot measure a managed baseline, so every point is explicit.

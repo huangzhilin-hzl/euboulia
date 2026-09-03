@@ -10,13 +10,19 @@ from euboulia.optimization import (
     OptimizationConfigError,
     PlannerProvider,
     ProfileProvider,
+    derive_sglang_launch_facets,
     load_optimization_config,
+    scenario_identity,
 )
 from euboulia.optimization.config import (
     ManagedTargetConfig,
     TargetBuildConfig,
     TargetLaunchConfig,
     TargetReadinessConfig,
+    dump_resolved_optimization_config,
+    optimization_execution_lock_issues,
+    require_optimization_execution_lock,
+    resolve_optimization_config,
 )
 
 VALID_CONFIG = """
@@ -39,7 +45,7 @@ benchmark:
   parameters:
     request_rate: 10
 baseline:
-  id: baseline
+  name: baseline
   source_revision: abc123
   target_parameters: {}
 optimization:
@@ -84,7 +90,7 @@ execution:
 MINIMAL_TARGET = """target:
   provider: sglang
   launch:
-    argv: [python3, -m, sglang.launch_server]
+    options: {}
   readiness:
     url: http://localhost:30000/health_generate
   gpus: [0]
@@ -93,7 +99,14 @@ MINIMAL_TARGET = """target:
 FULL_TARGET = """target:
   provider: sglang
   launch:
-    argv: [python3, -m, sglang.launch_server, --model-path, test/model]
+    python: python3
+    python_options: [-u]
+    module: sglang.launch_server
+    options:
+      --tp-size: 8
+      --trust-remote-code: true
+      --disable-overlap: false
+    extra_argv: [--custom-flag]
     env:
       SGLANG_LOG_LEVEL: info
       OPTIONAL_SECRET:
@@ -134,35 +147,35 @@ def v3_managed_document(tmp_path: Path) -> dict[str, object]:
         "framework": "sglang",
         "models": {
             "target": {
-                "id": "target",
+                "name": "target",
                 "path": "/models/target",
                 "served_name": "target-served",
-                "revision": "model-commit",
+                "revision": "e" * 40,
             },
             "drafts": [
                 {
-                    "id": "draft",
+                    "name": "draft",
                     "path": "/models/draft",
                     "served_name": "draft-served",
-                    "revision": "draft-commit",
+                    "revision": "f" * 40,
                 }
             ],
         },
         "endpoint": "http://127.0.0.1:30000",
         "workload_suite": {
-            "id": "latency-throughput",
+            "name": "latency-throughput",
             "dataset": "random",
             "request_rate": "inf",
             "points": [
                 {
-                    "id": "short-c1",
+                    "name": "short-c1",
                     "input_tokens": 128,
                     "output_tokens": 32,
                     "concurrency": 1,
                     "num_prompts": 8,
                 },
                 {
-                    "id": "long-c16",
+                    "name": "long-c16",
                     "input_tokens": 4096,
                     "output_tokens": 512,
                     "concurrency": 16,
@@ -176,19 +189,16 @@ def v3_managed_document(tmp_path: Path) -> dict[str, object]:
             "provider": "sglang",
             "gpus": list(range(8)),
             "launch": {
-                "argv": [
-                    "python",
-                    "-m",
-                    "sglang.launch_server",
-                    "--model-path",
-                    "/models/target",
-                    "--kv-cache-dtype",
-                    "bfloat16",
-                    "--speculative-algorithm",
-                    "DFLASH2",
-                    "--speculative-draft-model-path",
-                    "/models/draft",
-                ]
+                "python": "python",
+                "module": "sglang.launch_server",
+                "options": {
+                    "--kv-cache-dtype": "bfloat16",
+                    "--speculative-algorithm": "DFLASH2",
+                    "--speculative-draft-attention-backend": "FA4",
+                    "--speculative-draft-model-path": "/models/draft",
+                    "--speculative-num-draft-tokens": 8,
+                    "--speculative-num-steps": 1,
+                },
             },
             "readiness": {"url": "http://127.0.0.1:30000/health_generate"},
             "runtime": {
@@ -200,22 +210,12 @@ def v3_managed_document(tmp_path: Path) -> dict[str, object]:
                     "components": {
                         "torch": {"version": "2.8.0"},
                         "cuda": {"version": "12.8"},
-                        "deepep": {"revision": "deepep-commit"},
-                        "deepgemm": {"revision": "deepgemm-commit"},
+                        "deepep": {"revision": "c" * 40},
+                        "deepgemm": {"revision": "d" * 40},
                         "flashinfer": {"version": "0.4.1"},
                     },
                 },
                 "capture": {"fail_on_mismatch": True, "require_observed": False},
-            },
-            "serving": {
-                "backends": {"kv_cache_dtype": "bfloat16"},
-                "speculative": {
-                    "algorithm": "DFLASH2",
-                    "draft": {"kind": "external", "model_ref": "draft"},
-                    "num_steps": 1,
-                    "num_draft_tokens": 8,
-                    "draft_attention_backend": "fa4",
-                },
             },
         },
         "optimization": {
@@ -254,6 +254,42 @@ def v3_managed_document(tmp_path: Path) -> dict[str, object]:
     }
 
 
+def write_input_template(tmp_path: Path) -> tuple[Path, Path]:
+    document = v3_managed_document(tmp_path)
+    document["inputs"] = {
+        "container_image": {"type": "container_digest", "required": True},
+        "sglang_revision": {"type": "git_commit", "required": True},
+    }
+    baseline = document["baseline"]
+    target = document["target"]
+    assert isinstance(baseline, dict) and isinstance(target, dict)
+    baseline["source_revision"] = "${sglang_revision}"
+    runtime = target["runtime"]
+    assert isinstance(runtime, dict)
+    expected = runtime["expected"]
+    assert isinstance(expected, dict)
+    container = expected["container"]
+    components = expected["components"]
+    assert isinstance(container, dict) and isinstance(components, dict)
+    container["image"] = "${container_image}"
+    components["sglang"] = {"revision": "${sglang_revision}", "dirty": False}
+
+    template = tmp_path / "template.yaml"
+    values = tmp_path / "values.yaml"
+    template.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+    values.write_text(
+        yaml.safe_dump(
+            {
+                "container_image": "registry.example/sglang@sha256:" + "a" * 64,
+                "sglang_revision": "B" * 40,
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    return template, values
+
+
 def test_load_v2_config_is_strict_and_resolves_all_paths(tmp_path: Path) -> None:
     source = write_config(tmp_path)
 
@@ -283,7 +319,61 @@ def test_load_v2_config_is_strict_and_resolves_all_paths(tmp_path: Path) -> None
     assert config.target is None
 
 
-def test_load_v3_normalizes_models_suite_runtime_and_speculative_draft(
+def test_loads_exact_dsv4_megamoe_target_validation_scenario(tmp_path: Path) -> None:
+    repository = Path(__file__).resolve().parents[1]
+    values = tmp_path / "dsv4-values.yaml"
+    values.write_text(
+        yaml.safe_dump(
+            {
+                "container_image": "registry.example/dsv4@sha256:" + "a" * 64,
+                "deepgemm_revision": "c" * 40,
+                "model_revision": "d" * 40,
+                "sglang_revision": "b" * 40,
+            }
+        ),
+        encoding="utf-8",
+    )
+    config = load_optimization_config(
+        repository / "examples/scenarios/dsv4-megamoe.yaml", values
+    )
+
+    assert config.name == "ds-v4-flash-dspark-cp8-tp8-ep8-megamoe"
+    assert config.workload_suite.dataset == "sharegpt"
+    assert len(config.workload_suite.points) == 30
+    assert [tier.kind for tier in config.optimization.evaluation.tiers] == [
+        EvaluationTierKind.SMOKE,
+        EvaluationTierKind.CORRECTNESS,
+        EvaluationTierKind.PERFORMANCE,
+        EvaluationTierKind.ACCURACY,
+    ]
+    assert config.target is not None
+    assert config.target.hardware == {
+        "accelerator": "NVIDIA-H20",
+        "accelerator_count": 8,
+        "node_count": 1,
+    }
+    assert config.target.launch.bind_host == "0.0.0.0"
+    assert config.baseline.source_revision == "b" * 40
+    assert config.target.runtime is not None
+    assert config.target.runtime.expected.components["sglang"].revision == "b" * 40
+    assert optimization_execution_lock_issues(config) == ()
+    host_index = config.target_launch_argv.index("--host")
+    assert config.target_launch_argv[host_index + 1] == "0.0.0.0"
+    assert config.target.launch.env["SGLANG_OPT_USE_DEEPGEMM_MEGA_MOE"] == "1"
+    launch_facets = derive_sglang_launch_facets(config.target.launch.options)
+    assert launch_facets["backends"] == {"moe_a2a": "megamoe"}
+    assert launch_facets["speculative"] == {
+        "algorithm": "dspark",
+        "dspark_block_size": 5,
+    }
+    parallelism = launch_facets["parallelism"]
+    assert isinstance(parallelism, dict)
+    assert parallelism["tp_size"] == 8
+    assert parallelism["enable_prefill_cp"] is True
+    assert parallelism["cp_strategy"] == "interleave"
+
+
+def test_load_v3_normalizes_models_suite_runtime_and_derives_launch_facets(
     tmp_path: Path,
 ) -> None:
     source = tmp_path / "campaign-v3.yaml"
@@ -297,7 +387,7 @@ def test_load_v3_normalizes_models_suite_runtime_and_speculative_draft(
     assert config.schema_version == 3
     assert config.models.target.path == "/models/target"
     assert config.models.drafts[0].path == "/models/draft"
-    assert tuple(point.point_id for point in config.workload_suite.points) == (
+    assert tuple(point.name for point in config.workload_suite.points) == (
         "short-c1",
         "long-c16",
     )
@@ -313,27 +403,317 @@ def test_load_v3_normalizes_models_suite_runtime_and_speculative_draft(
         "deepgemm",
         "flashinfer",
     }
-    assert config.target.serving is not None
-    assert config.target.serving.speculative.draft is not None
-    assert config.target.serving.speculative.draft.model_ref == "draft"
+    assert derive_sglang_launch_facets(config.target.launch.options) == {
+        "model_execution": {"kv_cache_dtype": "bfloat16"},
+        "speculative": {
+            "algorithm": "dflash2",
+            "draft_attention_backend": "fa4",
+            "draft_model_path": "/models/draft",
+            "num_draft_tokens": 8,
+            "num_steps": 1,
+        },
+    }
+    hard_facets = scenario_identity(config, "same-hardware").compatibility_facets["hard"]
+    assert isinstance(hard_facets, dict)
+    launch_facets = hard_facets["launch"]
+    assert isinstance(launch_facets, dict)
+    speculative_facets = launch_facets["speculative"]
+    assert isinstance(speculative_facets, dict)
+    assert speculative_facets["draft_model_path"] == "<model:1>"
     promotion = config.optimization.evaluation.promotion
     assert promotion is not None
     assert promotion.primary_points == ("short-c1", "long-c16")
 
 
-def test_v3_rejects_external_draft_not_materialized_in_launch_argv(tmp_path: Path) -> None:
-    document = v3_managed_document(tmp_path)
-    target = document["target"]
+def test_recipe_inputs_allow_plan_inventory_but_strict_load_requires_values(
+    tmp_path: Path,
+) -> None:
+    template, _ = write_input_template(tmp_path)
+
+    resolution = resolve_optimization_config(template, allow_unresolved=True)
+
+    assert resolution.config is None
+    assert resolution.missing_inputs == ("container_image", "sglang_revision")
+    assert resolution.resolved is False
+    with pytest.raises(OptimizationConfigError, match="missing required input binding"):
+        load_optimization_config(template)
+
+
+def test_recipe_values_produce_normalized_executable_configuration(tmp_path: Path) -> None:
+    template, values = write_input_template(tmp_path)
+
+    resolution = resolve_optimization_config(template, values)
+    config = resolution.config
+
+    assert config is not None
+    assert resolution.resolved is True
+    assert resolution.missing_inputs == ()
+    assert config.baseline.source_revision == "b" * 40
+    assert config.target is not None and config.target.runtime is not None
+    container = config.target.runtime.expected.container
+    assert container is not None
+    assert container.image == "registry.example/sglang@sha256:" + "a" * 64
+    assert config.target.runtime.expected.components["sglang"].revision == "b" * 40
+    assert config.input_bindings == {
+        "container_image": "registry.example/sglang@sha256:" + "a" * 64,
+        "sglang_revision": "b" * 40,
+    }
+    assert "inputs" not in config.resolved_document
+    resolved_yaml = dump_resolved_optimization_config(config)
+    assert "${" not in resolved_yaml
+    assert "inputs:" not in resolved_yaml
+    assert optimization_execution_lock_issues(config) == ()
+    require_optimization_execution_lock(config)
+
+
+def test_execution_lock_rejects_floating_managed_identity(tmp_path: Path) -> None:
+    source = tmp_path / "floating.yaml"
+    source.write_text(
+        yaml.safe_dump(v3_managed_document(tmp_path), sort_keys=False),
+        encoding="utf-8",
+    )
+    config = load_optimization_config(source)
+
+    issues = optimization_execution_lock_issues(config)
+
+    assert "baseline.source_revision must be a full Git commit" in issues
+    assert "target.runtime.expected.components.sglang.revision is required" in issues
+    with pytest.raises(OptimizationConfigError, match="execution recipe is not locked"):
+        require_optimization_execution_lock(config)
+
+
+@pytest.mark.parametrize(
+    ("key", "value", "message"),
+    [
+        ("sglang_revision", "main", "full 40- or 64-character"),
+        ("sglang_revision", "0" * 40, "all-zero placeholder"),
+        ("container_image", "registry.example/sglang:latest", "immutable image reference"),
+        (
+            "container_image",
+            "registry.example/sglang@sha256:" + "0" * 64,
+            "all-zero digest",
+        ),
+    ],
+)
+def test_recipe_input_types_reject_floating_execution_identity(
+    tmp_path: Path, key: str, value: str, message: str
+) -> None:
+    template, values = write_input_template(tmp_path)
+    supplied = yaml.safe_load(values.read_text(encoding="utf-8"))
+    assert isinstance(supplied, dict)
+    supplied[key] = value
+    values.write_text(yaml.safe_dump(supplied, sort_keys=False), encoding="utf-8")
+
+    with pytest.raises(OptimizationConfigError, match=message):
+        load_optimization_config(template, values)
+
+
+def test_recipe_rejects_undeclared_partial_and_unused_inputs(tmp_path: Path) -> None:
+    template, values = write_input_template(tmp_path)
+    document = yaml.safe_load(template.read_text(encoding="utf-8"))
+    assert isinstance(document, dict)
+    document["name"] = "prefix-${sglang_revision}"
+    template.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+    with pytest.raises(OptimizationConfigError, match="entire scalar"):
+        resolve_optimization_config(template, values)
+
+    document["name"] = "template"
+    inputs = document["inputs"]
+    assert isinstance(inputs, dict)
+    inputs["unused"] = {"type": "string"}
+    template.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+    with pytest.raises(OptimizationConfigError, match="unused input"):
+        resolve_optimization_config(template, values)
+
+    inputs.pop("unused")
+    baseline = document["baseline"]
+    assert isinstance(baseline, dict)
+    baseline["source_revision"] = "${undeclared}"
+    template.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+    with pytest.raises(OptimizationConfigError, match="undeclared input"):
+        resolve_optimization_config(template, values)
+
+
+def test_v3_aliases_are_optional_and_do_not_change_semantic_identity(tmp_path: Path) -> None:
+    named = v3_managed_document(tmp_path)
+    anonymous = v3_managed_document(tmp_path)
+    named_source = tmp_path / "named.yaml"
+    anonymous_source = tmp_path / "anonymous.yaml"
+
+    named_models = named["models"]
+    anonymous_models = anonymous["models"]
+    named_suite = named["workload_suite"]
+    anonymous_suite = anonymous["workload_suite"]
+    assert isinstance(named_models, dict) and isinstance(anonymous_models, dict)
+    assert isinstance(named_suite, dict) and isinstance(anonymous_suite, dict)
+    named_target = named_models["target"]
+    anonymous_target = anonymous_models["target"]
+    named_drafts = named_models["drafts"]
+    anonymous_drafts = anonymous_models["drafts"]
+    assert isinstance(named_target, dict) and isinstance(anonymous_target, dict)
+    assert isinstance(named_drafts, list) and isinstance(anonymous_drafts, list)
+    assert isinstance(named_drafts[0], dict) and isinstance(anonymous_drafts[0], dict)
+
+    anonymous_target.pop("name")
+    anonymous_target["name"] = "renamed-target"
+    anonymous_drafts[0].pop("name")
+    anonymous_suite.pop("name")
+    anonymous["name"] = "renamed-campaign"
+    anonymous_baseline = anonymous["baseline"]
+    assert isinstance(anonymous_baseline, dict)
+    anonymous_baseline["name"] = "renamed-baseline"
+    anonymous_points = anonymous_suite["points"]
+    assert isinstance(anonymous_points, list)
+    for point in anonymous_points:
+        assert isinstance(point, dict)
+        point.pop("name")
+    anonymous_evaluation = anonymous["optimization"]
+    assert isinstance(anonymous_evaluation, dict)
+    evaluation = anonymous_evaluation["evaluation"]
+    assert isinstance(evaluation, dict)
+    promotion = evaluation["promotion"]
+    assert isinstance(promotion, dict)
+    promotion["primary_points"] = [
+        "isl128-osl32-c1-n8",
+        "isl4096-osl512-c16-n64",
+    ]
+
+    named_source.write_text(yaml.safe_dump(named, sort_keys=False), encoding="utf-8")
+    anonymous_source.write_text(yaml.safe_dump(anonymous, sort_keys=False), encoding="utf-8")
+    named_config = load_optimization_config(named_source)
+    anonymous_config = load_optimization_config(anonymous_source)
+    named_identity = scenario_identity(named_config, "same-hardware")
+    anonymous_identity = scenario_identity(anonymous_config, "same-hardware")
+
+    assert tuple(point.name for point in anonymous_config.workload_suite.points) == (
+        "isl128-osl32-c1-n8",
+        "isl4096-osl512-c16-n64",
+    )
+    assert named_identity.spec_digest == anonymous_identity.spec_digest
+    assert named_identity.aliases != anonymous_identity.aliases
+
+    changed = v3_managed_document(tmp_path)
+    changed_suite = changed["workload_suite"]
+    assert isinstance(changed_suite, dict)
+    changed_points = changed_suite["points"]
+    assert isinstance(changed_points, list) and isinstance(changed_points[0], dict)
+    changed_points[0]["input_tokens"] = 256
+    changed_source = tmp_path / "changed.yaml"
+    changed_source.write_text(yaml.safe_dump(changed, sort_keys=False), encoding="utf-8")
+
+    changed_identity = scenario_identity(
+        load_optimization_config(changed_source), "same-hardware"
+    )
+    assert changed_identity.spec_digest != named_identity.spec_digest
+    assert changed_identity.compatibility_digest == named_identity.compatibility_digest
+
+
+def test_launch_option_order_does_not_change_compiled_argv_or_identity(tmp_path: Path) -> None:
+    first = v3_managed_document(tmp_path)
+    second = v3_managed_document(tmp_path)
+    second_target = second["target"]
+    assert isinstance(second_target, dict)
+    second_launch = second_target["launch"]
+    assert isinstance(second_launch, dict)
+    second_options = second_launch["options"]
+    assert isinstance(second_options, dict)
+    second_launch["options"] = dict(reversed(tuple(second_options.items())))
+
+    first_source = tmp_path / "first-option-order.yaml"
+    second_source = tmp_path / "second-option-order.yaml"
+    first_source.write_text(yaml.safe_dump(first, sort_keys=False), encoding="utf-8")
+    second_source.write_text(yaml.safe_dump(second, sort_keys=False), encoding="utf-8")
+    first_config = load_optimization_config(first_source)
+    second_config = load_optimization_config(second_source)
+
+    assert first_config.target_launch_argv == second_config.target_launch_argv
+    assert scenario_identity(first_config, "same-hardware").spec_digest == scenario_identity(
+        second_config, "same-hardware"
+    ).spec_digest
+
+
+def test_launch_facets_follow_backend_and_speculative_option_families() -> None:
+    assert derive_sglang_launch_facets(
+        {
+            "--future-collective-backend": "NEW_BACKEND",
+            "--speculative-future-mode": "experimental",
+            "--unclassified-kernel-switch": True,
+            "--disabled-backend": False,
+        }
+    ) == {
+        "backends": {"future_collective": "new_backend"},
+        "speculative": {"future_mode": "experimental"},
+    }
+
+
+def test_unclassified_launch_option_changes_spec_but_not_compatibility_digest(
+    tmp_path: Path,
+) -> None:
+    baseline = v3_managed_document(tmp_path)
+    changed = v3_managed_document(tmp_path)
+    target = changed["target"]
     assert isinstance(target, dict)
     launch = target["launch"]
     assert isinstance(launch, dict)
-    argv = launch["argv"]
-    assert isinstance(argv, list)
-    argv.remove("/models/draft")
+    options = launch["options"]
+    assert isinstance(options, dict)
+    options["--unclassified-kernel-switch"] = True
+    baseline_source = tmp_path / "baseline-options.yaml"
+    changed_source = tmp_path / "changed-options.yaml"
+    baseline_source.write_text(yaml.safe_dump(baseline, sort_keys=False), encoding="utf-8")
+    changed_source.write_text(yaml.safe_dump(changed, sort_keys=False), encoding="utf-8")
+
+    baseline_identity = scenario_identity(
+        load_optimization_config(baseline_source), "same-hardware"
+    )
+    changed_identity = scenario_identity(
+        load_optimization_config(changed_source), "same-hardware"
+    )
+
+    assert changed_identity.spec_digest != baseline_identity.spec_digest
+    assert changed_identity.compatibility_digest == baseline_identity.compatibility_digest
+
+
+def test_v3_rejects_removed_id_field(tmp_path: Path) -> None:
+    document = v3_managed_document(tmp_path)
+    models = document["models"]
+    assert isinstance(models, dict)
+    target = models["target"]
+    assert isinstance(target, dict)
+    target["id"] = target.pop("name")
+    source = tmp_path / "legacy-id.yaml"
+    source.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+
+    with pytest.raises(OptimizationConfigError, match=r"unknown field\(s\): id"):
+        load_optimization_config(source)
+
+
+def test_v3_rejects_removed_serving_field(tmp_path: Path) -> None:
+    document = v3_managed_document(tmp_path)
+    target = document["target"]
+    assert isinstance(target, dict)
+    target["serving"] = {
+        "backends": {"kv_cache_dtype": "bfloat16"},
+        "speculative": {"algorithm": "off"},
+    }
     source = tmp_path / "campaign-v3.yaml"
     source.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
 
-    with pytest.raises(OptimizationConfigError, match="external speculative draft model path"):
+    with pytest.raises(OptimizationConfigError, match=r"unknown field\(s\): serving"):
+        load_optimization_config(source)
+
+
+def test_v3_managed_target_rejects_duplicate_baseline_target_parameters(
+    tmp_path: Path,
+) -> None:
+    document = v3_managed_document(tmp_path)
+    baseline = document["baseline"]
+    assert isinstance(baseline, dict)
+    baseline["target_parameters"] = {"tp_size": 8}
+    source = tmp_path / "duplicate-target-parameters.yaml"
+    source.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+
+    with pytest.raises(OptimizationConfigError, match=r"target\.launch\.options"):
         load_optimization_config(source)
 
 
@@ -343,14 +723,34 @@ def test_loads_complete_managed_target_config(tmp_path: Path) -> None:
     assert isinstance(config.target, ManagedTargetConfig)
     assert config.target.provider is Framework.SGLANG
     assert config.target.launch == TargetLaunchConfig(
-        argv=(
-            "python3",
-            "-m",
-            "sglang.launch_server",
-            "--model-path",
-            "test/model",
-        ),
+        python="python3",
+        python_options=("-u",),
+        module="sglang.launch_server",
+        options={
+            "--disable-overlap": False,
+            "--tp-size": 8,
+            "--trust-remote-code": True,
+        },
+        extra_argv=("--custom-flag",),
         env={"SGLANG_LOG_LEVEL": "info", "OPTIONAL_SECRET": None},
+    )
+    assert config.target_launch_argv == (
+        "python3",
+        "-u",
+        "-m",
+        "sglang.launch_server",
+        "--model-path",
+        "test/model",
+        "--served-model-name",
+        "test/model",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "8000",
+        "--tp-size",
+        "8",
+        "--trust-remote-code",
+        "--custom-flag",
     )
     assert config.target.readiness == TargetReadinessConfig(
         url="http://[::1]:30000/health_generate",
@@ -395,8 +795,8 @@ def test_loads_minimal_managed_target_with_safe_defaults(tmp_path: Path) -> None
     [
         ("  gpus: [0]\n", "  gpus: [0]\n  typo: true\n", "unknown field.*typo"),
         (
-            "    argv: [python3, -m, sglang.launch_server]\n",
-            "    argv: [python3, -m, sglang.launch_server]\n    shell: true\n",
+            "    options: {}\n",
+            "    options: {}\n    shell: true\n",
             "unknown field.*shell",
         ),
         (
@@ -456,19 +856,49 @@ def test_managed_target_workload_endpoint_must_also_be_loopback(tmp_path: Path) 
 
 
 @pytest.mark.parametrize(
-    "argv_yaml",
+    ("launch_yaml", "message"),
     [
-        "python3 -m sglang.launch_server; touch /tmp/unsafe",
-        "[]",
-        '["python\\0bad", -m, sglang.launch_server]',
+        ("    python_options: unsafe-command-string\n", "list"),
+        ("    python_options: [-c]\n", r"\[\] or \[-u\]"),
+        ('    python: "python\\0bad"\n', "NUL"),
+        ("    python: bash\n", "Python executable"),
+        ("    module: unsafe.server\n", "approved SGLang server"),
+        ("    options:\n      --tp-size: [8]\n", "string, number, boolean, or null"),
     ],
 )
-def test_target_launch_rejects_command_strings_empty_argv_and_nul(
-    tmp_path: Path, argv_yaml: str
+def test_target_launch_rejects_unsafe_structured_values(
+    tmp_path: Path, launch_yaml: str, message: str
 ) -> None:
-    target = MINIMAL_TARGET.replace("[python3, -m, sglang.launch_server]", argv_yaml, 1)
+    target = MINIMAL_TARGET.replace("    options: {}\n", launch_yaml, 1)
 
-    with pytest.raises(OptimizationConfigError, match=r"list|empty|NUL"):
+    with pytest.raises(OptimizationConfigError, match=message):
+        load_optimization_config(write_config(tmp_path, config_with_target(target)))
+
+
+def test_target_launch_rejects_removed_argv_field(tmp_path: Path) -> None:
+    target = MINIMAL_TARGET.replace(
+        "    options: {}\n",
+        "    argv: [python3, -m, sglang.launch_server]\n",
+        1,
+    )
+
+    with pytest.raises(OptimizationConfigError, match=r"unknown field\(s\): argv"):
+        load_optimization_config(write_config(tmp_path, config_with_target(target)))
+
+
+@pytest.mark.parametrize(
+    "launch_yaml",
+    [
+        "    options:\n      --model-path: other/model\n",
+        "    extra_argv: [--port, '40000']\n",
+    ],
+)
+def test_target_launch_rejects_overrides_of_generated_options(
+    tmp_path: Path, launch_yaml: str
+) -> None:
+    target = MINIMAL_TARGET.replace("    options: {}\n", launch_yaml, 1)
+
+    with pytest.raises(OptimizationConfigError, match="generated"):
         load_optimization_config(write_config(tmp_path, config_with_target(target)))
 
 
