@@ -14,8 +14,23 @@ from euboulia.optimization.config import load_optimization_config
 from euboulia.optimization.events import EventLedger, EventType
 
 
-def _executor(tmp_path: Path) -> remote.KubernetesExecutorConfig:
-    template = Path(__file__).resolve().parents[1] / "examples/runtime/pod-template.yaml"
+def _executor(
+    tmp_path: Path,
+    *,
+    local_project_dir: Path | None = None,
+) -> remote.KubernetesExecutorConfig:
+    template = tmp_path / "pod-template.yaml"
+    if not template.exists():
+        template.write_text(
+            "apiVersion: v1\n"
+            "kind: Pod\n"
+            "metadata: {}\n"
+            "spec:\n"
+            "  containers:\n"
+            "    - name: runtime\n"
+            "      image: placeholder.invalid/image\n",
+            encoding="utf-8",
+        )
     return remote.KubernetesExecutorConfig(
         name="h20-pod",
         namespace="inference",
@@ -23,7 +38,7 @@ def _executor(tmp_path: Path) -> remote.KubernetesExecutorConfig:
         container="runtime",
         project_dir=PurePosixPath("/workspace/euboulia"),
         scratch_dir=PurePosixPath("/home/admin/.cache/euboulia"),
-        local_project_dir=tmp_path,
+        local_project_dir=local_project_dir or tmp_path,
     )
 
 
@@ -284,7 +299,7 @@ def test_worker_recipe_is_resolved_and_contains_no_host_storage_or_values_path(
         values,
     )
     supervisor = remote.KubernetesTargetSupervisor(
-        _executor(repository),
+        _executor(tmp_path, local_project_dir=repository),
         remote.LocalStorageConfig(root=tmp_path / "results"),
     )
     document = yaml.safe_load(supervisor._worker_recipe(config))
@@ -412,12 +427,16 @@ def test_stage_recipe_streams_only_the_lock_and_verifies_its_digest(
     assert (local_run_dir / "control" / "recipe-stage.stdout.log").stat().st_mode & 0o777 == 0o600
 
 
-@pytest.mark.parametrize(("worker_passed", "returncode"), [(True, 0), (False, 1)])
+@pytest.mark.parametrize(
+    ("worker_passed", "returncode", "unsynced_raw"),
+    [(True, 0, False), (False, 1, False), (True, 0, True)],
+)
 def test_remote_supervisor_keeps_completed_results_locally(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     worker_passed: bool,
     returncode: int,
+    unsynced_raw: bool,
 ) -> None:
     run_uid = "run-01HF7YAT000000000000000000"
     storage = remote.LocalStorageConfig(root=tmp_path / "results")
@@ -441,7 +460,8 @@ def test_remote_supervisor_keeps_completed_results_locally(
     )
     monkeypatch.setattr(supervisor, "_wait_pod_ready", lambda pod: None)
     monkeypatch.setattr(supervisor, "_stage_project", lambda local_run_dir: None)
-    monkeypatch.setattr(supervisor, "_delete_owned_pod", lambda pod: None)
+    deleted: list[remote.OwnedPod] = []
+    monkeypatch.setattr(supervisor, "_delete_owned_pod", deleted.append)
 
     def fake_stage(
         remote_run_dir: PurePosixPath,
@@ -488,25 +508,35 @@ def test_remote_supervisor_keeps_completed_results_locally(
         *,
         include_raw_profiles: bool | None = None,
     ) -> remote.SyncSummary:
-        assert include_raw_profiles is True
+        assert include_raw_profiles is None
         destination.mkdir(parents=True)
         validation = destination / "target-validation/validation.json"
         validation.parent.mkdir(parents=True)
         validation.write_text('{"passed": true}\n', encoding="utf-8")
         validation_sha256 = hashlib.sha256(validation.read_bytes()).hexdigest()
+        artifacts: list[dict[str, object]] = [
+            {
+                "path": "target-validation/validation.json",
+                "sha256": validation_sha256,
+                "size_bytes": validation.stat().st_size,
+                "retention": "local",
+            }
+        ]
+        if unsynced_raw:
+            artifacts.append(
+                {
+                    "path": "target-validation/profile/raw/rank-0.json",
+                    "sha256": hashlib.sha256(b"raw").hexdigest(),
+                    "size_bytes": 3,
+                    "retention": "remote_only",
+                }
+            )
         (destination / "artifact-index.json").write_text(
             json.dumps(
                 {
                     "schema_version": 1,
                     "run_uid": run_uid,
-                    "artifacts": [
-                        {
-                            "path": "target-validation/validation.json",
-                            "sha256": validation_sha256,
-                            "size_bytes": validation.stat().st_size,
-                            "retention": "local",
-                        }
-                    ],
+                    "artifacts": artifacts,
                 }
             )
             + "\n",
@@ -521,6 +551,8 @@ def test_remote_supervisor_keeps_completed_results_locally(
 
     assert result.status == "completed"
     assert result.passed is worker_passed
+    assert result.cleanup == ("retained_for_on_demand_artifacts" if unsynced_raw else "deleted")
+    assert deleted == ([] if unsynced_raw else [owned_pod])
     assert result.local_run_dir == storage.runs_dir / run_uid
     assert result.summary_path.is_file()
     assert result.artifact_manifest_path.is_file()
@@ -597,6 +629,44 @@ def test_artifact_manifest_rejects_a_corrupted_snapshot(tmp_path: Path) -> None:
             remote_run_dir=PurePosixPath("/home/admin/.cache/euboulia/runs/" + run_uid),
             run_uid=run_uid,
         )
+
+
+def test_artifact_manifest_reports_unsynced_on_demand_profiles(tmp_path: Path) -> None:
+    run_uid = "run-01HF7YAT000000000000000000"
+    snapshot = tmp_path / "snapshot"
+    snapshot.mkdir()
+    raw_contents = b'{"traceEvents": []}\n'
+    (snapshot / "artifact-index.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "run_uid": run_uid,
+                "artifacts": [
+                    {
+                        "path": "target-validation/profile/raw/rank-0.json",
+                        "sha256": hashlib.sha256(raw_contents).hexdigest(),
+                        "size_bytes": len(raw_contents),
+                        "retention": "remote_only",
+                    }
+                ],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    count = remote._write_local_artifact_manifest(
+        snapshot,
+        tmp_path / "manifest.json",
+        executor=_executor(tmp_path),
+        pod_name="euboulia-run-01hf7yat000000000000000000",
+        remote_run_dir=PurePosixPath("/scratch/runs/" + run_uid),
+        run_uid=run_uid,
+    )
+
+    assert count == 1
+    manifest = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["artifacts"][0]["synced"] is False
 
 
 def test_tar_extraction_rejects_paths_outside_snapshot(tmp_path: Path) -> None:

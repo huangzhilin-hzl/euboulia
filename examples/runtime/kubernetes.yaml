@@ -3,17 +3,18 @@
 storage:
   root: ~/.local/share/euboulia
   sync:
-    raw_profiles: always
+    raw_profiles: on_demand
 
 executors:
-  h20-pod:
+  gpu-worker:
     type: kubernetes
-    namespace: inference
-    pod_template: ./pod-template.yaml
+    namespace: your-namespace
+    # Keep the real template outside the repository. One template may be reused by
+    # experiments with the same accelerator resources and cluster policy.
+    pod_template: ~/.config/euboulia/pod-templates/gpu-worker.yaml
     container: runtime
     # Euboulia transfers the local checkout here after creating its Pod.
     project_dir: /workspace/euboulia
     scratch_dir: /home/admin/.cache/euboulia
-    local_project_dir: ../..
     python: python3
     startup_timeout_seconds: 600

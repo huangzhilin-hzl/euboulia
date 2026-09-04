@@ -336,6 +336,7 @@ class KubernetesTargetSupervisor:
 
         worker: ExecutionResult | None = None
         sync: SyncSummary | None = None
+        unsynced_remote_artifacts = 0
         worker_payload: Mapping[str, JSONValue] | None = None
         error: str | None = None
         try:
@@ -385,7 +386,6 @@ class KubernetesTargetSupervisor:
                     sync = self._pull_artifacts(
                         remote_run_dir,
                         local_run_dir / "artifacts",
-                        include_raw_profiles=True,
                     )
                 except (OSError, RemoteExecutionError, tarfile.TarError) as exc:
                     sync_error = f"artifact sync failed: {exc}"
@@ -396,7 +396,7 @@ class KubernetesTargetSupervisor:
             manifest_error = "artifact verification skipped because artifact sync failed"
         else:
             try:
-                _write_local_artifact_manifest(
+                unsynced_remote_artifacts = _write_local_artifact_manifest(
                     local_run_dir / "artifacts",
                     manifest_path,
                     executor=self.executor,
@@ -426,7 +426,7 @@ class KubernetesTargetSupervisor:
             )
 
         cleanup = cast(str, base_record["cleanup"])
-        if self._pod is not None and manifest_error is None:
+        if self._pod is not None and manifest_error is None and unsynced_remote_artifacts == 0:
             try:
                 self._delete_owned_pod(self._pod)
                 cleanup = "deleted"
@@ -434,6 +434,8 @@ class KubernetesTargetSupervisor:
                 cleanup_error = f"Pod cleanup failed: {exc}"
                 error = cleanup_error if error is None else f"{error}; {cleanup_error}"
                 cleanup = "retained"
+        elif self._pod is not None and manifest_error is None:
+            cleanup = "retained_for_on_demand_artifacts"
 
         completed = worker_payload is not None and error is None and sync is not None
         passed = completed and worker_payload is not None and worker_payload.get("passed") is True
@@ -1278,7 +1280,7 @@ def _write_local_artifact_manifest(
     pod_name: str | None,
     remote_run_dir: PurePosixPath,
     run_uid: str,
-) -> None:
+) -> int:
     index_path = local_artifacts_dir / "artifact-index.json"
     if pod_name is None:
         raise RemoteExecutionError("artifact snapshot has no owned Pod identity")
@@ -1294,6 +1296,7 @@ def _write_local_artifact_manifest(
     if not isinstance(raw_entries, list):
         raise RemoteExecutionError("artifact index artifacts must be a list")
     artifacts: list[dict[str, JSONValue]] = []
+    unsynced_remote_artifacts = 0
     indexed_paths: set[PurePosixPath] = set()
     for raw_entry in raw_entries:
         if not isinstance(raw_entry, dict) or not isinstance(raw_entry.get("path"), str):
@@ -1320,6 +1323,8 @@ def _write_local_artifact_manifest(
             raise RemoteExecutionError(f"artifact index has invalid metadata for {relative}")
         if retention == "local" and not synced:
             raise RemoteExecutionError(f"required artifact was not synchronized: {relative}")
+        if retention == "remote_only" and not synced:
+            unsynced_remote_artifacts += 1
         if synced:
             actual_size = local_path.stat().st_size
             actual_sha256 = _sha256(local_path)
@@ -1360,6 +1365,7 @@ def _write_local_artifact_manifest(
             "artifacts": cast(JSONValue, artifacts),
         },
     )
+    return unsynced_remote_artifacts
 
 
 def _kubernetes_uri(

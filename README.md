@@ -99,15 +99,17 @@ records locally. Supply the selected node name or InternalIP for this run:
 ```console
 uv run euboulia target run \
   --recipe ~/julian/euboulia-data/experiments/dsv4-baseline/recipe.lock.yaml \
-  --executor h20-pod \
-  --node 10.13.3.192 \
+  --executor gpu-worker \
+  --node NODE_NAME_OR_INTERNAL_IP \
   --name dsv4-baseline
 ```
 
 Configure the namespace, private Pod template, and local storage in
-`~/.config/euboulia/config.yaml`; see `examples/runtime/kubernetes.yaml`. The controller
+`~/.config/euboulia/config.yaml`; see `examples/runtime/kubernetes.yaml`. Real Pod
+templates stay beside that private config and are never committed. The controller
 creates one uniquely named Pod, transfers the checkout and resolved lock, synchronizes
-verified results, and deletes only that exact Pod. Values files never enter the Pod.
+verified results, and deletes only that exact Pod when no artifact remains remote-only.
+Values files never enter the Pod.
 
 An active managed run has five independent permissions:
 

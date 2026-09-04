@@ -69,8 +69,8 @@ After review, execute exactly one baseline (no generated candidate):
 ```console
 uv run euboulia target run \
   --recipe ~/julian/euboulia-data/experiments/dsv4-megamoe/recipe.lock.yaml \
-  --executor h20-pod \
-  --node 10.13.3.192 \
+  --executor gpu-worker \
+  --node NODE_NAME_OR_INTERNAL_IP \
   --name dsv4-megamoe-baseline
 ```
 
@@ -145,17 +145,18 @@ owned service logs, per-command evidence, and these files:
 - `euboulia-accuracy.json`, produced directly by external `lm_eval` during
   qualification.
 
-All indexed artifacts, including retained raw profiles, are synchronized before the
-ephemeral Pod is deleted. If synchronization or verification fails, the exact owned Pod
-is retained for recovery:
+Required artifacts are synchronized before the ephemeral Pod is deleted. With the
+default `raw_profiles: on_demand` policy, the exact owned Pod is retained only when its
+artifact index contains an unsynchronized raw trace. A synchronization or verification
+failure also retains it for recovery:
 
 ```console
 uv run euboulia target artifacts pull \
-  --executor h20-pod \
+  --executor gpu-worker \
   --run-uid <run-uid> \
   --destination /absolute/local/path/raw-snapshot
 
 uv run euboulia target cleanup \
-  --executor h20-pod \
+  --executor gpu-worker \
   --run-uid <run-uid>
 ```

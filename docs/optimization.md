@@ -242,8 +242,8 @@ uv run euboulia target resolve \
 
 uv run euboulia target run \
   --recipe ~/julian/euboulia-data/experiments/h20-baseline/recipe.lock.yaml \
-  --executor h20-pod \
-  --node 10.13.3.192
+  --executor gpu-worker \
+  --node NODE_NAME_OR_INTERNAL_IP
 ```
 
 Values and lock files are private experiment inputs. Keep them under a local experiment
@@ -277,28 +277,34 @@ For remote execution, the namespace, Pod template, and canonical storage are hos
 policy, not scenario content. Put them in `~/.config/euboulia/config.yaml` (see
 `examples/runtime/kubernetes.yaml`) and select the executor with `--executor`. Pass the
 node name or InternalIP through `--node` for each run; it is never stored in static
-configuration.
+configuration. Pod templates contain cluster-specific resources, mounts, tolerations,
+and secret references, so they stay next to the user's private runtime config. Reuse an
+executor for experiments with the same runtime resource profile; define another executor
+and template when the accelerator type or cluster policy changes.
 
 The local supervisor generates `run_uid`, creates a uniquely named Pod in exactly the
 configured namespace, and records the Pod UID before executing anything. It transfers
 the local checkout and fully resolved recipe, but never the values file or host runtime
-config. On success or failure it synchronizes and verifies the complete artifact set,
-writes `run.json`, `events.jsonl`, `summary.json`, and `artifact-manifest.json` under
-`<storage.root>/runs/<run-uid>`, then deletes the Pod with a Kubernetes UID precondition.
-Every Pod operation checks the exact namespace, name, UID, run annotation, and ownership
-labels. Euboulia never searches for or mutates unrelated Pods.
+config. On success or failure it applies the configured artifact sync policy and verifies
+the resulting manifest. It writes `run.json`, `events.jsonl`, `summary.json`, and
+`artifact-manifest.json` under `<storage.root>/runs/<run-uid>`. If nothing remains
+remote-only, it deletes the Pod with a Kubernetes UID precondition. With
+`raw_profiles: on_demand`, a Pod is retained only when its artifact index actually
+contains an unsynchronized raw profile. Every Pod operation checks the exact namespace,
+name, UID, run annotation, and ownership labels. Euboulia never searches for or mutates
+unrelated Pods.
 
 If transfer or verification fails, the owned Pod is retained. A later controller can use
 the local `run_uid` record to retrieve it, then explicitly clean it up:
 
 ```console
 uv run euboulia target artifacts pull \
-  --executor h20-pod \
+  --executor gpu-worker \
   --run-uid <run-uid> \
   --destination /absolute/local/path/recovery
 
 uv run euboulia target cleanup \
-  --executor h20-pod \
+  --executor gpu-worker \
   --run-uid <run-uid>
 ```
 
