@@ -63,20 +63,19 @@ After review, execute exactly one baseline (no generated candidate):
 ```console
 uv run euboulia target run \
   --recipe examples/scenarios/dsv4-megamoe.lock.yaml \
-  --run-id dsv4-megamoe-$(date +%Y%m%d-%H%M%S) \
-  --prepare-workspace \
-  --run-profiles \
-  --run-builds \
-  --manage-services \
-  --run-evaluations
+  --name dsv4-megamoe-baseline
 ```
+
+`--name` is optional, non-unique display metadata. Euboulia generates an immutable,
+time-sortable ULID `run_uid` used by artifacts, workspaces, service manifests, and
+event correlation.
 
 The lock requires an immutable commit before the detached worktree is created. SGLang
 is installed editable from that worktree with `--no-deps`;
 DeepGEMM is installed last. Euboulia starts a new process group and can stop only
 that signed, owned process. It never discovers or kills an existing server.
 
-`target run --run-profiles` profiles the owned baseline before its unprofiled matrix;
+`target run` profiles the owned baseline before its unprofiled matrix;
 `optimize run --run-profiles` uses the same collector on a separate owned champion
 service. Both ask SGLang for three profiled engine steps on
 `isl16384-osl256-c1-n1`. The capture requires eight unmerged rank traces and checks
@@ -110,7 +109,7 @@ Execution stops on any of the following:
 ## Output
 
 The run root is
-`/home/admin/results/euboulia-dsv4-megamoe/<run-id>/target-validation`.
+`/home/admin/results/euboulia-dsv4-megamoe/<run-uid>/target-validation`.
 It contains `resolved-recipe.yaml`, the provenance snapshot, the active-profile
 summary/manifest, complete owned service logs, per-command evidence, and these
 canonical files:

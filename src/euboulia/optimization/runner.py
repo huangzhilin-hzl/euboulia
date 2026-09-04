@@ -90,6 +90,7 @@ from euboulia.optimization.workspace import (
     PatchRejected,
     WorkspaceError,
 )
+from euboulia.run_identity import new_run_uid, normalize_run_name
 
 
 class OptimizationRuntimeError(RuntimeError):
@@ -124,7 +125,7 @@ class OptimizationPlan:
 
 @dataclass(frozen=True, slots=True)
 class OptimizationRunResult:
-    run_id: str
+    name: str | None
     run_uid: str
     run_state: RunState
     iteration_state: IterationState | None
@@ -144,7 +145,7 @@ class OptimizationRunResult:
 
     def to_dict(self) -> dict[str, JSONValue]:
         return {
-            "run_id": self.run_id,
+            "name": self.name,
             "run_uid": self.run_uid,
             "run_state": self.run_state.value,
             "iteration_state": (
@@ -167,7 +168,7 @@ class OptimizationRunResult:
 class BaselineValidationResult:
     """Evidence from one candidate-free managed baseline validation."""
 
-    run_id: str
+    name: str | None
     run_uid: str
     profile: ProfileResult
     evaluation: TieredEvaluationResult | WorkloadSuiteEvaluationResult
@@ -181,7 +182,7 @@ class BaselineValidationResult:
 
     def to_dict(self) -> dict[str, object]:
         return {
-            "run_id": self.run_id,
+            "name": self.name,
             "run_uid": self.run_uid,
             "passed": self.passed,
             "profile": _profile_dict(self.profile),
@@ -226,50 +227,25 @@ class OptimizationRunner:
         hardware_fingerprint = _hardware_fingerprint(config)
         return scenario_identity(config, hardware_fingerprint)
 
-    @staticmethod
-    def baseline_validation_capabilities(
-        config: OptimizationConfig,
-    ) -> tuple[Capability, ...]:
-        """Return capabilities for a candidate-free managed baseline run."""
-
-        if config.target is None:
-            raise OptimizationRuntimeError("target configuration is required for validation")
-        required = [
-            Capability.WORKSPACE_WRITE,
-            Capability.BENCHMARK_EXECUTION,
-            Capability.OWNED_SERVICE_LIFECYCLE,
-            Capability.PROFILE_EXECUTION,
-        ]
-        if config.target.build is not None and config.target.build.commands:
-            required.append(Capability.BUILD_EXECUTION)
-        return tuple(required)
-
     def validate_baseline(
         self,
         config: OptimizationConfig,
-        authorizations: frozenset[Capability] = frozenset(),
         *,
-        run_id: str | None = None,
+        name: str | None = None,
     ) -> BaselineValidationResult:
         """Build, start, validate, measure, and stop exactly one declared baseline."""
 
         require_optimization_execution_lock(config)
-        selected_run_id = _run_id(run_id)
-        run_uid = _run_uid()
-        required = self.baseline_validation_capabilities(config)
-        missing = [capability.value for capability in required if capability not in authorizations]
-        if missing:
-            raise OptimizationRuntimeError(
-                "baseline validation requires explicit capabilities: " + ", ".join(missing)
-            )
+        selected_name = normalize_run_name(name)
+        run_uid = new_run_uid()
         target = config.target
         workspace_config = config.optimization.workspace
-        if target is None:  # guarded by baseline_validation_capabilities
+        if target is None:
             raise OptimizationRuntimeError("target configuration is required for validation")
         if workspace_config is None:
             raise OptimizationRuntimeError("optimization.workspace is required for validation")
 
-        artifact_dir = config.execution.artifacts_dir / selected_run_id / "target-validation"
+        artifact_dir = config.execution.artifacts_dir / run_uid / "target-validation"
         if artifact_dir.exists() or artifact_dir.is_symlink():
             raise OptimizationRuntimeError(
                 f"validation artifact path already exists: {artifact_dir}"
@@ -292,7 +268,7 @@ class OptimizationRunner:
         target_spec = _profile_target_spec(config, provenance_record)
         workspace = GitWorktreeWorkspace.create(
             workspace_config.repository,
-            workspace_config.root_dir / selected_run_id / "validation" / "baseline",
+            workspace_config.root_dir / run_uid / "validation" / "baseline",
             revision=config.baseline.source_revision,
             timeout_seconds=workspace_config.timeout_seconds,
         )
@@ -304,7 +280,7 @@ class OptimizationRunner:
             target_spec,
             TargetChangeSet(),
             artifact_dir / "service",
-            run_id=selected_run_id,
+            run_uid=run_uid,
             trial_id="baseline-validation",
         )
         evaluation: TieredEvaluationResult | WorkloadSuiteEvaluationResult | None = None
@@ -312,10 +288,12 @@ class OptimizationRunner:
         try:
             controller.wait_ready(handle)
             context = StageContext(
-                run_id=selected_run_id,
+                run_uid=run_uid,
                 iteration_id="target-validation",
                 artifact_dir=artifact_dir,
-                authorizations=authorizations,
+                authorizations=frozenset(
+                    {Capability.PROFILE_EXECUTION, Capability.BENCHMARK_EXECUTION}
+                ),
                 input_digest=_config_digest(config),
             )
             _, profile = self._capture_running_service_profile(
@@ -361,7 +339,7 @@ class OptimizationRunner:
         if profile is None:  # pragma: no cover - profile returns or raises
             raise AssertionError("baseline validation completed without a profile")
         result = BaselineValidationResult(
-            run_id=selected_run_id,
+            name=selected_name,
             run_uid=run_uid,
             profile=profile,
             evaluation=evaluation,
@@ -425,7 +403,7 @@ class OptimizationRunner:
         config: OptimizationConfig,
         authorizations: frozenset[Capability] = frozenset(),
         *,
-        run_id: str | None = None,
+        name: str | None = None,
     ) -> OptimizationRunResult:
         """Run bounded iterations or pause before the first unauthorized side effect."""
 
@@ -435,16 +413,15 @@ class OptimizationRunner:
             )
         self._active_profile_manifest = None
         require_optimization_execution_lock(config)
-        selected_run_id = _run_id(run_id)
-        run_uid = _run_uid()
+        selected_name = normalize_run_name(name)
+        run_uid = new_run_uid()
         ledger = EventLedger(config.execution.event_ledger, fsync=True)
-        if ledger.by_run(selected_run_id):
+        if ledger.by_run(run_uid):
             raise OptimizationRuntimeError(
-                f"run_id {selected_run_id!r} already exists; resume is not implemented, "
-                "choose a new run id"
+                f"generated run_uid {run_uid!r} already exists"
             )
         _write_resolved_recipe_snapshot(
-            config, config.execution.artifacts_dir / selected_run_id
+            config, config.execution.artifacts_dir / run_uid
         )
         memory = SQLiteMemoryStore(config.execution.memory)
         lifecycle = Lifecycle()
@@ -469,12 +446,12 @@ class OptimizationRunner:
         ledger.append(
             OptimizationEvent.create(
                 EventType.RUN_PLANNED,
-                selected_run_id,
+                run_uid,
                 input_digest=config_digest,
                 payload={
                     "campaign": config.name,
                     "framework": config.framework.value,
-                    "run_uid": run_uid,
+                    "name": selected_name,
                     "identity": identity.to_dict(),
                 },
             )
@@ -482,7 +459,7 @@ class OptimizationRunner:
         ledger.append(
             OptimizationEvent.create(
                 EventType.RUN_STARTED,
-                selected_run_id,
+                run_uid,
                 input_digest=config_digest,
                 payload={"reference_baseline": config.baseline.name},
             )
@@ -495,13 +472,13 @@ class OptimizationRunner:
             ledger.append(
                 OptimizationEvent.create(
                     EventType.APPROVAL_REQUESTED,
-                    selected_run_id,
+                    run_uid,
                     payload={"missing_capabilities": [item.value for item in missing]},
                 )
             )
             lifecycle = lifecycle.move_run(RunState.WAITING_FOR_APPROVAL)
             return self._result(
-                selected_run_id,
+                selected_name,
                 run_uid,
                 lifecycle,
                 champion_id,
@@ -515,7 +492,7 @@ class OptimizationRunner:
         ledger.append(
             OptimizationEvent.create(
                 EventType.APPROVAL_GRANTED,
-                selected_run_id,
+                run_uid,
                 payload={
                     "capabilities": [
                         item.value for item in sorted(required, key=lambda item: item.value)
@@ -534,7 +511,7 @@ class OptimizationRunner:
                 ledger.append(
                     OptimizationEvent.create(
                         EventType.BUDGET_RESERVED,
-                        selected_run_id,
+                        run_uid,
                         iteration_id=iteration_id,
                         payload={
                             "iteration": iteration_number,
@@ -546,15 +523,15 @@ class OptimizationRunner:
                 ledger.append(
                     OptimizationEvent.create(
                         EventType.ITERATION_STARTED,
-                        selected_run_id,
+                        run_uid,
                         iteration_id=iteration_id,
                         payload={"champion_before": champion_id},
                     )
                 )
                 context = StageContext(
-                    run_id=selected_run_id,
+                    run_uid=run_uid,
                     iteration_id=iteration_id,
-                    artifact_dir=config.execution.artifacts_dir / selected_run_id / iteration_id,
+                    artifact_dir=config.execution.artifacts_dir / run_uid / iteration_id,
                     authorizations=authorizations,
                     input_digest=config_digest,
                 )
@@ -579,7 +556,7 @@ class OptimizationRunner:
                 ledger.append(
                     OptimizationEvent.create(
                         EventType.MEMORY_RECALLED,
-                        selected_run_id,
+                        run_uid,
                         iteration_id=iteration_id,
                         payload={
                             "spec_digest": identity.spec_digest,
@@ -593,7 +570,7 @@ class OptimizationRunner:
                 ledger.append(
                     OptimizationEvent.create(
                         EventType.PROFILE_STARTED,
-                        selected_run_id,
+                        run_uid,
                         iteration_id=iteration_id,
                         payload={
                             "provider": config.optimization.profiling.provider.value,
@@ -620,7 +597,7 @@ class OptimizationRunner:
                 ledger.append(
                     OptimizationEvent.create(
                         EventType.PROFILE_COMPLETED,
-                        selected_run_id,
+                        run_uid,
                         iteration_id=iteration_id,
                         entity_id=profile.profile_id,
                         payload=_json_payload(_profile_dict(profile)),
@@ -631,7 +608,7 @@ class OptimizationRunner:
                 ledger.append(
                     OptimizationEvent.create(
                         EventType.ANALYSIS_COMPLETED,
-                        selected_run_id,
+                        run_uid,
                         iteration_id=iteration_id,
                         entity_id=analysis.analysis_id,
                         payload=_json_payload(_analysis_dict(analysis)),
@@ -642,7 +619,7 @@ class OptimizationRunner:
                     ledger.append(
                         OptimizationEvent.create(
                             EventType.PROPOSAL_CREATED,
-                            selected_run_id,
+                            run_uid,
                             iteration_id=iteration_id,
                             entity_id=proposal.proposal_id,
                             payload=_json_payload(_proposal_dict(proposal)),
@@ -655,7 +632,7 @@ class OptimizationRunner:
                     ledger.append(
                         OptimizationEvent.create(
                             EventType.ITERATION_COMPLETED,
-                            selected_run_id,
+                            run_uid,
                             iteration_id=iteration_id,
                             payload={
                                 "state": "rejected",
@@ -667,12 +644,12 @@ class OptimizationRunner:
                     ledger.append(
                         OptimizationEvent.create(
                             EventType.RUN_COMPLETED,
-                            selected_run_id,
+                            run_uid,
                             payload={"reason": "planner produced no new proposal"},
                         )
                     )
                     return self._result(
-                        selected_run_id,
+                        selected_name,
                         run_uid,
                         lifecycle,
                         champion_id,
@@ -689,7 +666,7 @@ class OptimizationRunner:
                 try:
                     execution = self._execute_candidate(
                         config,
-                        selected_run_id,
+                        run_uid,
                         iteration_id,
                         champion_id,
                         proposal,
@@ -707,7 +684,7 @@ class OptimizationRunner:
                     summary = evaluation.reason or f"evaluation {evaluation.outcome.value}"
                     outcome = IterationOutcome(
                         outcome_id=f"outcome-{uuid.uuid4().hex}",
-                        run_id=selected_run_id,
+                        run_uid=run_uid,
                         iteration_id=iteration_id,
                         proposal_id=proposal.proposal_id,
                         status=outcome_status,
@@ -744,7 +721,7 @@ class OptimizationRunner:
                     ledger.append(
                         OptimizationEvent.create(
                             EventType.MEMORY_RECORDED,
-                            selected_run_id,
+                            run_uid,
                             iteration_id=iteration_id,
                             entity_id=memory_entry.memory_id,
                             payload={"status": outcome.status.value},
@@ -756,7 +733,7 @@ class OptimizationRunner:
                     ledger.append(
                         OptimizationEvent.create(
                             EventType.VERDICT_RECORDED,
-                            selected_run_id,
+                            run_uid,
                             iteration_id=iteration_id,
                             entity_id=outcome.outcome_id,
                             payload=_json_payload(outcome.to_dict()),
@@ -765,7 +742,7 @@ class OptimizationRunner:
                     ledger.append(
                         OptimizationEvent.create(
                             EventType.ITERATION_COMPLETED,
-                            selected_run_id,
+                            run_uid,
                             iteration_id=iteration_id,
                             payload={"state": terminal.value},
                         )
@@ -775,7 +752,7 @@ class OptimizationRunner:
                         ledger.append(
                             OptimizationEvent.create(
                                 EventType.CHAMPION_UPDATED,
-                                selected_run_id,
+                                run_uid,
                                 iteration_id=iteration_id,
                                 entity_id=champion_id,
                                 payload={
@@ -789,12 +766,12 @@ class OptimizationRunner:
                         ledger.append(
                             OptimizationEvent.create(
                                 EventType.RUN_COMPLETED,
-                                selected_run_id,
+                                run_uid,
                                 payload={"reason": "candidate accepted", "champion": champion_id},
                             )
                         )
                         return self._result(
-                            selected_run_id,
+                            selected_name,
                             run_uid,
                             lifecycle,
                             champion_id,
@@ -816,7 +793,7 @@ class OptimizationRunner:
                     # the recording boundary instead of attempting an illegal direct jump.
                     lifecycle = lifecycle.move_iteration(IterationState.RECORDING_MEMORY)
                     failed_outcome = self._failed_outcome(
-                        selected_run_id,
+                        run_uid,
                         iteration_id,
                         champion_id,
                         proposal,
@@ -838,7 +815,7 @@ class OptimizationRunner:
                     ledger.append(
                         OptimizationEvent.create(
                             EventType.MEMORY_RECORDED,
-                            selected_run_id,
+                            run_uid,
                             iteration_id=iteration_id,
                             entity_id=invalid_memory.memory_id,
                             payload={"status": failed_outcome.status.value},
@@ -848,7 +825,7 @@ class OptimizationRunner:
                     ledger.append(
                         OptimizationEvent.create(
                             EventType.PATCH_REJECTED,
-                            selected_run_id,
+                            run_uid,
                             iteration_id=iteration_id,
                             entity_id=proposal.proposal_id,
                             payload={"error": str(exc)},
@@ -857,7 +834,7 @@ class OptimizationRunner:
                     ledger.append(
                         OptimizationEvent.create(
                             EventType.ITERATION_FAILED,
-                            selected_run_id,
+                            run_uid,
                             iteration_id=iteration_id,
                             payload={"state": "invalid", "error": str(exc)},
                         )
@@ -868,12 +845,12 @@ class OptimizationRunner:
             ledger.append(
                 OptimizationEvent.create(
                     EventType.RUN_STOPPED,
-                    selected_run_id,
+                    run_uid,
                     payload={"reason": reason},
                 )
             )
             return self._result(
-                selected_run_id,
+                selected_name,
                 run_uid,
                 lifecycle,
                 champion_id,
@@ -888,7 +865,7 @@ class OptimizationRunner:
             ledger.append(
                 OptimizationEvent.create(
                     EventType.RUN_FAILED,
-                    selected_run_id,
+                    run_uid,
                     payload={"error_type": type(exc).__name__, "error": str(exc)},
                 )
             )
@@ -1006,7 +983,7 @@ class OptimizationRunner:
             ledger.append(
                 OptimizationEvent.create(
                     EventType.RUNTIME_PROVENANCE_CAPTURED,
-                    context.run_id,
+                    context.run_uid,
                     iteration_id=context.iteration_id,
                     payload=_json_payload(provenance_record.to_dict()),
                     artifacts=(_artifact_ref(provenance_path, "runtime-provenance"),),
@@ -1017,7 +994,7 @@ class OptimizationRunner:
         target_spec = _profile_target_spec(config, provenance_record)
         workspace = self._prepare_managed_workspace(
             config,
-            context.run_id,
+            context.run_uid,
             context.iteration_id,
             role="profile",
             entity_id=champion_id,
@@ -1025,7 +1002,7 @@ class OptimizationRunner:
         )
         self._record_target_materialized(
             ledger,
-            context.run_id,
+            context.run_uid,
             context.iteration_id,
             champion_id,
             "profile",
@@ -1039,7 +1016,7 @@ class OptimizationRunner:
             workspace,
             evidence_root / "build",
             ledger,
-            context.run_id,
+            context.run_uid,
             context.iteration_id,
             champion_id,
             "profile",
@@ -1050,7 +1027,7 @@ class OptimizationRunner:
         ledger.append(
             OptimizationEvent.create(
                 EventType.SERVICE_STARTING,
-                context.run_id,
+                context.run_uid,
                 iteration_id=context.iteration_id,
                 entity_id=champion_id,
                 payload={"role": "profile", "trial_id": trial_id},
@@ -1062,14 +1039,14 @@ class OptimizationRunner:
                 target_spec,
                 TargetChangeSet(),
                 service_dir,
-                run_id=context.run_id,
+                run_uid=context.run_uid,
                 trial_id=trial_id,
             )
         except BaseException as exc:
             ledger.append(
                 OptimizationEvent.create(
                     EventType.SERVICE_FAILED,
-                    context.run_id,
+                    context.run_uid,
                     iteration_id=context.iteration_id,
                     entity_id=champion_id,
                     payload={"role": "profile", "stage": "start", **_error_payload(exc)},
@@ -1080,7 +1057,7 @@ class OptimizationRunner:
         ledger.append(
             OptimizationEvent.create(
                 EventType.SERVICE_STARTED,
-                context.run_id,
+                context.run_uid,
                 iteration_id=context.iteration_id,
                 entity_id=champion_id,
                 payload={
@@ -1098,7 +1075,7 @@ class OptimizationRunner:
                 ledger.append(
                     OptimizationEvent.create(
                         EventType.SERVICE_FAILED,
-                        context.run_id,
+                        context.run_uid,
                         iteration_id=context.iteration_id,
                         entity_id=champion_id,
                         payload={
@@ -1112,7 +1089,7 @@ class OptimizationRunner:
             ledger.append(
                 OptimizationEvent.create(
                     EventType.SERVICE_READY,
-                    context.run_id,
+                    context.run_uid,
                     iteration_id=context.iteration_id,
                     entity_id=champion_id,
                     payload={
@@ -1136,7 +1113,7 @@ class OptimizationRunner:
                 ledger.append(
                     OptimizationEvent.create(
                         EventType.SERVICE_STOPPING,
-                        context.run_id,
+                        context.run_uid,
                         iteration_id=context.iteration_id,
                         entity_id=champion_id,
                         payload={
@@ -1152,7 +1129,7 @@ class OptimizationRunner:
             ledger.append(
                 OptimizationEvent.create(
                     EventType.SERVICE_STOPPED,
-                    context.run_id,
+                    context.run_uid,
                     iteration_id=context.iteration_id,
                     entity_id=champion_id,
                     payload={
@@ -1202,7 +1179,7 @@ class OptimizationRunner:
     def _execute_candidate(
         self,
         config: OptimizationConfig,
-        run_id: str,
+        run_uid: str,
         iteration_id: str,
         champion_id: str,
         proposal: ChangeProposal,
@@ -1212,7 +1189,7 @@ class OptimizationRunner:
         if config.target is not None:
             return self._execute_managed_candidate(
                 config,
-                run_id,
+                run_uid,
                 iteration_id,
                 champion_id,
                 proposal,
@@ -1229,7 +1206,7 @@ class OptimizationRunner:
             raise OptimizationRuntimeError("proposal does not contain a patch_path")
         patch_path = Path(patch_path_value)
         lifecycle = lifecycle.move_iteration(IterationState.PREPARING_WORKSPACE)
-        workspace_root = workspace_config.root_dir / run_id / iteration_id
+        workspace_root = workspace_config.root_dir / run_uid / iteration_id
         workspace = GitWorktreeWorkspace.create(
             workspace_config.repository,
             workspace_root,
@@ -1239,7 +1216,7 @@ class OptimizationRunner:
         ledger.append(
             OptimizationEvent.create(
                 EventType.WORKSPACE_PREPARED,
-                run_id,
+                run_uid,
                 iteration_id=iteration_id,
                 entity_id=proposal.proposal_id,
                 payload={
@@ -1265,7 +1242,7 @@ class OptimizationRunner:
         ledger.append(
             OptimizationEvent.create(
                 EventType.PATCH_APPLIED,
-                run_id,
+                run_uid,
                 iteration_id=iteration_id,
                 entity_id=proposal.proposal_id,
                 payload={
@@ -1283,13 +1260,13 @@ class OptimizationRunner:
         ledger.append(
             OptimizationEvent.create(
                 EventType.EVALUATION_STARTED,
-                run_id,
+                run_uid,
                 iteration_id=iteration_id,
                 entity_id=proposal.proposal_id,
                 payload={"profiler_trial": False, "workspace": str(workspace.path)},
             )
         )
-        evaluator = TieredEvaluator(config.execution.artifacts_dir / run_id / "evaluations")
+        evaluator = TieredEvaluator(config.execution.artifacts_dir / run_uid / "evaluations")
         configured_baselines = dict(config.baseline.metric_values)
         if config.schema_version == 2:
             legacy_baseline = config.optimization.evaluation.baseline_value
@@ -1302,13 +1279,13 @@ class OptimizationRunner:
             baseline_values=configured_baselines,
             apply_promotion_gate=True,
             evaluator=evaluator,
-            artifact_dir=config.execution.artifacts_dir / run_id / "evaluations" / iteration_id,
+            artifact_dir=config.execution.artifacts_dir / run_uid / "evaluations" / iteration_id,
             lane="fast",
         )
         ledger.append(
             OptimizationEvent.create(
                 EventType.EVALUATION_COMPLETED,
-                run_id,
+                run_uid,
                 iteration_id=iteration_id,
                 entity_id=proposal.proposal_id,
                 payload=_json_payload(evaluation.to_dict()),
@@ -1325,7 +1302,7 @@ class OptimizationRunner:
     def _execute_managed_candidate(
         self,
         config: OptimizationConfig,
-        run_id: str,
+        run_uid: str,
         iteration_id: str,
         champion_id: str,
         proposal: ChangeProposal,
@@ -1338,7 +1315,7 @@ class OptimizationRunner:
                 "optimization.workspace is required for managed target evaluation"
             )
         controller = self._target_controller or SGLangTargetController()
-        evidence_root = config.execution.artifacts_dir / run_id / iteration_id / "managed-target"
+        evidence_root = config.execution.artifacts_dir / run_uid / iteration_id / "managed-target"
         provenance_record: RuntimeProvenanceRecord | None = None
         target = config.target
         if target is None:  # guarded by the managed execution entry point
@@ -1355,7 +1332,7 @@ class OptimizationRunner:
             ledger.append(
                 OptimizationEvent.create(
                     EventType.RUNTIME_PROVENANCE_CAPTURED,
-                    run_id,
+                    run_uid,
                     iteration_id=iteration_id,
                     payload=_json_payload(provenance_record.to_dict()),
                     artifacts=(_artifact_ref(provenance_path, "runtime-provenance"),),
@@ -1368,7 +1345,7 @@ class OptimizationRunner:
         ledger.append(
             OptimizationEvent.create(
                 EventType.BASELINE_STARTED,
-                run_id,
+                run_uid,
                 iteration_id=iteration_id,
                 entity_id=champion_id,
                 payload={"source_revision": config.baseline.source_revision},
@@ -1377,7 +1354,7 @@ class OptimizationRunner:
         lifecycle = lifecycle.move_iteration(IterationState.PREPARING_BASELINE)
         baseline_workspace = self._prepare_managed_workspace(
             config,
-            run_id,
+            run_uid,
             iteration_id,
             role="baseline",
             entity_id=champion_id,
@@ -1386,7 +1363,7 @@ class OptimizationRunner:
         baseline_change = TargetChangeSet()
         self._record_target_materialized(
             ledger,
-            run_id,
+            run_uid,
             iteration_id,
             champion_id,
             "baseline",
@@ -1401,7 +1378,7 @@ class OptimizationRunner:
             baseline_workspace,
             evidence_root / "baseline" / "build",
             ledger,
-            run_id,
+            run_uid,
             iteration_id,
             champion_id,
             "baseline",
@@ -1414,7 +1391,7 @@ class OptimizationRunner:
             workspace=baseline_workspace,
             evidence_dir=evidence_root / "baseline" / "service",
             ledger=ledger,
-            run_id=run_id,
+            run_uid=run_uid,
             iteration_id=iteration_id,
             entity_id=champion_id,
             role="baseline",
@@ -1438,7 +1415,7 @@ class OptimizationRunner:
             ledger.append(
                 OptimizationEvent.create(
                     EventType.BASELINE_INVALID,
-                    run_id,
+                    run_uid,
                     iteration_id=iteration_id,
                     entity_id=champion_id,
                     payload={"reason": reason},
@@ -1449,7 +1426,7 @@ class OptimizationRunner:
         ledger.append(
             OptimizationEvent.create(
                 EventType.BASELINE_ESTABLISHED,
-                run_id,
+                run_uid,
                 iteration_id=iteration_id,
                 entity_id=champion_id,
                 payload=_json_payload(
@@ -1471,7 +1448,7 @@ class OptimizationRunner:
         lifecycle = lifecycle.move_iteration(IterationState.PREPARING_WORKSPACE)
         candidate_workspace = self._prepare_managed_workspace(
             config,
-            run_id,
+            run_uid,
             iteration_id,
             role="candidate",
             entity_id=proposal.proposal_id,
@@ -1480,7 +1457,7 @@ class OptimizationRunner:
         )
         lifecycle, candidate_change, change_digest = self._materialize_candidate_change(
             config,
-            run_id,
+            run_uid,
             iteration_id,
             proposal,
             candidate_workspace,
@@ -1489,7 +1466,7 @@ class OptimizationRunner:
         )
         self._record_target_materialized(
             ledger,
-            run_id,
+            run_uid,
             iteration_id,
             proposal.proposal_id,
             "candidate",
@@ -1504,7 +1481,7 @@ class OptimizationRunner:
             candidate_workspace,
             evidence_root / "candidate" / "build",
             ledger,
-            run_id,
+            run_uid,
             iteration_id,
             proposal.proposal_id,
             "candidate",
@@ -1517,7 +1494,7 @@ class OptimizationRunner:
             workspace=candidate_workspace,
             evidence_dir=evidence_root / "candidate" / "service",
             ledger=ledger,
-            run_id=run_id,
+            run_uid=run_uid,
             iteration_id=iteration_id,
             entity_id=proposal.proposal_id,
             role="candidate",
@@ -1542,7 +1519,7 @@ class OptimizationRunner:
     @staticmethod
     def _prepare_managed_workspace(
         config: OptimizationConfig,
-        run_id: str,
+        run_uid: str,
         iteration_id: str,
         *,
         role: str,
@@ -1555,14 +1532,14 @@ class OptimizationRunner:
             raise OptimizationRuntimeError("optimization.workspace is required")
         workspace = GitWorktreeWorkspace.create(
             workspace_config.repository,
-            workspace_config.root_dir / run_id / iteration_id / role,
+            workspace_config.root_dir / run_uid / iteration_id / role,
             revision=revision or config.baseline.source_revision,
             timeout_seconds=workspace_config.timeout_seconds,
         )
         ledger.append(
             OptimizationEvent.create(
                 EventType.WORKSPACE_PREPARED,
-                run_id,
+                run_uid,
                 iteration_id=iteration_id,
                 entity_id=entity_id,
                 payload={
@@ -1581,7 +1558,7 @@ class OptimizationRunner:
     @staticmethod
     def _materialize_candidate_change(
         config: OptimizationConfig,
-        run_id: str,
+        run_uid: str,
         iteration_id: str,
         proposal: ChangeProposal,
         workspace: GitWorktreeWorkspace,
@@ -1638,7 +1615,7 @@ class OptimizationRunner:
             ledger.append(
                 OptimizationEvent.create(
                     EventType.PATCH_APPLIED,
-                    run_id,
+                    run_uid,
                     iteration_id=iteration_id,
                     entity_id=proposal.proposal_id,
                     payload={
@@ -1657,7 +1634,7 @@ class OptimizationRunner:
             ledger.append(
                 OptimizationEvent.create(
                     EventType.SERVER_ARGUMENTS_APPLIED,
-                    run_id,
+                    run_uid,
                     iteration_id=iteration_id,
                     entity_id=proposal.proposal_id,
                     payload={
@@ -1697,7 +1674,7 @@ class OptimizationRunner:
     @staticmethod
     def _record_target_materialized(
         ledger: EventLedger,
-        run_id: str,
+        run_uid: str,
         iteration_id: str,
         entity_id: str,
         role: str,
@@ -1708,7 +1685,7 @@ class OptimizationRunner:
         ledger.append(
             OptimizationEvent.create(
                 EventType.TARGET_MATERIALIZED,
-                run_id,
+                run_uid,
                 iteration_id=iteration_id,
                 entity_id=entity_id,
                 payload=_json_payload(
@@ -1736,7 +1713,7 @@ class OptimizationRunner:
         workspace: GitWorktreeWorkspace,
         evidence_dir: Path,
         ledger: EventLedger,
-        run_id: str,
+        run_uid: str,
         iteration_id: str,
         entity_id: str,
         role: str,
@@ -1745,7 +1722,7 @@ class OptimizationRunner:
         ledger.append(
             OptimizationEvent.create(
                 EventType.BUILD_STARTED,
-                run_id,
+                run_uid,
                 iteration_id=iteration_id,
                 entity_id=entity_id,
                 payload={"role": role, "command_count": len(build_spec.commands)},
@@ -1757,7 +1734,7 @@ class OptimizationRunner:
             ledger.append(
                 OptimizationEvent.create(
                     EventType.BUILD_FAILED,
-                    run_id,
+                    run_uid,
                     iteration_id=iteration_id,
                     entity_id=entity_id,
                     payload={"role": role, **_error_payload(exc)},
@@ -1768,7 +1745,7 @@ class OptimizationRunner:
         ledger.append(
             OptimizationEvent.create(
                 EventType.BUILD_COMPLETED,
-                run_id,
+                run_uid,
                 iteration_id=iteration_id,
                 entity_id=entity_id,
                 payload={"role": role, "command_count": len(results)},
@@ -1786,7 +1763,7 @@ class OptimizationRunner:
         workspace: GitWorktreeWorkspace,
         evidence_dir: Path,
         ledger: EventLedger,
-        run_id: str,
+        run_uid: str,
         iteration_id: str,
         entity_id: str,
         role: str,
@@ -1807,7 +1784,7 @@ class OptimizationRunner:
         ledger.append(
             OptimizationEvent.create(
                 EventType.SERVICE_STARTING,
-                run_id,
+                run_uid,
                 iteration_id=iteration_id,
                 entity_id=entity_id,
                 payload={"role": role, "trial_id": trial_id},
@@ -1819,14 +1796,14 @@ class OptimizationRunner:
                 target_spec,
                 change_set,
                 evidence_dir,
-                run_id=run_id,
+                run_uid=run_uid,
                 trial_id=trial_id,
             )
         except BaseException as exc:
             ledger.append(
                 OptimizationEvent.create(
                     EventType.SERVICE_FAILED,
-                    run_id,
+                    run_uid,
                     iteration_id=iteration_id,
                     entity_id=entity_id,
                     payload={"role": role, "stage": "start", **_error_payload(exc)},
@@ -1839,7 +1816,7 @@ class OptimizationRunner:
             ledger.append(
                 OptimizationEvent.create(
                     EventType.SERVICE_STARTED,
-                    run_id,
+                    run_uid,
                     iteration_id=iteration_id,
                     entity_id=entity_id,
                     payload={
@@ -1857,7 +1834,7 @@ class OptimizationRunner:
                 ledger.append(
                     OptimizationEvent.create(
                         EventType.SERVICE_FAILED,
-                        run_id,
+                        run_uid,
                         iteration_id=iteration_id,
                         entity_id=entity_id,
                         payload={"role": role, "stage": "readiness", **_error_payload(exc)},
@@ -1867,7 +1844,7 @@ class OptimizationRunner:
             ledger.append(
                 OptimizationEvent.create(
                     EventType.SERVICE_READY,
-                    run_id,
+                    run_uid,
                     iteration_id=iteration_id,
                     entity_id=entity_id,
                     payload={
@@ -1897,7 +1874,7 @@ class OptimizationRunner:
             ledger.append(
                 OptimizationEvent.create(
                     EventType.EVALUATION_STARTED,
-                    run_id,
+                    run_uid,
                     iteration_id=iteration_id,
                     entity_id=entity_id,
                     payload={
@@ -1908,7 +1885,7 @@ class OptimizationRunner:
                     },
                 )
             )
-            evaluator = TieredEvaluator(config.execution.artifacts_dir / run_id / "evaluations")
+            evaluator = TieredEvaluator(config.execution.artifacts_dir / run_uid / "evaluations")
             evaluation_result = _execute_workload_suite(
                 config,
                 trial_id=trial_id,
@@ -1916,14 +1893,14 @@ class OptimizationRunner:
                 baseline_values=baseline_values,
                 apply_promotion_gate=apply_promotion_gate,
                 evaluator=evaluator,
-                artifact_dir=config.execution.artifacts_dir / run_id / "evaluations" / trial_id,
+                artifact_dir=config.execution.artifacts_dir / run_uid / "evaluations" / trial_id,
                 lane="fast",
                 runtime_environment=runtime_environment,
             )
             ledger.append(
                 OptimizationEvent.create(
                     EventType.EVALUATION_COMPLETED,
-                    run_id,
+                    run_uid,
                     iteration_id=iteration_id,
                     entity_id=entity_id,
                     payload={"role": role, **_json_payload(evaluation_result.to_dict())},
@@ -1942,7 +1919,7 @@ class OptimizationRunner:
                 ledger.append(
                     OptimizationEvent.create(
                         EventType.SERVICE_STOPPING,
-                        run_id,
+                        run_uid,
                         iteration_id=iteration_id,
                         entity_id=entity_id,
                         payload={
@@ -1962,7 +1939,7 @@ class OptimizationRunner:
                     ledger.append(
                         OptimizationEvent.create(
                             EventType.SERVICE_FAILED,
-                            run_id,
+                            run_uid,
                             iteration_id=iteration_id,
                             entity_id=entity_id,
                             payload={"role": role, "stage": "stop", **_error_payload(exc)},
@@ -1974,7 +1951,7 @@ class OptimizationRunner:
             ledger.append(
                 OptimizationEvent.create(
                     EventType.SERVICE_STOPPED,
-                    run_id,
+                    run_uid,
                     iteration_id=iteration_id,
                     entity_id=entity_id,
                     payload={
@@ -2005,7 +1982,6 @@ class OptimizationRunner:
         entry = MemoryEntry(
             memory_id=f"memory-{hashlib.sha256(outcome.outcome_id.encode()).hexdigest()[:20]}",
             outcome_id=outcome.outcome_id,
-            run_id=outcome.run_id,
             iteration_id=outcome.iteration_id,
             framework=config.framework.value,
             framework_revision=config.baseline.source_revision,
@@ -2033,7 +2009,7 @@ class OptimizationRunner:
 
     @staticmethod
     def _failed_outcome(
-        run_id: str,
+        run_uid: str,
         iteration_id: str,
         champion_id: str,
         proposal: ChangeProposal,
@@ -2045,7 +2021,7 @@ class OptimizationRunner:
             patch_digest = proposal.metadata.get("patch_sha256")
         return IterationOutcome(
             outcome_id=f"outcome-{uuid.uuid4().hex}",
-            run_id=run_id,
+            run_uid=run_uid,
             iteration_id=iteration_id,
             proposal_id=proposal.proposal_id,
             status=status,
@@ -2057,7 +2033,7 @@ class OptimizationRunner:
 
     @staticmethod
     def _result(
-        run_id: str,
+        name: str | None,
         run_uid: str,
         lifecycle: Lifecycle,
         champion_id: str,
@@ -2069,7 +2045,7 @@ class OptimizationRunner:
         stop_reason: str | None,
     ) -> OptimizationRunResult:
         return OptimizationRunResult(
-            run_id=run_id,
+            name=name,
             run_uid=run_uid,
             run_state=lifecycle.run,
             iteration_state=lifecycle.iteration,
@@ -2703,17 +2679,6 @@ def _profile_manifest_path(profile: ProfileResult) -> Path:
     raise OptimizationRuntimeError(
         f"active profile {profile.profile_id} has no durable manifest artifact"
     )
-
-
-def _run_id(value: str | None) -> str:
-    selected = value or f"opt-{uuid.uuid4().hex[:16]}"
-    if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", selected) is None:
-        raise ValueError("run_id contains unsafe path characters")
-    return selected
-
-
-def _run_uid() -> str:
-    return f"run-{uuid.uuid4().hex}"
 
 
 def _required_capabilities(config: OptimizationConfig) -> tuple[Capability, ...]:

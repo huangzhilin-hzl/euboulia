@@ -95,7 +95,7 @@ class SGLangProfiler:
             "with_stack": self.config.with_stack,
             "record_shapes": self.config.record_shapes,
             "profile_by_stage": False,
-            "profile_prefix": f"{context.run_id}-{context.iteration_id}",
+            "profile_prefix": f"{context.run_uid}-{context.iteration_id}",
         }
         started = False
         workload: ExecutionResult | None = None
@@ -438,7 +438,7 @@ class RuleAnalyzer:
             ),
             findings=tuple(findings),
             metadata={
-                "run_id": context.run_id,
+                "run_uid": context.run_uid,
                 "iteration_id": context.iteration_id,
                 "observation_count": analysis.observation_count,
                 "raw_observation_count": profile.metrics.get("raw_observation_count", 0),

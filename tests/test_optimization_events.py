@@ -26,7 +26,7 @@ def test_event_json_round_trip_preserves_typed_artifacts() -> None:
     event = OptimizationEvent(
         event_id="event-1",
         event_type=EventType.PROFILE_COMPLETED,
-        run_id="run-1",
+        run_uid="run-1",
         iteration_id="iteration-1",
         input_digest="input-digest",
         payload={"provider": "sglang_torch", "count": 1},
@@ -36,7 +36,7 @@ def test_event_json_round_trip_preserves_typed_artifacts() -> None:
     restored = OptimizationEvent.from_json(event.to_json())
 
     assert restored == event
-    assert restored.to_dict()["schema_version"] == 1
+    assert restored.to_dict()["schema_version"] == 2
 
 
 def test_event_ledger_appends_without_rewriting_and_filters(tmp_path: Path) -> None:

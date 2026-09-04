@@ -80,7 +80,7 @@ class OptimizationEvent:
 
     event_id: str
     event_type: EventType
-    run_id: str
+    run_uid: str
     occurred_at: str = field(default_factory=utc_now)
     iteration_id: str | None = None
     causation_id: str | None = None
@@ -89,13 +89,13 @@ class OptimizationEvent:
     payload: Mapping[str, JSONValue] = field(default_factory=dict)
     artifacts: tuple[ArtifactRef, ...] = ()
 
-    SCHEMA_VERSION = 1
+    SCHEMA_VERSION = 2
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "event_id", _nonempty(self.event_id, "event_id"))
         if not isinstance(self.event_type, EventType):
             object.__setattr__(self, "event_type", EventType(self.event_type))
-        object.__setattr__(self, "run_id", _nonempty(self.run_id, "run_id"))
+        object.__setattr__(self, "run_uid", _nonempty(self.run_uid, "run_uid"))
         object.__setattr__(self, "occurred_at", _nonempty(self.occurred_at, "occurred_at"))
         for name in ("iteration_id", "causation_id", "entity_id", "input_digest"):
             object.__setattr__(self, name, _optional_nonempty(getattr(self, name), name))
@@ -108,7 +108,7 @@ class OptimizationEvent:
     def create(
         cls,
         event_type: EventType,
-        run_id: str,
+        run_uid: str,
         *,
         iteration_id: str | None = None,
         causation_id: str | None = None,
@@ -120,7 +120,7 @@ class OptimizationEvent:
         return cls(
             event_id=uuid.uuid4().hex,
             event_type=event_type,
-            run_id=run_id,
+            run_uid=run_uid,
             iteration_id=iteration_id,
             causation_id=causation_id,
             entity_id=entity_id,
@@ -134,7 +134,7 @@ class OptimizationEvent:
             "schema_version": self.SCHEMA_VERSION,
             "event_id": self.event_id,
             "event_type": self.event_type.value,
-            "run_id": self.run_id,
+            "run_uid": self.run_uid,
             "occurred_at": self.occurred_at,
             "iteration_id": self.iteration_id,
             "causation_id": self.causation_id,
@@ -166,7 +166,7 @@ class OptimizationEvent:
         return cls(
             event_id=_nonempty(value.get("event_id"), "event_id"),
             event_type=EventType(_nonempty(value.get("event_type"), "event_type")),
-            run_id=_nonempty(value.get("run_id"), "run_id"),
+            run_uid=_nonempty(value.get("run_uid"), "run_uid"),
             occurred_at=_nonempty(value.get("occurred_at"), "occurred_at"),
             iteration_id=_optional_nonempty(value.get("iteration_id"), "iteration_id"),
             causation_id=_optional_nonempty(value.get("causation_id"), "causation_id"),
@@ -261,20 +261,20 @@ class EventLedger:
     def read_all(self) -> list[OptimizationEvent]:
         return list(self.iter_events())
 
-    def by_run(self, run_id: str) -> list[OptimizationEvent]:
-        selected_run_id = _nonempty(run_id, "run_id")
-        return [event for event in self.iter_events() if event.run_id == selected_run_id]
+    def by_run(self, run_uid: str) -> list[OptimizationEvent]:
+        selected_run_uid = _nonempty(run_uid, "run_uid")
+        return [event for event in self.iter_events() if event.run_uid == selected_run_uid]
 
-    def by_iteration(self, run_id: str, iteration_id: str) -> list[OptimizationEvent]:
+    def by_iteration(self, run_uid: str, iteration_id: str) -> list[OptimizationEvent]:
         selected_iteration_id = _nonempty(iteration_id, "iteration_id")
         return [
-            event for event in self.by_run(run_id) if event.iteration_id == selected_iteration_id
+            event for event in self.by_run(run_uid) if event.iteration_id == selected_iteration_id
         ]
 
-    def latest(self, run_id: str | None = None) -> OptimizationEvent | None:
+    def latest(self, run_uid: str | None = None) -> OptimizationEvent | None:
         latest: OptimizationEvent | None = None
         for event in self.iter_events():
-            if run_id is None or event.run_id == run_id:
+            if run_uid is None or event.run_uid == run_uid:
                 latest = event
         return latest
 

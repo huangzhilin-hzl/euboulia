@@ -9,9 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-import uuid
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, cast
 
@@ -39,6 +37,7 @@ from euboulia.models import (
     Workload,
     utc_now,
 )
+from euboulia.run_identity import new_run_uid, normalize_run_name
 
 
 class CampaignSafetyError(RuntimeError):
@@ -49,7 +48,7 @@ class CampaignSafetyError(RuntimeError):
 class PlannedExperiment:
     """A side-effect-free benchmark plan for one candidate."""
 
-    run_id: str
+    run_uid: str | None
     ordinal: int
     workload: Workload
     candidate: Candidate
@@ -58,7 +57,7 @@ class PlannedExperiment:
 
     def to_dict(self) -> dict[str, object]:
         return {
-            "run_id": self.run_id,
+            "run_uid": self.run_uid,
             "ordinal": self.ordinal,
             "workload": self.workload.to_dict(),
             "candidate": self.candidate.to_dict(),
@@ -69,7 +68,8 @@ class PlannedExperiment:
 
 @dataclass(frozen=True, slots=True)
 class CampaignRunResult:
-    run_id: str
+    name: str | None
+    run_uid: str
     executed: bool
     plans: tuple[PlannedExperiment, ...]
     experiments: tuple[Experiment, ...] = ()
@@ -98,7 +98,8 @@ class CampaignRunResult:
 
     def to_dict(self) -> dict[str, object]:
         return {
-            "run_id": self.run_id,
+            "name": self.name,
+            "run_uid": self.run_uid,
             "executed": self.executed,
             "plans": [plan.to_dict() for plan in self.plans],
             "experiments": [experiment.to_dict() for experiment in self.experiments],
@@ -136,15 +137,24 @@ def adapter_for(framework: str) -> BaseAdapter:
 def plan_campaign(
     config: CampaignConfig,
     *,
-    run_id: str = "preview",
     adapter: BaseAdapter | None = None,
 ) -> tuple[PlannedExperiment, ...]:
     """Render every candidate command without creating directories or processes."""
 
+    return _plan_campaign(config, run_uid=None, adapter=adapter)
+
+
+def _plan_campaign(
+    config: CampaignConfig,
+    *,
+    run_uid: str | None,
+    adapter: BaseAdapter | None,
+) -> tuple[PlannedExperiment, ...]:
+    """Build a preview or bind plans to an internally generated execution identity."""
+
     selected_adapter = adapter or adapter_for(config.framework)
     _validate_base_args(config.benchmark.base_args)
-    safe_run_id = _safe_component(run_id)
-    run_dir = config.execution.artifacts_dir / safe_run_id
+    run_dir = config.execution.artifacts_dir / (run_uid or "<run_uid>")
     plans: list[PlannedExperiment] = []
     for ordinal, candidate_config in enumerate(config.candidates):
         candidate_dir = run_dir / _safe_component(candidate_config.candidate_id)
@@ -159,7 +169,7 @@ def plan_campaign(
         )
         plans.append(
             PlannedExperiment(
-                run_id=safe_run_id,
+                run_uid=run_uid,
                 ordinal=ordinal,
                 workload=_workload_model(config, workload_mapping),
                 candidate=_candidate_model(config, candidate_config),
@@ -175,15 +185,21 @@ def run_campaign(
     *,
     execute: bool = False,
     adapter: BaseAdapter | None = None,
-    run_id: str | None = None,
+    name: str | None = None,
 ) -> CampaignRunResult:
     """Plan a campaign, and optionally execute only its benchmark clients."""
 
-    effective_run_id = run_id or _new_run_id()
+    selected_name = normalize_run_name(name)
+    effective_run_uid = new_run_uid()
     selected_adapter = adapter or adapter_for(config.framework)
-    plans = plan_campaign(config, run_id=effective_run_id, adapter=selected_adapter)
+    plans = _plan_campaign(config, run_uid=effective_run_uid, adapter=selected_adapter)
     if not execute:
-        return CampaignRunResult(run_id=effective_run_id, executed=False, plans=plans)
+        return CampaignRunResult(
+            name=selected_name,
+            run_uid=effective_run_uid,
+            executed=False,
+            plans=plans,
+        )
 
     lifecycle_commands = [plan for plan in plans if plan.command.manages_service_lifecycle]
     if lifecycle_commands:
@@ -191,7 +207,7 @@ def run_campaign(
             "this plan manages a service lifecycle; the MVP can render it but will not execute it"
         )
 
-    run_dir = config.execution.artifacts_dir / _safe_component(effective_run_id)
+    run_dir = config.execution.artifacts_dir / _safe_component(effective_run_uid)
     run_dir.mkdir(parents=True, exist_ok=False)
     _write_json(run_dir / "plan.json", [plan.to_dict() for plan in plans])
     _write_json(run_dir / "config.snapshot.json", _redacted_config(config))
@@ -203,7 +219,7 @@ def run_campaign(
     stopped_reason: str | None = None
 
     for index, plan in enumerate(plans):
-        experiment_id = f"{effective_run_id}:{plan.candidate.candidate_id}"
+        experiment_id = f"{effective_run_uid}:{plan.candidate.candidate_id}"
         running = Experiment(
             experiment_id=experiment_id,
             workload=plan.workload,
@@ -211,7 +227,8 @@ def run_campaign(
             status=ExperimentStatus.RUNNING,
             artifacts=(str(plan.artifact_dir),),
             metadata={
-                "run_id": effective_run_id,
+                "run_uid": effective_run_uid,
+                "name": selected_name,
                 "ordinal": index,
                 "command": _as_json_value(plan.command.to_dict()),
             },
@@ -242,7 +259,13 @@ def run_campaign(
             if index == 0:
                 stopped_reason = "baseline benchmark failed"
                 completed.extend(
-                    _append_cancelled(plans[index + 1 :], ledger, effective_run_id, stopped_reason)
+                    _append_cancelled(
+                        plans[index + 1 :],
+                        ledger,
+                        effective_run_uid,
+                        selected_name,
+                        stopped_reason,
+                    )
                 )
                 break
             continue
@@ -280,7 +303,13 @@ def run_campaign(
             if index == 0:
                 stopped_reason = "baseline result was invalid"
                 completed.extend(
-                    _append_cancelled(plans[index + 1 :], ledger, effective_run_id, stopped_reason)
+                    _append_cancelled(
+                        plans[index + 1 :],
+                        ledger,
+                        effective_run_uid,
+                        selected_name,
+                        stopped_reason,
+                    )
                 )
                 break
             continue
@@ -316,12 +345,19 @@ def run_campaign(
         if index == 0 and not verdict.accepted:
             stopped_reason = "baseline correctness gate failed"
             completed.extend(
-                _append_cancelled(plans[index + 1 :], ledger, effective_run_id, stopped_reason)
+                _append_cancelled(
+                    plans[index + 1 :],
+                    ledger,
+                    effective_run_uid,
+                    selected_name,
+                    stopped_reason,
+                )
             )
             break
 
     return CampaignRunResult(
-        run_id=effective_run_id,
+        name=selected_name,
+        run_uid=effective_run_uid,
         executed=True,
         plans=plans,
         experiments=tuple(completed),
@@ -478,29 +514,25 @@ def _failed_experiment(
 def _append_cancelled(
     plans: tuple[PlannedExperiment, ...],
     ledger: ExperimentLedger,
-    run_id: str,
+    run_uid: str,
+    name: str | None,
     reason: str,
 ) -> tuple[Experiment, ...]:
     cancelled: list[Experiment] = []
     for plan in plans:
         experiment = Experiment(
-            experiment_id=f"{run_id}:{plan.candidate.candidate_id}",
+            experiment_id=f"{run_uid}:{plan.candidate.candidate_id}",
             workload=plan.workload,
             candidate=plan.candidate,
             status=ExperimentStatus.CANCELLED,
             finished_at=utc_now(),
             artifacts=(str(plan.artifact_dir),),
             error=reason,
-            metadata={"run_id": run_id, "not_executed": True},
+            metadata={"run_uid": run_uid, "name": name, "not_executed": True},
         )
         ledger.append(experiment)
         cancelled.append(experiment)
     return tuple(cancelled)
-
-
-def _new_run_id() -> str:
-    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-    return f"{timestamp}-{uuid.uuid4().hex[:8]}"
 
 
 _UNSAFE_COMPONENT = re.compile(r"[^A-Za-z0-9_.-]+")

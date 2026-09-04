@@ -63,6 +63,8 @@ def test_optimize_run_parser_exposes_independent_managed_capabilities() -> None:
             "run",
             "--recipe",
             "recipe.yaml",
+            "--name",
+            "baseline",
             "--apply-patches",
             "--run-profiles",
             "--run-evaluations",
@@ -72,6 +74,8 @@ def test_optimize_run_parser_exposes_independent_managed_capabilities() -> None:
     )
 
     assert args.apply_patches is True
+    assert args.name == "baseline"
+    assert not hasattr(args, "run_id")
     assert args.run_profiles is True
     assert args.run_evaluations is True
     assert args.run_builds is True
@@ -143,11 +147,6 @@ def test_target_run_rejects_unresolved_template_before_artifact_write(
             "run",
             "--recipe",
             str(template),
-            "--prepare-workspace",
-            "--run-profiles",
-            "--run-evaluations",
-            "--run-builds",
-            "--manage-services",
         ]
     )
 
@@ -172,7 +171,7 @@ def test_optimize_plan_allows_template_but_run_requires_bindings(
     assert not (tmp_path / "artifacts").exists()
 
 
-def test_target_run_parser_exposes_baseline_capabilities() -> None:
+def test_target_run_parser_accepts_optional_name() -> None:
     args = build_parser().parse_args(
         [
             "target",
@@ -181,20 +180,13 @@ def test_target_run_parser_exposes_baseline_capabilities() -> None:
             "recipe.yaml",
             "--values",
             "host-values.yaml",
-            "--prepare-workspace",
-            "--run-profiles",
-            "--run-evaluations",
-            "--run-builds",
-            "--manage-services",
+            "--name",
+            "baseline",
         ]
     )
 
-    assert args.prepare_workspace is True
-    assert args.run_profiles is True
     assert args.values == Path("host-values.yaml")
-    assert args.run_evaluations is True
-    assert args.run_builds is True
-    assert args.manage_services is True
+    assert args.name == "baseline"
 
 
 def test_config_remains_a_compatible_alias_for_recipe() -> None:
@@ -209,6 +201,6 @@ def test_optimize_events_cli_filters_run(tmp_path: Path) -> None:
     ledger.append(OptimizationEvent.create(EventType.RUN_STARTED, "wanted"))
     ledger.append(OptimizationEvent.create(EventType.RUN_STARTED, "other"))
 
-    exit_code = main(["optimize", "events", "--events", str(path), "--run-id", "wanted"])
+    exit_code = main(["optimize", "events", "--events", str(path), "--run-uid", "wanted"])
 
     assert exit_code == 0

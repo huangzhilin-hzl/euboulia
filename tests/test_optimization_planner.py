@@ -53,7 +53,7 @@ def _report() -> AnalysisReport:
 
 
 def _context(tmp_path: Path) -> StageContext:
-    return StageContext(run_id="run", iteration_id="i-1", artifact_dir=tmp_path)
+    return StageContext(run_uid="run", iteration_id="i-1", artifact_dir=tmp_path)
 
 
 def test_rule_planner_selects_matching_reviewed_patch(tmp_path: Path) -> None:
@@ -72,7 +72,7 @@ def test_rule_planner_deduplicates_patch_from_memory(tmp_path: Path) -> None:
     memory = MemoryEntry(
         memory_id="memory",
         outcome_id="outcome",
-        run_id="old-run",
+        run_uid="old-run",
         iteration_id="old-iteration",
         framework="vllm",
         framework_revision="abc",
@@ -81,7 +81,6 @@ def test_rule_planner_deduplicates_patch_from_memory(tmp_path: Path) -> None:
         workload_digest="workload",
         benchmark_policy_digest="policy",
         spec_digest="spec",
-        run_uid="run-uid",
         compatibility_digest="compatibility",
         proposal_id=first.proposal_id,
         outcome=OutcomeStatus.REJECTED,
@@ -250,7 +249,7 @@ entries:
     memory = MemoryEntry(
         memory_id="memory",
         outcome_id="outcome",
-        run_id="old-run",
+        run_uid="old-run",
         iteration_id="old-iteration",
         framework="sglang",
         framework_revision="abc",
@@ -259,7 +258,6 @@ entries:
         workload_digest="workload",
         benchmark_policy_digest="policy",
         spec_digest="spec",
-        run_uid="run-uid",
         compatibility_digest="compatibility",
         proposal_id="a-different-proposal-id",
         outcome=OutcomeStatus.REJECTED,
