@@ -1067,3 +1067,28 @@ def test_execution_storage_defaults_are_inside_artifacts(tmp_path: Path) -> None
     assert config.execution.experiment_ledger.name == "experiments.jsonl"
     assert config.execution.event_ledger.name == "events.jsonl"
     assert config.execution.memory.name == "memory.sqlite3"
+
+
+def test_execution_storage_and_workspace_root_are_host_defaults(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    contents = VALID_CONFIG.rsplit("execution:\n", 1)[0]
+    config = load_optimization_config(write_config(tmp_path, contents))
+
+    assert config.execution.artifacts_dir == tmp_path / ".euboulia"
+
+    document = v3_managed_document(tmp_path)
+    document.pop("execution")
+    optimization = document["optimization"]
+    assert isinstance(optimization, dict)
+    workspace = optimization["workspace"]
+    assert isinstance(workspace, dict)
+    workspace.pop("root_dir")
+    source = tmp_path / "host-independent.yaml"
+    source.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+
+    managed = load_optimization_config(source)
+
+    assert managed.optimization.workspace is not None
+    assert managed.optimization.workspace.root_dir == tmp_path / ".euboulia/worktrees"

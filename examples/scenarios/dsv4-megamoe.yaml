@@ -1,8 +1,8 @@
 # Exact baseline contract for:
 # ds-v4-flash-dspark-cp8-tp8-ep8_megamoe_test_plan.md
 #
-# This command assumes it runs inside the declared H20 container after the model,
-# SGLang checkout, and DeepGEMM checkout exist.
+# The local controller may execute this recipe through a configured Kubernetes
+# executor. The Pod must contain the model, SGLang, DeepGEMM, and this checkout.
 # Inspect required bindings without side effects:
 #   euboulia target plan --recipe examples/scenarios/dsv4-megamoe.yaml
 # Bind the immutable image, model, SGLang, and DeepGEMM identities before execution:
@@ -216,7 +216,6 @@ optimization:
     max_proposals_per_iteration: 1
   workspace:
     repository: /home/admin/src/dsv4-megamoe/SGLang
-    root_dir: /home/admin/euboulia-worktrees/dsv4-megamoe
     timeout_seconds: 300
     max_patch_bytes: 262144
     max_changed_files: 8
@@ -315,9 +314,3 @@ optimization:
     max_wall_time_seconds: 86400
     max_consecutive_failures: 1
     no_improvement_patience: 1
-
-execution:
-  artifacts_dir: /home/admin/results/euboulia-dsv4-megamoe
-  ledger: /home/admin/results/euboulia-dsv4-megamoe/experiments.jsonl
-  events: /home/admin/results/euboulia-dsv4-megamoe/events.jsonl
-  memory: /home/admin/results/euboulia-dsv4-megamoe/memory.sqlite3

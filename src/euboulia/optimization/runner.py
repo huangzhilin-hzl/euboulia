@@ -90,7 +90,7 @@ from euboulia.optimization.workspace import (
     PatchRejected,
     WorkspaceError,
 )
-from euboulia.run_identity import new_run_uid, normalize_run_name
+from euboulia.run_identity import new_run_uid, normalize_run_name, normalize_run_uid
 
 
 class OptimizationRuntimeError(RuntimeError):
@@ -232,12 +232,13 @@ class OptimizationRunner:
         config: OptimizationConfig,
         *,
         name: str | None = None,
+        run_uid: str | None = None,
     ) -> BaselineValidationResult:
         """Build, start, validate, measure, and stop exactly one declared baseline."""
 
         require_optimization_execution_lock(config)
         selected_name = normalize_run_name(name)
-        run_uid = new_run_uid()
+        selected_run_uid = new_run_uid() if run_uid is None else normalize_run_uid(run_uid)
         target = config.target
         workspace_config = config.optimization.workspace
         if target is None:
@@ -245,7 +246,7 @@ class OptimizationRunner:
         if workspace_config is None:
             raise OptimizationRuntimeError("optimization.workspace is required for validation")
 
-        artifact_dir = config.execution.artifacts_dir / run_uid / "target-validation"
+        artifact_dir = config.execution.artifacts_dir / selected_run_uid / "target-validation"
         if artifact_dir.exists() or artifact_dir.is_symlink():
             raise OptimizationRuntimeError(
                 f"validation artifact path already exists: {artifact_dir}"
@@ -268,7 +269,7 @@ class OptimizationRunner:
         target_spec = _profile_target_spec(config, provenance_record)
         workspace = GitWorktreeWorkspace.create(
             workspace_config.repository,
-            workspace_config.root_dir / run_uid / "validation" / "baseline",
+            workspace_config.root_dir / selected_run_uid / "validation" / "baseline",
             revision=config.baseline.source_revision,
             timeout_seconds=workspace_config.timeout_seconds,
         )
@@ -280,7 +281,7 @@ class OptimizationRunner:
             target_spec,
             TargetChangeSet(),
             artifact_dir / "service",
-            run_uid=run_uid,
+            run_uid=selected_run_uid,
             trial_id="baseline-validation",
         )
         evaluation: TieredEvaluationResult | WorkloadSuiteEvaluationResult | None = None
@@ -288,7 +289,7 @@ class OptimizationRunner:
         try:
             controller.wait_ready(handle)
             context = StageContext(
-                run_uid=run_uid,
+                run_uid=selected_run_uid,
                 iteration_id="target-validation",
                 artifact_dir=artifact_dir,
                 authorizations=frozenset(
@@ -340,7 +341,7 @@ class OptimizationRunner:
             raise AssertionError("baseline validation completed without a profile")
         result = BaselineValidationResult(
             name=selected_name,
-            run_uid=run_uid,
+            run_uid=selected_run_uid,
             profile=profile,
             evaluation=evaluation,
             workspace_path=workspace.path,

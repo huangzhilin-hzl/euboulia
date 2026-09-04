@@ -93,6 +93,19 @@ uv run euboulia optimize plan \
   --recipe examples/optimization-sglang.yaml
 ```
 
+Run a locked target scenario in a configured Kubernetes Pod while keeping canonical
+records locally:
+
+```console
+uv run euboulia target run \
+  --recipe examples/scenarios/dsv4-megamoe.lock.yaml \
+  --executor h20-pod \
+  --name dsv4-baseline
+```
+
+Configure Pod coordinates and local storage in `~/.config/euboulia/config.yaml`; see
+`examples/runtime/kubernetes.yaml`. Scenario recipes do not contain local result paths.
+
 An active managed run has five independent permissions:
 
 ```console
