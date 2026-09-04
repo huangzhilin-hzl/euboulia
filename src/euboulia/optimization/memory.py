@@ -24,6 +24,26 @@ class SQLiteMemoryStore:
     """
 
     SCHEMA_VERSION = 2
+    SCHEMA_COLUMNS = (
+        "memory_id",
+        "outcome_id",
+        "run_uid",
+        "iteration_id",
+        "framework",
+        "framework_revision",
+        "hardware_fingerprint",
+        "model_revision",
+        "workload_digest",
+        "benchmark_policy_digest",
+        "spec_digest",
+        "compatibility_digest",
+        "proposal_id",
+        "outcome",
+        "patch_digest",
+        "relative_improvement",
+        "created_at",
+        "entry_json",
+    )
 
     def __init__(
         self,
@@ -45,14 +65,20 @@ class SQLiteMemoryStore:
     def _initialize(self) -> None:
         with self._connect() as connection:
             current = cast(int, connection.execute("PRAGMA user_version").fetchone()[0])
-            if current != self.SCHEMA_VERSION:
+            existing_columns = tuple(
+                cast(str, row[1])
+                for row in connection.execute("PRAGMA table_info(memory_entries)").fetchall()
+            )
+            if current != self.SCHEMA_VERSION or (
+                existing_columns and existing_columns != self.SCHEMA_COLUMNS
+            ):
                 connection.execute("DROP TABLE IF EXISTS memory_entries")
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS memory_entries (
                     memory_id TEXT PRIMARY KEY,
                     outcome_id TEXT NOT NULL UNIQUE,
-                    run_id TEXT NOT NULL,
+                    run_uid TEXT NOT NULL,
                     iteration_id TEXT NOT NULL,
                     framework TEXT NOT NULL,
                     framework_revision TEXT NOT NULL,
@@ -61,7 +87,6 @@ class SQLiteMemoryStore:
                     workload_digest TEXT NOT NULL,
                     benchmark_policy_digest TEXT NOT NULL,
                     spec_digest TEXT NOT NULL,
-                    run_uid TEXT NOT NULL,
                     compatibility_digest TEXT NOT NULL,
                     proposal_id TEXT NOT NULL,
                     outcome TEXT NOT NULL,
@@ -120,7 +145,7 @@ class SQLiteMemoryStore:
             INSERT OR IGNORE INTO memory_entries (
                 memory_id,
                 outcome_id,
-                run_id,
+                run_uid,
                 iteration_id,
                 framework,
                 framework_revision,
@@ -129,7 +154,6 @@ class SQLiteMemoryStore:
                 workload_digest,
                 benchmark_policy_digest,
                 spec_digest,
-                run_uid,
                 compatibility_digest,
                 proposal_id,
                 outcome,
@@ -137,12 +161,12 @@ class SQLiteMemoryStore:
                 relative_improvement,
                 created_at,
                 entry_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 entry.memory_id,
                 entry.outcome_id,
-                entry.run_id,
+                entry.run_uid,
                 entry.iteration_id,
                 entry.framework,
                 entry.framework_revision,
@@ -151,7 +175,6 @@ class SQLiteMemoryStore:
                 entry.workload_digest,
                 entry.benchmark_policy_digest,
                 entry.spec_digest,
-                entry.run_uid,
                 entry.compatibility_digest,
                 entry.proposal_id,
                 entry.outcome.value,

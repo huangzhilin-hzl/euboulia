@@ -217,8 +217,7 @@ uv run euboulia target resolve \
   --output scenario.lock.yaml
 
 uv run euboulia target run \
-  --recipe scenario.lock.yaml \
-  --prepare-workspace --run-profiles --run-builds --manage-services --run-evaluations
+  --recipe scenario.lock.yaml
 ```
 
 The lock file must be written beside its template so relative paths keep the same
@@ -228,9 +227,15 @@ runtime revision. Each model must provide either a full revision commit or a non
 weights-manifest SHA-256. Source-backed runtime components must declare `dirty: false`;
 declared accelerator model/count and local node count are checked generically against
 the captured host inventory.
+
+`target run` always creates a fresh detached worktree, runs declared build commands
+when present, owns the SGLang service lifecycle, captures the configured profile, and
+executes the qualification evaluation. These are fixed command semantics rather than
+separate authorization flags.
+
 reviewed candidate patches remain separate experiment inputs. Every active run writes
 the exact bound document to
-`<artifacts>/<run-id>/resolved-recipe.yaml` (or the target-validation subdirectory for
+`<artifacts>/<run-uid>/resolved-recipe.yaml` (or the target-validation subdirectory for
 `target run`); configuration digests and memory identity are calculated from that
 resolved content, not from template text or the values file.
 
@@ -277,7 +282,7 @@ Schema v3 separates four identity roles:
 | --- | --- | --- |
 | Display alias | Optional `name` | Never enters a semantic digest |
 | Content identity | Versioned `spec_digest` plus model/workload/protocol/runtime/hardware digests | Exact recall |
-| Execution identity | Generated `run_uid` (`run_id` compatibility name) | Audit and artifact lineage only |
+| Execution identity | Generated time-sortable ULID `run_uid` | Audit and artifact lineage only |
 | Compatibility | Structured hard/soft facets and a hard-facet digest | Cross-workload RSI recall |
 
 Model, suite, baseline, and point names are optional. The `id` field is not accepted.
@@ -294,8 +299,13 @@ workload from permanently suppressing a valid experiment in the current scenario
 Hard facets include framework, model content, declared accelerator topology,
 derived launch semantics, container identity, and runtime-component ABI.
 SQLite memory is a disposable projection of canonical events and artifacts. A
-database whose schema version does not match the runtime is dropped and rebuilt
-empty; no in-place schema migration or legacy-ID fallback is performed.
+database whose schema version or columns do not match the runtime is dropped and
+rebuilt empty; no in-place schema migration or legacy-ID fallback is performed.
+
+Every `run` command creates a new `run_uid`, even when multiple executions share the
+same optional `--name`. Resume is deliberately unavailable until event replay can
+restore service, workspace, budget, and iteration state safely; a repeated display
+name never implies resume or overwrite.
 
 See [examples/optimization-sglang.yaml](../examples/optimization-sglang.yaml) for a
 complete shape.
@@ -453,10 +463,10 @@ to prevent a second, drifting copy of launch state.
 <artifacts>/
 ├── events.jsonl
 ├── memory.sqlite3
-└── <run-id>/
+└── <run-uid>/
     └── evaluations/<trial-id>/
 
-<workspace-root>/<run-id>/<iteration-id>/
+<workspace-root>/<run-uid>/<iteration-id>/
 ├── baseline/{worktree,evidence}/
 └── candidate/{worktree,evidence}/
 ```
@@ -465,7 +475,8 @@ Inspect events with:
 
 ```console
 uv run euboulia optimize events \
-  --events <artifacts>/events.jsonl
+  --events <artifacts>/events.jsonl \
+  --run-uid <run-uid>
 ```
 
 The event log and linked artifacts are the audit source. SQLite is a rebuildable

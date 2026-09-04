@@ -26,7 +26,7 @@ def entry(
     return MemoryEntry(
         memory_id=memory_id,
         outcome_id=f"outcome-{memory_id}",
-        run_id="run-1",
+        run_uid="run-1",
         iteration_id=f"iteration-{memory_id}",
         framework="vllm",
         framework_revision=framework_revision,
@@ -35,7 +35,6 @@ def entry(
         workload_digest="workload-a",
         benchmark_policy_digest="policy-a",
         spec_digest=spec_digest,
-        run_uid="run-uid-1",
         compatibility_digest=compatibility_digest,
         compatibility_facets={
             "framework": "vllm",
@@ -163,7 +162,7 @@ def test_v1_memory_is_discarded_instead_of_migrated(tmp_path: Path) -> None:
             """
             CREATE TABLE memory_entries (
                 memory_id TEXT PRIMARY KEY, outcome_id TEXT NOT NULL UNIQUE,
-                run_id TEXT NOT NULL, iteration_id TEXT NOT NULL,
+                run_uid TEXT NOT NULL, iteration_id TEXT NOT NULL,
                 framework TEXT NOT NULL, framework_revision TEXT NOT NULL,
                 hardware_fingerprint TEXT NOT NULL, model_revision TEXT NOT NULL,
                 workload_digest TEXT NOT NULL, benchmark_policy_digest TEXT NOT NULL,
@@ -177,7 +176,7 @@ def test_v1_memory_is_discarded_instead_of_migrated(tmp_path: Path) -> None:
             (
                 legacy.memory_id,
                 legacy.outcome_id,
-                legacy.run_id,
+                legacy.run_uid,
                 legacy.iteration_id,
                 legacy.framework,
                 legacy.framework_revision,

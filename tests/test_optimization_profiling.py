@@ -59,7 +59,7 @@ def _execution(tmp_path: Path) -> ExecutionResult:
 
 def _context(tmp_path: Path) -> StageContext:
     return StageContext(
-        run_id="run",
+        run_uid="run",
         iteration_id="iteration",
         artifact_dir=tmp_path,
         authorizations=frozenset(

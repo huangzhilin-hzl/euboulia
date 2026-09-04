@@ -100,7 +100,7 @@ def _target_spec(workspace: Path, port: int, *, ignore_term: bool = False) -> Ta
         launch_argv=tuple(argv),
         launch_env={
             "EUBOULIA_DECLARED": "present",
-            "EUBOULIA_CONTEXT": "{workspace}|{model}|{endpoint}|{run_id}|{trial_id}",
+            "EUBOULIA_CONTEXT": "{workspace}|{model}|{endpoint}|{run_uid}|{trial_id}",
         },
         endpoint=endpoint,
         readiness=ReadinessSpec(
@@ -189,7 +189,7 @@ def test_start_wait_ready_and_stop_preserve_owned_evidence(
         spec,
         changes,
         tmp_path / "evidence",
-        run_id="run-1",
+        run_uid="run-1",
         trial_id="candidate-1",
     )
     try:
@@ -243,7 +243,7 @@ def test_non_sglang_entrypoint_is_rejected_before_process_start(tmp_path: Path) 
             spec,
             TargetChangeSet(),
             tmp_path / "evidence",
-            run_id="run",
+            run_uid="run",
             trial_id="trial",
         )
 
@@ -278,7 +278,7 @@ def test_start_terminates_owned_process_if_initial_manifest_cannot_be_written(
             spec,
             TargetChangeSet(),
             tmp_path / "evidence",
-            run_id="run-manifest-failure",
+            run_uid="run-manifest-failure",
             trial_id="trial-manifest-failure",
         )
 
@@ -297,7 +297,7 @@ def test_handles_are_instance_owned_unforgeable_single_use_capabilities(tmp_path
         spec,
         TargetChangeSet(),
         tmp_path / "evidence",
-        run_id="run-owned",
+        run_uid="run-owned",
         trial_id="trial-owned",
     )
     try:
@@ -317,7 +317,7 @@ def test_handles_are_instance_owned_unforgeable_single_use_capabilities(tmp_path
             spec,
             TargetChangeSet(),
             tmp_path / "evidence-2",
-            run_id="run-owned",
+            run_uid="run-owned",
             trial_id="trial-owned",
         )
 
@@ -332,7 +332,7 @@ def test_stop_escalates_only_owned_process_group_after_timeout(tmp_path: Path) -
         spec,
         TargetChangeSet(),
         tmp_path / "evidence",
-        run_id="run-timeout",
+        run_uid="run-timeout",
         trial_id="trial-timeout",
     )
     controller.wait_ready(handle)

@@ -58,7 +58,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     plan_parser = subparsers.add_parser("plan", help="render a recipe without executing it")
     _add_recipe_argument(plan_parser)
-    plan_parser.add_argument("--run-id", default="preview", help="artifact path label")
     plan_parser.add_argument("--json", action="store_true", help="emit machine-readable JSON")
     plan_parser.set_defaults(handler=_plan)
 
@@ -75,7 +74,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="explicitly retain the default non-executing behavior",
     )
-    run_parser.add_argument("--run-id", help="optional deterministic run identifier")
+    run_parser.add_argument("--name", help="optional human-readable run name")
     run_parser.add_argument("--json", action="store_true", help="emit machine-readable JSON")
     run_parser.set_defaults(handler=_run)
 
@@ -116,7 +115,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_recipe_argument(optimize_run_parser)
     _add_values_argument(optimize_run_parser)
-    optimize_run_parser.add_argument("--run-id", help="optional deterministic run identifier")
+    optimize_run_parser.add_argument("--name", help="optional human-readable run name")
     optimize_run_parser.add_argument(
         "--apply-patches",
         action="store_true",
@@ -151,7 +150,7 @@ def build_parser() -> argparse.ArgumentParser:
         "events", help="inspect the append-only optimization event stream"
     )
     optimize_events_parser.add_argument("--events", required=True, type=Path)
-    optimize_events_parser.add_argument("--run-id")
+    optimize_events_parser.add_argument("--run-uid")
     optimize_events_parser.add_argument(
         "--limit", type=_positive_integer, default=50, help="latest events to show"
     )
@@ -186,12 +185,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_recipe_argument(target_run_parser)
     _add_values_argument(target_run_parser)
-    target_run_parser.add_argument("--run-id")
-    target_run_parser.add_argument("--prepare-workspace", action="store_true")
-    target_run_parser.add_argument("--run-profiles", action="store_true")
-    target_run_parser.add_argument("--run-evaluations", action="store_true")
-    target_run_parser.add_argument("--run-builds", action="store_true")
-    target_run_parser.add_argument("--manage-services", action="store_true")
+    target_run_parser.add_argument("--name", help="optional human-readable run name")
     target_run_parser.add_argument("--json", action="store_true")
     target_run_parser.set_defaults(handler=_target_run)
     return parser
@@ -236,7 +230,7 @@ def _doctor(args: argparse.Namespace) -> int:
 
 def _plan(args: argparse.Namespace) -> int:
     config = load_recipe(args.recipe)
-    plans = plan_recipe(config, run_id=args.run_id)
+    plans = plan_recipe(config)
     if args.json:
         _print_json({"recipe": config.name, "plans": [plan.to_dict() for plan in plans]})
     else:
@@ -246,7 +240,7 @@ def _plan(args: argparse.Namespace) -> int:
 
 def _run(args: argparse.Namespace) -> int:
     config = load_recipe(args.recipe)
-    result = run_recipe(config, execute=args.execute, run_id=args.run_id)
+    result = run_recipe(config, execute=args.execute, name=args.name)
     if args.json:
         _print_json(result.to_dict())
     elif not result.executed:
@@ -340,12 +334,13 @@ def _optimize_run(args: argparse.Namespace) -> int:
     result = OptimizationRunner().run(
         config,
         frozenset(authorizations),
-        run_id=args.run_id,
+        name=args.name,
     )
     if args.json:
         _print_json(result.to_dict())
     else:
-        print(f"Optimization run: {result.run_id}")
+        if result.name is not None:
+            print(f"Name: {result.name}")
         print(f"Run UID: {result.run_uid}")
         print(f"State: {result.run_state.value}")
         print(f"Champion: {result.champion_id}")
@@ -376,7 +371,7 @@ def _optimize_run(args: argparse.Namespace) -> int:
 
 def _optimize_events(args: argparse.Namespace) -> int:
     ledger = EventLedger(args.events, create_parents=False)
-    events = ledger.by_run(args.run_id) if args.run_id else ledger.read_all()
+    events = ledger.by_run(args.run_uid) if args.run_uid else ledger.read_all()
     selected = events[-args.limit :]
     if args.json:
         _print_json([event.to_dict() for event in selected])
@@ -385,7 +380,7 @@ def _optimize_events(args: argparse.Namespace) -> int:
     else:
         for event in selected:
             iteration = event.iteration_id or "-"
-            print(f"{event.occurred_at}  {event.run_id}  {iteration}  {event.event_type.value}")
+            print(f"{event.occurred_at}  {event.run_uid}  {iteration}  {event.event_type.value}")
     return 0
 
 
@@ -429,7 +424,6 @@ def _target_plan(args: argparse.Namespace) -> int:
         _print_unresolved_resolution(resolution, as_json=args.json)
         return 0
     config = resolution.config
-    required = OptimizationRunner.baseline_validation_capabilities(config)
     profile_plan = OptimizationRunner().plan(config).profile_plan
     lock_issues = optimization_execution_lock_issues(config)
     payload = {
@@ -438,7 +432,6 @@ def _target_plan(args: argparse.Namespace) -> int:
         "endpoint": config.endpoint,
         "workload_points": len(config.workload_suite.points),
         "profile_plan": dict(profile_plan),
-        "required_capabilities": [capability.value for capability in required],
         "launch_argv": list(config.target_launch_argv),
         "resolved": True,
         "bound_inputs": sorted(resolution.bindings),
@@ -460,33 +453,21 @@ def _target_plan(args: argparse.Namespace) -> int:
         print(f"Execution ready: {'yes' if not lock_issues else 'no'}")
         for issue in lock_issues:
             print(f"Lock issue: {issue}")
-        print("Required capabilities: " + ", ".join(item.value for item in required))
         print("\nRead-only plan. No worktree, build, service, profile, or benchmark was created.")
     return 0
 
 
 def _target_run(args: argparse.Namespace) -> int:
     config = load_optimization_config(args.recipe, args.values)
-    authorizations: set[Capability] = set()
-    if args.prepare_workspace:
-        authorizations.add(Capability.WORKSPACE_WRITE)
-    if args.run_profiles:
-        authorizations.add(Capability.PROFILE_EXECUTION)
-    if args.run_evaluations:
-        authorizations.add(Capability.BENCHMARK_EXECUTION)
-    if args.run_builds:
-        authorizations.add(Capability.BUILD_EXECUTION)
-    if args.manage_services:
-        authorizations.add(Capability.OWNED_SERVICE_LIFECYCLE)
     result = OptimizationRunner().validate_baseline(
         config,
-        frozenset(authorizations),
-        run_id=args.run_id,
+        name=args.name,
     )
     if args.json:
         _print_json(result.to_dict())
     else:
-        print(f"Target validation: {result.run_id}")
+        if result.name is not None:
+            print(f"Name: {result.name}")
         print(f"Run UID: {result.run_uid}")
         print(f"Profile: {result.profile.profile_id}")
         print(f"Outcome: {result.evaluation.outcome.value}")
@@ -526,7 +507,9 @@ def _print_plan(name: str, plans: Sequence[Any]) -> None:
 
 
 def _print_run_summary(ledger: Path, result: RecipeRunResult) -> None:
-    print(f"Run: {result.run_id}")
+    if result.name is not None:
+        print(f"Name: {result.name}")
+    print(f"Run UID: {result.run_uid}")
     print(
         f"Experiments: {len(result.experiments)}; accepted={result.accepted}; "
         f"rejected={result.rejected}; failed={result.failed}"

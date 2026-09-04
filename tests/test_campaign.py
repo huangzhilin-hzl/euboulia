@@ -106,7 +106,20 @@ def test_plan_is_side_effect_free_and_redacts_environment(tmp_path: Path) -> Non
     plans = plan_campaign(config, adapter=FakeAdapter())
 
     assert plans[0].candidate.environment == {"TEST_SECRET": "<redacted>"}
+    assert plans[0].run_uid is None
     assert not config.execution.artifacts_dir.exists()
+
+
+def test_repeated_display_name_gets_distinct_run_uids(tmp_path: Path) -> None:
+    config = campaign_config(tmp_path)
+
+    first = run_campaign(config, name="baseline", adapter=FakeAdapter())
+    second = run_campaign(config, name="baseline", adapter=FakeAdapter())
+
+    assert first.name == second.name == "baseline"
+    assert first.run_uid.startswith("run-")
+    assert second.run_uid.startswith("run-")
+    assert first.run_uid != second.run_uid
 
 
 def test_run_records_baseline_and_accepted_candidate(tmp_path: Path) -> None:
@@ -116,7 +129,7 @@ def test_run_records_baseline_and_accepted_candidate(tmp_path: Path) -> None:
         config,
         execute=True,
         adapter=FakeAdapter(),
-        run_id="test-run",
+        name="test-run",
     )
 
     assert result.accepted == 1
@@ -145,7 +158,7 @@ def test_invalid_baseline_cancels_remaining_candidates(tmp_path: Path) -> None:
         config,
         execute=True,
         adapter=FakeAdapter(),
-        run_id="bad-baseline",
+        name="bad-baseline",
     )
 
     assert result.stopped_reason == "baseline correctness gate failed"
@@ -161,7 +174,7 @@ def test_lifecycle_command_is_plan_only(tmp_path: Path) -> None:
             config,
             execute=True,
             adapter=FakeAdapter(manages_service_lifecycle=True),
-            run_id="blocked",
+            name="blocked",
         )
 
     assert not config.execution.artifacts_dir.exists()

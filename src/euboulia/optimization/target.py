@@ -398,7 +398,7 @@ class TargetSpec:
             "workspace": "/workspace",
             "model": self.model,
             "endpoint": self.endpoint,
-            "run_id": "run",
+            "run_uid": "run",
             "trial_id": "trial",
         }
         for index, token in enumerate(self.launch_argv):
@@ -478,7 +478,7 @@ class ServiceHandle:
     pid: int
     process_group_id: int
     process_start_identity: str
-    run_id: str
+    run_uid: str
     trial_id: str
     argv_digest: str
     endpoint: str
@@ -505,7 +505,7 @@ class ServiceHandle:
             "pid": self.pid,
             "process_group_id": self.process_group_id,
             "process_start_identity": self.process_start_identity,
-            "run_id": self.run_id,
+            "run_uid": self.run_uid,
             "trial_id": self.trial_id,
             "argv_digest": self.argv_digest,
             "endpoint": self.endpoint,
@@ -534,7 +534,7 @@ class TargetController(Protocol):
         change_set: TargetChangeSet,
         evidence_dir: str | os.PathLike[str],
         *,
-        run_id: str,
+        run_uid: str,
         trial_id: str,
     ) -> ServiceHandle: ...
 
@@ -644,7 +644,7 @@ class SGLangTargetController:
         change_set: TargetChangeSet,
         evidence_dir: str | os.PathLike[str],
         *,
-        run_id: str,
+        run_uid: str,
         trial_id: str,
     ) -> ServiceHandle:
         """Start one SGLang server in a new session and issue its signed handle."""
@@ -653,7 +653,7 @@ class SGLangTargetController:
             raise TypeError("spec must be a TargetSpec")
         if not isinstance(change_set, TargetChangeSet):
             raise TypeError("change_set must be a TargetChangeSet")
-        normalized_run = _nonempty(run_id, "run_id")
+        normalized_run = _nonempty(run_uid, "run_uid")
         normalized_trial = _nonempty(trial_id, "trial_id")
         trial_key = (normalized_run, normalized_trial)
         if any(not state.stopped for state in self._services.values()):
@@ -671,7 +671,7 @@ class SGLangTargetController:
             "workspace": str(workspace_path),
             "model": spec.model,
             "endpoint": spec.endpoint,
-            "run_id": normalized_run,
+            "run_uid": normalized_run,
             "trial_id": normalized_trial,
         }
         patched_argv = change_set.arg_patch.apply(spec.launch_argv)
@@ -724,7 +724,7 @@ class SGLangTargetController:
                 {
                     "schema_version": 1,
                     "status": "launch_failed",
-                    "run_id": normalized_run,
+                    "run_uid": normalized_run,
                     "trial_id": normalized_trial,
                     "argv": list(argv),
                     "argv_digest": argv_digest,
@@ -744,7 +744,7 @@ class SGLangTargetController:
             pid=process.pid,
             process_group_id=process_group_id,
             process_start_identity=process_start_identity,
-            run_id=normalized_run,
+            run_uid=normalized_run,
             trial_id=normalized_trial,
             argv_digest=argv_digest,
             endpoint=spec.endpoint,

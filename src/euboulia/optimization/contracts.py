@@ -215,14 +215,14 @@ def _required_integer(value: object, name: str) -> int:
 
 @dataclass(frozen=True, slots=True)
 class StageContext:
-    run_id: str
+    run_uid: str
     iteration_id: str
     artifact_dir: Path
     authorizations: frozenset[Capability] = frozenset()
     input_digest: str | None = None
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "run_id", _nonempty(self.run_id, "run_id"))
+        object.__setattr__(self, "run_uid", _nonempty(self.run_uid, "run_uid"))
         object.__setattr__(self, "iteration_id", _nonempty(self.iteration_id, "iteration_id"))
         object.__setattr__(self, "artifact_dir", Path(self.artifact_dir))
         object.__setattr__(self, "authorizations", frozenset(self.authorizations))
@@ -338,13 +338,13 @@ class ChangeProposal:
 
 @dataclass(frozen=True, slots=True)
 class WorkspaceRequest:
-    run_id: str
+    run_uid: str
     iteration_id: str
     base_revision: str
     proposal: ChangeProposal
 
     def __post_init__(self) -> None:
-        for name in ("run_id", "iteration_id", "base_revision"):
+        for name in ("run_uid", "iteration_id", "base_revision"):
             object.__setattr__(self, name, _nonempty(getattr(self, name), name))
 
 
@@ -449,7 +449,7 @@ class EvaluationResult:
 @dataclass(frozen=True, slots=True)
 class IterationOutcome:
     outcome_id: str
-    run_id: str
+    run_uid: str
     iteration_id: str
     proposal_id: str
     status: OutcomeStatus
@@ -465,7 +465,7 @@ class IterationOutcome:
     def __post_init__(self) -> None:
         for name in (
             "outcome_id",
-            "run_id",
+            "run_uid",
             "iteration_id",
             "proposal_id",
             "summary",
@@ -498,7 +498,7 @@ class IterationOutcome:
     def to_dict(self) -> dict[str, JSONValue]:
         return {
             "outcome_id": self.outcome_id,
-            "run_id": self.run_id,
+            "run_uid": self.run_uid,
             "iteration_id": self.iteration_id,
             "proposal_id": self.proposal_id,
             "status": self.status.value,
@@ -517,7 +517,7 @@ class IterationOutcome:
 class MemoryEntry:
     memory_id: str
     outcome_id: str
-    run_id: str
+    run_uid: str
     iteration_id: str
     framework: str
     framework_revision: str
@@ -526,7 +526,6 @@ class MemoryEntry:
     workload_digest: str
     benchmark_policy_digest: str
     spec_digest: str
-    run_uid: str
     compatibility_digest: str
     proposal_id: str
     outcome: OutcomeStatus
@@ -541,7 +540,7 @@ class MemoryEntry:
         for name in (
             "memory_id",
             "outcome_id",
-            "run_id",
+            "run_uid",
             "iteration_id",
             "framework",
             "framework_revision",
@@ -550,7 +549,6 @@ class MemoryEntry:
             "workload_digest",
             "benchmark_policy_digest",
             "spec_digest",
-            "run_uid",
             "compatibility_digest",
             "proposal_id",
             "summary",
@@ -578,7 +576,7 @@ class MemoryEntry:
         return {
             "memory_id": self.memory_id,
             "outcome_id": self.outcome_id,
-            "run_id": self.run_id,
+            "run_uid": self.run_uid,
             "iteration_id": self.iteration_id,
             "framework": self.framework,
             "framework_revision": self.framework_revision,
@@ -587,7 +585,6 @@ class MemoryEntry:
             "workload_digest": self.workload_digest,
             "benchmark_policy_digest": self.benchmark_policy_digest,
             "spec_digest": self.spec_digest,
-            "run_uid": self.run_uid,
             "compatibility_digest": self.compatibility_digest,
             "compatibility_facets": dict(self.compatibility_facets),
             "proposal_id": self.proposal_id,
@@ -620,7 +617,7 @@ class MemoryEntry:
         return cls(
             memory_id=_nonempty(value.get("memory_id"), "memory_id"),
             outcome_id=_nonempty(value.get("outcome_id"), "outcome_id"),
-            run_id=_nonempty(value.get("run_id"), "run_id"),
+            run_uid=_nonempty(value.get("run_uid"), "run_uid"),
             iteration_id=_nonempty(value.get("iteration_id"), "iteration_id"),
             framework=_nonempty(value.get("framework"), "framework"),
             framework_revision=_nonempty(value.get("framework_revision"), "framework_revision"),
@@ -633,7 +630,6 @@ class MemoryEntry:
                 value.get("benchmark_policy_digest"), "benchmark_policy_digest"
             ),
             spec_digest=_nonempty(value.get("spec_digest"), "spec_digest"),
-            run_uid=_nonempty(value.get("run_uid"), "run_uid"),
             compatibility_digest=_nonempty(
                 value.get("compatibility_digest"), "compatibility_digest"
             ),

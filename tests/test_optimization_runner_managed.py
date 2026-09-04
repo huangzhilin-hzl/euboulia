@@ -382,7 +382,7 @@ class FakeTargetController:
         change_set: TargetChangeSet,
         evidence_dir: Path,
         *,
-        run_id: str,
+        run_uid: str,
         trial_id: str,
     ) -> ServiceHandle:
         role = self._role(workspace)
@@ -404,7 +404,7 @@ class FakeTargetController:
             pid=10_000 + sequence,
             process_group_id=10_000 + sequence,
             process_start_identity=f"fake-start-{sequence}",
-            run_id=run_id,
+            run_uid=run_uid,
             trial_id=trial_id,
             argv_digest=f"fake-argv-{sequence}",
             endpoint=spec.endpoint,
@@ -481,7 +481,7 @@ def test_managed_args_only_trial_uses_fresh_services_and_measured_baseline(
     result = _runner(config, controller).run(
         config,
         _ALL_MANAGED_CAPABILITIES,
-        run_id="managed-accepted",
+        name="managed-accepted",
     )
 
     assert result.run_state is RunState.COMPLETED
@@ -545,7 +545,7 @@ def test_managed_args_only_trial_uses_fresh_services_and_measured_baseline(
     assert controller.stop_counts == Counter({"profile": 1, "baseline": 1, "candidate": 1})
     service_events = [
         (event.event_type, event.payload.get("role"))
-        for event in EventLedger(config.execution.event_ledger).by_run(result.run_id)
+        for event in EventLedger(config.execution.event_ledger).by_run(result.run_uid)
         if event.event_type
         in {
             EventType.SERVICE_STARTING,
@@ -580,14 +580,13 @@ def test_target_validation_runs_one_baseline_without_candidate(tmp_path: Path) -
 
     result = _runner(config, controller).validate_baseline(
         config,
-        _ALL_MANAGED_CAPABILITIES,
-        run_id="baseline-only",
+        name="baseline-only",
     )
 
     assert result.passed is True
     assert result.profile.provider == "sglang_torch"
     assert result.run_uid.startswith("run-")
-    assert result.run_uid != result.run_id
+    assert result.name == "baseline-only"
     assert result.evaluation.objective_value == 106.0
     assert controller.calls == [
         "build:baseline",
@@ -604,6 +603,21 @@ def test_target_validation_runs_one_baseline_without_candidate(tmp_path: Path) -
     assert (result.artifact_dir / "logs" / "server.log").is_file()
 
 
+def test_repeated_name_keeps_content_identity_but_gets_distinct_run_uids(
+    tmp_path: Path,
+) -> None:
+    config = _managed_project(tmp_path)
+
+    first = _runner(config, FakeTargetController()).run(config, name="same-baseline")
+    second = _runner(config, FakeTargetController()).run(config, name="same-baseline")
+
+    assert first.name == second.name == "same-baseline"
+    assert first.run_uid != second.run_uid
+    assert first.identity.spec_digest == second.identity.spec_digest
+    assert (config.execution.artifacts_dir / first.run_uid).is_dir()
+    assert (config.execution.artifacts_dir / second.run_uid).is_dir()
+
+
 def test_managed_v3_runs_two_points_per_service_and_captures_runtime(
     tmp_path: Path,
 ) -> None:
@@ -613,7 +627,7 @@ def test_managed_v3_runs_two_points_per_service_and_captures_runtime(
     result = _runner(config, controller).run(
         config,
         _ALL_MANAGED_CAPABILITIES,
-        run_id="managed-v3-suite",
+        name="managed-v3-suite",
     )
 
     assert result.outcomes[0].accepted is True
@@ -628,7 +642,7 @@ def test_managed_v3_runs_two_points_per_service_and_captures_runtime(
     second_stages = candidate["point_results"]["long-c8"]["stages"]
     correctness_stage = next(stage for stage in second_stages if stage["stage"] == "correctness")
     assert correctness_stage["executions"] == []
-    events = EventLedger(config.execution.event_ledger).by_run(result.run_id)
+    events = EventLedger(config.execution.event_ledger).by_run(result.run_uid)
     runtime_events = [
         event for event in events if event.event_type is EventType.RUNTIME_PROVENANCE_CAPTURED
     ]
@@ -637,7 +651,7 @@ def test_managed_v3_runs_two_points_per_service_and_captures_runtime(
     assert controller.calls.count("start:baseline") == 1
     assert controller.calls.count("start:candidate") == 1
     summaries = tuple(
-        (config.execution.artifacts_dir / result.run_id / "evaluations").glob(
+        (config.execution.artifacts_dir / result.run_uid / "evaluations").glob(
             "*/evaluation-summary.json"
         )
     )
@@ -676,13 +690,13 @@ entries:
     result = _runner(config, controller).run(
         config,
         _ALL_MANAGED_CAPABILITIES,
-        run_id="managed-composite",
+        name="managed-composite",
     )
 
     assert result.outcomes[0].accepted is True
     workspace = config.optimization.workspace
     assert workspace is not None
-    candidate = workspace.root_dir / "managed-composite/iteration-001/candidate/worktree"
+    candidate = workspace.root_dir / result.run_uid / "iteration-001/candidate/worktree"
     assert (candidate / "source.txt").read_text(encoding="utf-8") == "candidate source\n"
     assert (workspace.repository / "source.txt").read_text(encoding="utf-8") == (
         "same pinned source\n"
@@ -714,14 +728,14 @@ def test_missing_managed_capability_waits_before_workspace_or_controller_call(
     result = _runner(config, controller).run(
         config,
         _ALL_MANAGED_CAPABILITIES - {missing},
-        run_id=f"missing-{missing.value}",
+        name=f"missing-{missing.value}",
     )
 
     assert result.run_state is RunState.WAITING_FOR_APPROVAL
     assert result.iteration_state is None
     assert controller.calls == []
     assert not workspace.root_dir.exists()
-    latest = EventLedger(config.execution.event_ledger).latest(result.run_id)
+    latest = EventLedger(config.execution.event_ledger).latest(result.run_uid)
     assert latest is not None
     assert latest.event_type is EventType.APPROVAL_REQUESTED
     assert latest.payload["missing_capabilities"] == [missing.value]
@@ -756,7 +770,7 @@ def test_managed_candidate_failure_stops_current_handle_exactly_once(
         _runner(config, controller).run(
             config,
             _ALL_MANAGED_CAPABILITIES,
-            run_id=f"candidate-{failure_stage}-failure",
+            name=f"candidate-{failure_stage}-failure",
         )
 
     assert controller.stop_counts == Counter({"profile": 1, "baseline": 1, "candidate": 1})
@@ -774,7 +788,7 @@ def test_baseline_stop_failure_prevents_candidate_start(tmp_path: Path) -> None:
         _runner(config, controller).run(
             config,
             _ALL_MANAGED_CAPABILITIES,
-            run_id="baseline-stop-failure",
+            name="baseline-stop-failure",
         )
 
     assert controller.calls == [

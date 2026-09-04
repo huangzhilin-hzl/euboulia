@@ -74,6 +74,6 @@ def test_run_rejects_external_profile_before_writing(tmp_path: Path) -> None:
     config = load_optimization_config(_external_config(tmp_path))
 
     with pytest.raises(OptimizationRuntimeError, match="managed SGLang target"):
-        OptimizationRunner().run(config, run_id="external")
+        OptimizationRunner().run(config, name="external")
 
     assert not config.execution.artifacts_dir.exists()
