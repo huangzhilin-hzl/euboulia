@@ -186,6 +186,19 @@ inputs:
   sglang_revision:
     type: git_commit
     required: true
+  sglang_repository:
+    type: string
+    required: true
+  sglang_ref:
+    type: string
+    required: true
+
+sources:
+  sglang:
+    repository: ${sglang_repository}
+    ref: ${sglang_ref}
+    revision: ${sglang_revision}
+    submodules: true
 
 baseline:
   source_revision: ${sglang_revision}
@@ -197,7 +210,12 @@ target:
         image: ${container_image}
       components:
         sglang:
+          source: sglang
           revision: ${sglang_revision}
+
+optimization:
+  workspace:
+    source: sglang
 ```
 
 Input references must occupy an entire YAML scalar. Supported types are `string`,
@@ -206,6 +224,12 @@ Input references must occupy an entire YAML scalar. Supported types are `string`
 `container_digest` requires an immutable `repository@sha256:...` reference. All-zero
 commit and digest placeholders are rejected.
 
+Each managed Git source has an independent repository, full branch/tag ref, and
+immutable revision. The ref preserves selection intent; execution always checks out
+the revision. Build commands can address dependency worktrees with placeholders such
+as `{source.deepgemm}`. Repository credentials remain in the Git credential helper or
+executor-mounted secrets and are rejected when embedded in an HTTP URL.
+
 `target plan` and `optimize plan` may inspect an unresolved template and report its
 missing inputs. Active runs reject missing bindings before creating events, memory,
 worktrees, or artifacts. Bind values directly with `--values`, or create a lock recipe:
@@ -213,11 +237,11 @@ worktrees, or artifacts. Bind values directly with `--values`, or create a lock 
 ```console
 uv run euboulia target resolve \
   --recipe scenario.yaml \
-  --values ~/.local/share/euboulia/experiments/h20-baseline/values.yaml \
-  --output ~/.local/share/euboulia/experiments/h20-baseline/recipe.lock.yaml
+  --values ~/julian/euboulia-data/experiments/h20-baseline/values.yaml \
+  --output ~/julian/euboulia-data/experiments/h20-baseline/recipe.lock.yaml
 
 uv run euboulia target run \
-  --recipe ~/.local/share/euboulia/experiments/h20-baseline/recipe.lock.yaml \
+  --recipe ~/julian/euboulia-data/experiments/h20-baseline/recipe.lock.yaml \
   --executor h20-pod
 ```
 
@@ -376,7 +400,8 @@ writing to the detached candidate tree.
 
 For every iteration:
 
-1. Create a baseline worktree at `baseline.source_revision`.
+1. Fetch declared sources into the worker cache and create isolated baseline
+   worktrees at their locked revisions.
 2. Build it when `target.build.commands` is present.
 3. Start a fresh SGLang process and wait for the declared loopback readiness URL.
 4. Run correctness once and evaluate every workload point.
@@ -469,7 +494,9 @@ fixed unless one of those is the variable under test.
 
 `target.runtime.expected` can pin the image and components such as Python, SGLang,
 Torch, CUDA, NCCL, Triton, FlashInfer, DeepGEMM, DeepEP, and `sgl-kernel`. The runner
-captures observable state before launch and can fail on a mismatch.
+captures observable state before launch and can fail on a mismatch. A component with
+`source: <name>` is observed from that run's isolated source worktree rather than a
+fixed Pod path.
 
 Some values, such as a container digest, may be declared but unobservable from a
 local process. `capture.require_observed` decides whether that absence is fatal;

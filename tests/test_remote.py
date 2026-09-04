@@ -68,9 +68,13 @@ def test_worker_recipe_is_resolved_and_contains_no_host_storage_or_values_path(
             {
                 "container_image": "registry.example/dsv4@sha256:" + "a" * 64,
                 "deepgemm_revision": "c" * 40,
+                "deepgemm_repository": "https://example.invalid/deepgemm.git",
+                "deepgemm_ref": "refs/heads/deepgemm-test",
                 "lm_eval_version": "0.4.9.2",
                 "model_revision": "d" * 40,
                 "sglang_revision": "b" * 40,
+                "sglang_repository": "https://example.invalid/sglang.git",
+                "sglang_ref": "refs/heads/sglang-test",
             }
         ),
         encoding="utf-8",
@@ -95,6 +99,7 @@ def test_worker_recipe_is_resolved_and_contains_no_host_storage_or_values_path(
     assert document["target"]["runtime"]["expected"]["container"]["image"] == (
         "registry.example/dsv4@sha256:" + "a" * 64
     )
+    assert document["sources"]["sglang"]["ref"] == "refs/heads/sglang-test"
     assert str(values) not in supervisor._worker_recipe(config)
 
 
@@ -106,10 +111,10 @@ def test_worker_recipe_maps_relative_project_paths_to_the_pod_checkout(
         (repository / "examples/scenarios/dsv4-megamoe.yaml").read_text(encoding="utf-8")
     )
     document["optimization"]["planner"]["patch_catalog"] = "catalog.yaml"
+    document["optimization"]["workspace"].pop("source")
     document["optimization"]["workspace"]["repository"] = "SGLang"
-    document["target"]["runtime"]["expected"]["components"]["sglang"]["path"] = (
-        "SGLang"
-    )
+    document["target"]["runtime"]["expected"]["components"]["sglang"].pop("source")
+    document["target"]["runtime"]["expected"]["components"]["sglang"]["path"] = "SGLang"
     recipe = tmp_path / "scenario.yaml"
     recipe.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
     values = tmp_path / "values.yaml"
@@ -118,9 +123,13 @@ def test_worker_recipe_maps_relative_project_paths_to_the_pod_checkout(
             {
                 "container_image": "registry.example/dsv4@sha256:" + "a" * 64,
                 "deepgemm_revision": "c" * 40,
+                "deepgemm_repository": "https://example.invalid/deepgemm.git",
+                "deepgemm_ref": "refs/heads/deepgemm-test",
                 "lm_eval_version": "0.4.9.2",
                 "model_revision": "d" * 40,
                 "sglang_revision": "b" * 40,
+                "sglang_repository": "https://example.invalid/sglang.git",
+                "sglang_ref": "refs/heads/sglang-test",
             }
         ),
         encoding="utf-8",
@@ -136,12 +145,11 @@ def test_worker_recipe_maps_relative_project_paths_to_the_pod_checkout(
     assert worker["optimization"]["planner"]["patch_catalog"] == (
         "/workspace/euboulia/catalog.yaml"
     )
-    assert worker["optimization"]["workspace"]["repository"] == (
-        "/workspace/euboulia/SGLang"
+    assert worker["optimization"]["workspace"]["repository"] == ("/workspace/euboulia/SGLang")
+    assert (
+        worker["target"]["runtime"]["expected"]["components"]["sglang"]["path"]
+        == "/workspace/euboulia/SGLang"
     )
-    assert worker["target"]["runtime"]["expected"]["components"]["sglang"][
-        "path"
-    ] == "/workspace/euboulia/SGLang"
 
 
 def test_stage_recipe_streams_only_the_lock_and_verifies_its_digest(
@@ -195,9 +203,7 @@ def test_stage_recipe_streams_only_the_lock_and_verifies_its_digest(
     assert observed["input"] == contents
     assert observed["shell"] is False
     assert "values" not in " ".join(argv)
-    assert (
-        local_run_dir / "control" / "recipe-stage.stdout.log"
-    ).stat().st_mode & 0o777 == 0o600
+    assert (local_run_dir / "control" / "recipe-stage.stdout.log").stat().st_mode & 0o777 == 0o600
 
 
 @pytest.mark.parametrize(("worker_passed", "returncode"), [(True, 0), (False, 1)])
@@ -300,9 +306,7 @@ def test_remote_supervisor_keeps_completed_results_locally(
     assert result.artifact_manifest_path.is_file()
     assert result.memory_path.is_file()
     local_recipe = result.local_run_dir / "inputs/recipe.lock.yaml"
-    assert local_recipe.read_text(encoding="utf-8") == (
-        "schema_version: 3\nname: private-test\n"
-    )
+    assert local_recipe.read_text(encoding="utf-8") == ("schema_version: 3\nname: private-test\n")
     assert local_recipe.stat().st_mode & 0o777 == 0o600
     run_record = json.loads((result.local_run_dir / "run.json").read_text(encoding="utf-8"))
     assert run_record["local_recipe"] == str(local_recipe)
@@ -369,9 +373,7 @@ def test_artifact_manifest_rejects_a_corrupted_snapshot(tmp_path: Path) -> None:
             snapshot,
             tmp_path / "manifest.json",
             executor=_executor(tmp_path),
-            remote_run_dir=PurePosixPath(
-                "/home/admin/.cache/euboulia/runs/" + run_uid
-            ),
+            remote_run_dir=PurePosixPath("/home/admin/.cache/euboulia/runs/" + run_uid),
             run_uid=run_uid,
         )
 

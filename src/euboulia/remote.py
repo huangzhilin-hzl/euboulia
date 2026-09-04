@@ -42,9 +42,7 @@ class ArtifactSyncPolicy:
 
     def __post_init__(self) -> None:
         if self.raw_profiles not in {"on_demand", "always"}:
-            raise RemoteConfigError(
-                "storage.sync.raw_profiles must be 'on_demand' or 'always'"
-            )
+            raise RemoteConfigError("storage.sync.raw_profiles must be 'on_demand' or 'always'")
 
 
 @dataclass(frozen=True, slots=True)
@@ -313,11 +311,7 @@ class KubernetesTargetSupervisor:
                 remote_workspace_root=remote_workspace_root,
                 local_run_dir=local_run_dir,
             )
-            if (
-                worker.error is None
-                and not worker.timed_out
-                and worker.returncode in {0, 1}
-            ):
+            if worker.error is None and not worker.timed_out and worker.returncode in {0, 1}:
                 worker_payload = _read_last_json_object(worker.stdout_path)
                 if worker_payload.get("run_uid") != run_uid:
                     raise RemoteExecutionError("remote worker returned a different run_uid")
@@ -462,7 +456,10 @@ class KubernetesTargetSupervisor:
         workspace = optimization.get("workspace")
         if isinstance(workspace, dict):
             workspace.pop("root_dir", None)
-            if config.optimization.workspace is not None:
+            if (
+                config.optimization.workspace is not None
+                and config.optimization.workspace.repository is not None
+            ):
                 rewrite_project_path(
                     ("optimization", "workspace", "repository"),
                     config.optimization.workspace.repository,
@@ -659,9 +656,7 @@ print(hashlib.sha256(data).hexdigest())
         try:
             relative = path.resolve().relative_to(project)
         except ValueError as exc:
-            raise RemoteConfigError(
-                f"{path} is outside local project directory {project}"
-            ) from exc
+            raise RemoteConfigError(f"{path} is outside local project directory {project}") from exc
         return self.executor.project_dir.joinpath(*relative.parts)
 
 
@@ -680,9 +675,7 @@ def write_worker_artifact_index(run_dir: Path, run_uid: str) -> Path:
                     "path": relative,
                     "sha256": _sha256(path),
                     "size_bytes": path.stat().st_size,
-                    "retention": (
-                        "remote_only" if _is_raw_profile_path(relative) else "local"
-                    ),
+                    "retention": ("remote_only" if _is_raw_profile_path(relative) else "local"),
                 }
             )
     destination = run_dir / "artifact-index.json"
@@ -741,12 +734,8 @@ def _parse_executor(
         pod=_string(raw.get("pod"), f"executors.{name}.pod"),
         container=_optional_string(raw.get("container"), f"executors.{name}.container"),
         context=_optional_string(raw.get("context"), f"executors.{name}.context"),
-        project_dir=PurePosixPath(
-            _string(raw.get("project_dir"), f"executors.{name}.project_dir")
-        ),
-        scratch_dir=PurePosixPath(
-            _string(raw.get("scratch_dir"), f"executors.{name}.scratch_dir")
-        ),
+        project_dir=PurePosixPath(_string(raw.get("project_dir"), f"executors.{name}.project_dir")),
+        scratch_dir=PurePosixPath(_string(raw.get("scratch_dir"), f"executors.{name}.scratch_dir")),
         local_project_dir=(
             None
             if local_project_value is None
@@ -838,18 +827,14 @@ def _write_local_artifact_manifest(
             or expected_size < 0
             or retention not in {"local", "remote_only"}
         ):
-            raise RemoteExecutionError(
-                f"artifact index has invalid metadata for {relative}"
-            )
+            raise RemoteExecutionError(f"artifact index has invalid metadata for {relative}")
         if retention == "local" and not synced:
             raise RemoteExecutionError(f"required artifact was not synchronized: {relative}")
         if synced:
             actual_size = local_path.stat().st_size
             actual_sha256 = _sha256(local_path)
             if actual_size != expected_size or actual_sha256 != expected_sha256:
-                raise RemoteExecutionError(
-                    f"artifact digest mismatch for {relative}"
-                )
+                raise RemoteExecutionError(f"artifact digest mismatch for {relative}")
         artifacts.append(
             {
                 "path": relative,
@@ -888,10 +873,7 @@ def _kubernetes_uri(
     path: PurePosixPath,
 ) -> str:
     container = "" if executor.container is None else f"/{executor.container}"
-    return (
-        f"kubernetes://{executor.namespace}/{executor.pod}{container}"
-        f"{path.as_posix()}"
-    )
+    return f"kubernetes://{executor.namespace}/{executor.pod}{container}{path.as_posix()}"
 
 
 def _read_last_json_object(path: Path) -> Mapping[str, JSONValue]:
@@ -960,8 +942,7 @@ def _sha256(path: Path) -> str:
 def _is_raw_profile_path(path: str) -> bool:
     parts = PurePosixPath(path).parts
     return any(
-        parts[index : index + 2] == ("profile", "raw")
-        for index in range(max(0, len(parts) - 1))
+        parts[index : index + 2] == ("profile", "raw") for index in range(max(0, len(parts) - 1))
     )
 
 

@@ -10,10 +10,8 @@ Run the Euboulia controller locally and configure a worker in the declared singl
 H20 Pod. Before execution, the Pod must provide:
 
 - `/home/admin/model/DeepSeek-V4-Flash-0731` contains the local model;
-- `/home/admin/src/dsv4-megamoe/SGLang` is a clean clone containing the exact commit
-  selected in the values file;
-- `/home/admin/src/dsv4-megamoe/DeepGEMM` is a clean clone containing the exact commit
-  selected in the values file;
+- Git can authenticate to every private repository through a credential helper or
+  executor-mounted secret; credentials must not appear in values or the lock;
 - `lm_eval` with API extras is installed in the image at the exact version selected
   in the values file; and
 - the same Euboulia checkout is available at the executor's `project_dir`.
@@ -24,14 +22,20 @@ platform:
 
 ```yaml
 container_image: acr.example/sglang/deepep-base@sha256:<64-hex-digest>
+deepgemm_repository: https://github.com/example/DeepGEMM.git
+deepgemm_ref: refs/heads/my-deepgemm-branch
 deepgemm_revision: <40-or-64-hex-commit>
 lm_eval_version: <installed-lm-evaluation-harness-version>
 model_revision: <40-or-64-hex-model-revision>
+sglang_repository: https://example.com/team/SGLang.git
+sglang_ref: refs/heads/my-sglang-branch
 sglang_revision: <40-or-64-hex-commit>
 ```
 
 A container cannot portably infer its own registry digest, so Euboulia never invents
-one or treats an image tag as immutable identity.
+one or treats an image tag as immutable identity. A source `repository` says where to
+fetch, `ref` records the selected branch or tag, and `revision` is the immutable commit
+that is actually executed. The two repositories and refs are independent.
 
 ## Execution boundary
 
@@ -47,11 +51,11 @@ revision, and 30 workload points:
 ```console
 uv run euboulia target resolve \
   --recipe examples/scenarios/dsv4-megamoe.yaml \
-  --values ~/.local/share/euboulia/experiments/dsv4-baseline/values.yaml \
-  --output ~/.local/share/euboulia/experiments/dsv4-baseline/recipe.lock.yaml
+  --values ~/julian/euboulia-data/experiments/dsv4-megamoe/values.yaml \
+  --output ~/julian/euboulia-data/experiments/dsv4-megamoe/recipe.lock.yaml
 
 uv run euboulia target plan \
-  --recipe ~/.local/share/euboulia/experiments/dsv4-baseline/recipe.lock.yaml
+  --recipe ~/julian/euboulia-data/experiments/dsv4-megamoe/recipe.lock.yaml
 ```
 
 The recipe does not hand-maintain model, suite, baseline, or point IDs. Euboulia
@@ -63,7 +67,7 @@ After review, execute exactly one baseline (no generated candidate):
 
 ```console
 uv run euboulia target run \
-  --recipe ~/.local/share/euboulia/experiments/dsv4-baseline/recipe.lock.yaml \
+  --recipe ~/julian/euboulia-data/experiments/dsv4-megamoe/recipe.lock.yaml \
   --executor h20-pod \
   --name dsv4-megamoe-baseline
 ```
@@ -82,9 +86,10 @@ scenario.
 time-sortable ULID `run_uid` used by artifacts, workspaces, service manifests, and
 event correlation.
 
-The lock requires an immutable commit before the detached worktree is created. SGLang
-is installed editable from that worktree with `--no-deps`;
-DeepGEMM is installed last. Euboulia starts a new process group and can stop only
+The lock requires an immutable commit for each source. The worker fetches each ref
+into a reusable Pod-local cache, checks out the locked commits into separate per-run
+worktrees, installs SGLang editable with `--no-deps`, and installs DeepGEMM from its
+own worktree last. Euboulia starts a new process group and can stop only
 that signed, owned process. It never discovers or kills an existing server.
 
 `target run` profiles the owned baseline before its unprofiled matrix;
@@ -131,6 +136,7 @@ The automatically synchronized `artifacts/target-validation` snapshot contains
 owned service logs, per-command evidence, and these files:
 
 - `logs/server.log` and `runtime-provenance.json`;
+- `sources/source-sglang.json` and `sources/source-deepgemm.json` with fetch evidence;
 - `profile/summary.json` and `profile/manifest.json`;
 - per-point `evaluation.json` and `benchmark-windows.json`;
 - the generic `evaluation-summary.json` for the complete lane;

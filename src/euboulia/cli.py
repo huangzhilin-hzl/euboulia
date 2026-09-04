@@ -205,12 +205,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="local runtime config (default: ~/.config/euboulia/config.yaml)",
     )
     target_run_parser.add_argument("--internal-run-uid", help=argparse.SUPPRESS)
-    target_run_parser.add_argument(
-        "--internal-artifacts-root", type=Path, help=argparse.SUPPRESS
-    )
-    target_run_parser.add_argument(
-        "--internal-workspace-root", type=Path, help=argparse.SUPPRESS
-    )
+    target_run_parser.add_argument("--internal-artifacts-root", type=Path, help=argparse.SUPPRESS)
+    target_run_parser.add_argument("--internal-workspace-root", type=Path, help=argparse.SUPPRESS)
     target_run_parser.add_argument("--json", action="store_true")
     target_run_parser.set_defaults(handler=_target_run)
 
@@ -332,9 +328,7 @@ def _history(args: argparse.Namespace) -> int:
 
 
 def _optimize_plan(args: argparse.Namespace) -> int:
-    resolution = resolve_optimization_config(
-        args.recipe, args.values, allow_unresolved=True
-    )
+    resolution = resolve_optimization_config(args.recipe, args.values, allow_unresolved=True)
     if resolution.config is None:
         _print_unresolved_resolution(resolution, as_json=args.json)
         return 0
@@ -456,9 +450,7 @@ def _target_resolve(args: argparse.Namespace) -> int:
 
 
 def _target_plan(args: argparse.Namespace) -> int:
-    resolution = resolve_optimization_config(
-        args.recipe, args.values, allow_unresolved=True
-    )
+    resolution = resolve_optimization_config(args.recipe, args.values, allow_unresolved=True)
     if resolution.config is None:
         _print_unresolved_resolution(resolution, as_json=args.json)
         return 0
@@ -468,6 +460,15 @@ def _target_plan(args: argparse.Namespace) -> int:
     payload = {
         "recipe": config.name,
         "source_revision": config.baseline.source_revision,
+        "sources": {
+            name: {
+                "repository": source.repository,
+                "ref": source.ref,
+                "revision": source.revision,
+                "submodules": source.submodules,
+            }
+            for name, source in sorted(config.sources.items())
+        },
         "endpoint": config.endpoint,
         "workload_points": len(config.workload_suite.points),
         "profile_plan": dict(profile_plan),
@@ -482,6 +483,8 @@ def _target_plan(args: argparse.Namespace) -> int:
     else:
         print(f"Target validation: {config.name}")
         print(f"Revision: {config.baseline.source_revision}")
+        for source_name, source in sorted(config.sources.items()):
+            print(f"Source {source_name}: {source.repository} {source.ref} @ {source.revision}")
         print(f"Endpoint: {config.endpoint}")
         print(f"Workload points: {len(config.workload_suite.points)}")
         print(

@@ -2,13 +2,14 @@
 # ds-v4-flash-dspark-cp8-tp8-ep8_megamoe_test_plan.md
 #
 # The local controller may execute this recipe through a configured Kubernetes
-# executor. The Pod must contain the model, SGLang, DeepGEMM, and this checkout.
+# executor. The Pod must contain the model and this checkout; declared Git sources
+# are fetched into per-run isolated worktrees by the worker.
 # Inspect required bindings without side effects:
 #   euboulia target plan --recipe examples/scenarios/dsv4-megamoe.yaml
 # Bind the immutable image, model, SGLang, and DeepGEMM identities before execution:
 #   euboulia target resolve --recipe examples/scenarios/dsv4-megamoe.yaml \
-#     --values ~/.local/share/euboulia/experiments/dsv4-baseline/values.yaml \
-#     --output ~/.local/share/euboulia/experiments/dsv4-baseline/recipe.lock.yaml
+#     --values ~/julian/euboulia-data/experiments/dsv4-megamoe/values.yaml \
+#     --output ~/julian/euboulia-data/experiments/dsv4-megamoe/recipe.lock.yaml
 schema_version: 3
 name: ds-v4-flash-dspark-cp8-tp8-ep8-megamoe
 framework: sglang
@@ -20,6 +21,12 @@ inputs:
   deepgemm_revision:
     type: git_commit
     required: true
+  deepgemm_repository:
+    type: string
+    required: true
+  deepgemm_ref:
+    type: string
+    required: true
   model_revision:
     type: git_commit
     required: true
@@ -29,6 +36,23 @@ inputs:
   sglang_revision:
     type: git_commit
     required: true
+  sglang_repository:
+    type: string
+    required: true
+  sglang_ref:
+    type: string
+    required: true
+
+sources:
+  sglang:
+    repository: ${sglang_repository}
+    ref: ${sglang_ref}
+    revision: ${sglang_revision}
+    submodules: true
+  deepgemm:
+    repository: ${deepgemm_repository}
+    ref: ${deepgemm_ref}
+    revision: ${deepgemm_revision}
 
 models:
   target:
@@ -104,7 +128,7 @@ target:
         argv: [python3, -m, pip, uninstall, -y, sgl-deep-gemm, deep-gemm]
         timeout_seconds: 300
       - name: install-pinned-deepgemm
-        argv: [/usr/bin/env, -C, /home/admin/src/dsv4-megamoe/DeepGEMM, DG_FORCE_BUILD=1, bash, ./install.sh]
+        argv: [/usr/bin/env, -C, "{source.deepgemm}", DG_FORCE_BUILD=1, bash, ./install.sh]
         timeout_seconds: 3600
   launch:
     python: python3
@@ -178,11 +202,11 @@ target:
         image: ${container_image}
       components:
         sglang:
-          path: /home/admin/src/dsv4-megamoe/SGLang
+          source: sglang
           revision: ${sglang_revision}
           dirty: false
         deepgemm:
-          path: /home/admin/src/dsv4-megamoe/DeepGEMM
+          source: deepgemm
           revision: ${deepgemm_revision}
           dirty: false
         lm-eval:
@@ -217,7 +241,7 @@ optimization:
     patch_catalog: dsv4-megamoe-catalog.yaml
     max_proposals_per_iteration: 1
   workspace:
-    repository: /home/admin/src/dsv4-megamoe/SGLang
+    source: sglang
     timeout_seconds: 300
     max_patch_bytes: 262144
     max_changed_files: 8
