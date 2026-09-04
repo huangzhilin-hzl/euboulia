@@ -58,8 +58,9 @@ benchmark:
   base_args: []
   result_filename: result.json
   parameters:
-    temperature: 0
     seed: 42
+    random_range_ratio: 0
+    flush_cache: true
 
 baseline:
   name: baseline

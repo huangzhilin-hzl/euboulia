@@ -125,6 +125,49 @@ def test_benchmark_environment_uses_served_name_and_finite_request_rate() -> Non
     assert command[command.index("--request-rate") + 1] == "12.5"
 
 
+def test_benchmark_parameters_drive_seed_range_and_cache_policy() -> None:
+    settings = BenchmarkSettings.from_environment(
+        {
+            "EUBOULIA_TARGET_ENDPOINT": "http://127.0.0.1:30000",
+            "EUBOULIA_MODEL": "/models/target",
+            "EUBOULIA_INPUT_TOKENS": "1024",
+            "EUBOULIA_OUTPUT_TOKENS": "256",
+            "EUBOULIA_CONCURRENCY": "8",
+            "EUBOULIA_NUM_PROMPTS": "32",
+            "EUBOULIA_DATASET": "random",
+            "EUBOULIA_REPETITIONS": "3",
+            "EUBOULIA_BENCHMARK_PARAMETERS": json.dumps(
+                {"seed": 7, "random_range_ratio": 0.25, "flush_cache": False}
+            ),
+        }
+    )
+
+    command = settings.command(Path("sample.jsonl"))
+
+    assert command[command.index("--seed") + 1] == "7"
+    assert command[command.index("--random-range-ratio") + 1] == "0.25"
+    assert "--flush-cache" not in command
+
+
+def test_benchmark_parameters_reject_non_executable_labels() -> None:
+    environment = {
+        "EUBOULIA_TARGET_ENDPOINT": "http://127.0.0.1:30000",
+        "EUBOULIA_MODEL": "/models/target",
+        "EUBOULIA_INPUT_TOKENS": "1024",
+        "EUBOULIA_OUTPUT_TOKENS": "256",
+        "EUBOULIA_CONCURRENCY": "8",
+        "EUBOULIA_NUM_PROMPTS": "32",
+        "EUBOULIA_DATASET": "random",
+        "EUBOULIA_REPETITIONS": "3",
+        "EUBOULIA_BENCHMARK_PARAMETERS": json.dumps(
+            {"protocol": "fixed-random-cache-clean"}
+        ),
+    }
+
+    with pytest.raises(BenchmarkHarnessError, match="unsupported benchmark parameter"):
+        BenchmarkSettings.from_environment(environment)
+
+
 def test_benchmark_discards_warmups_and_writes_median_metrics(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -255,7 +298,9 @@ def test_random_ids_uses_standard_random_length_options() -> None:
             "EUBOULIA_NUM_PROMPTS": "16",
             "EUBOULIA_DATASET": "random-ids",
             "EUBOULIA_REPETITIONS": "1",
-            "EUBOULIA_RANDOM_RANGE_RATIO": "0",
+            "EUBOULIA_BENCHMARK_PARAMETERS": json.dumps(
+                {"random_range_ratio": 0}
+            ),
         }
     )
 
