@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shlex
 import sys
 from collections.abc import Callable, Sequence
@@ -433,14 +434,12 @@ def _target_resolve(args: argparse.Namespace) -> int:
         raise OptimizationRuntimeError("target configuration is required for target resolve")
     require_optimization_execution_lock(config)
     output = args.output.expanduser().resolve()
-    if output.parent != resolution.source.parent:
-        raise OptimizationConfigError(
-            "target resolve output must be in the recipe directory so relative paths "
-            "retain their meaning"
-        )
     if output.exists() or output.is_symlink():
         raise FileExistsError(f"resolved recipe already exists: {output}")
-    output.write_text(dump_resolved_optimization_config(config), encoding="utf-8")
+    _write_private_text(
+        output,
+        dump_resolved_optimization_config(config, destination=output),
+    )
     payload = {
         "recipe": resolution.name,
         "resolved": True,
@@ -517,8 +516,7 @@ def _target_run(args: argparse.Namespace) -> int:
             runtime.executor(args.executor),
             runtime.storage,
         ).run(
-            args.recipe,
-            values=args.values,
+            config,
             name=args.name,
         )
         if args.json:
@@ -602,6 +600,24 @@ def _print_unresolved_resolution(
     print(f"Recipe template: {resolution.name}")
     print("Missing required inputs: " + ", ".join(resolution.missing_inputs))
     print("Provide --values or run 'euboulia target resolve' before execution.")
+
+
+def _write_private_text(path: Path, value: str) -> None:
+    """Create a local-only experiment input without group or world access."""
+
+    parent_existed = path.parent.exists()
+    path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+    if not parent_existed:
+        path.parent.chmod(0o700)
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(value)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except BaseException:
+        path.unlink(missing_ok=True)
+        raise
 
 
 def _print_plan(name: str, plans: Sequence[Any]) -> None:

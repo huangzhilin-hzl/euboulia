@@ -213,21 +213,35 @@ worktrees, or artifacts. Bind values directly with `--values`, or create a lock 
 ```console
 uv run euboulia target resolve \
   --recipe scenario.yaml \
-  --values h20-values.yaml \
-  --output scenario.lock.yaml
+  --values ~/.local/share/euboulia/experiments/h20-baseline/values.yaml \
+  --output ~/.local/share/euboulia/experiments/h20-baseline/recipe.lock.yaml
 
 uv run euboulia target run \
-  --recipe scenario.lock.yaml \
+  --recipe ~/.local/share/euboulia/experiments/h20-baseline/recipe.lock.yaml \
   --executor h20-pod
 ```
 
-The lock file must be written beside its template so relative paths keep the same
-meaning. It contains concrete values and no `inputs` section. Managed schema-v3 runs
-also require an image digest, a full baseline Git commit, and a matching pinned SGLang
-runtime revision. Each model must provide either a full revision commit or a non-zero
-weights-manifest SHA-256. Source-backed runtime components must declare `dirty: false`;
-declared accelerator model/count and local node count are checked generically against
-the captured host inventory.
+Values and lock files are private experiment inputs. Keep them under a local experiment
+directory outside the checkout, with one directory per experiment; both common filename
+forms are also ignored by Git as a second line of defense. `target resolve` creates the
+lock with mode `0600` and rebases source-relative references, so the lock no longer has
+to sit beside its template. It contains concrete values and no `inputs` section.
+
+The recommended local layout is:
+
+```text
+~/.config/euboulia/config.yaml
+~/.local/share/euboulia/experiments/<experiment>/values.yaml
+~/.local/share/euboulia/experiments/<experiment>/recipe.lock.yaml
+~/.local/share/euboulia/runs/<run-uid>/
+~/.local/share/euboulia/memory.sqlite3
+```
+
+Managed schema-v3 runs also require an image digest, a full baseline Git commit, and a
+matching pinned SGLang runtime revision. Each model must provide either a full revision
+commit or a non-zero weights-manifest SHA-256. Source-backed runtime components must
+declare `dirty: false`; declared accelerator model/count and local node count are checked
+generically against the captured host inventory.
 
 `target run` always creates a fresh detached worktree, runs declared build commands
 when present, owns the SGLang service lifecycle, captures the configured profile, and
@@ -238,10 +252,13 @@ For remote execution, executor coordinates and canonical storage are host policy
 scenario content. Put them in `~/.config/euboulia/config.yaml` (see
 `examples/runtime/kubernetes.yaml`) and select the executor with `--executor`. The
 local supervisor generates `run_uid`, records start/completion events immediately,
-runs the worker inside the Pod, and always attempts artifact retrieval on success or
-failure. It writes `run.json`, `events.jsonl`, `summary.json`, and
-`artifact-manifest.json` under `<storage.root>/runs/<run-uid>`. Raw profiles remain
-remote unless the sync policy is `always` or `target artifacts pull` is used.
+materializes the fully resolved recipe under the private local run directory, and sends
+only that recipe to `<scratch_dir>/runs/<run-uid>/inputs/recipe.lock.yaml`. The original
+values file and host runtime config never enter the Pod. The supervisor then runs the
+worker and always attempts artifact retrieval on success or failure. It writes
+`run.json`, `events.jsonl`, `summary.json`, and `artifact-manifest.json` under
+`<storage.root>/runs/<run-uid>`. Raw profiles remain remote unless the sync policy is
+`always` or `target artifacts pull` is used.
 
 Pre-reviewed candidate patches remain separate experiment inputs. Every active run writes
 the exact bound document to

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import os
@@ -238,23 +239,28 @@ class KubernetesTargetSupervisor:
 
     def run(
         self,
-        recipe: Path,
+        config: OptimizationConfig,
         *,
-        values: Path | None,
         name: str | None,
     ) -> RemoteTargetRunResult:
         selected_name = normalize_run_name(name)
         run_uid = new_run_uid()
         local_run_dir = self.storage.runs_dir / run_uid
-        local_run_dir.mkdir(parents=True, exist_ok=False)
+        local_run_dir.mkdir(parents=True, mode=0o700, exist_ok=False)
         SQLiteMemoryStore(self.storage.memory_path)
         events_path = local_run_dir / "events.jsonl"
         ledger = EventLedger(events_path, fsync=True)
         remote_runs_root = self.executor.scratch_dir / "runs"
         remote_run_dir = remote_runs_root / run_uid
+        remote_recipe = remote_run_dir / "inputs" / "recipe.lock.yaml"
         remote_workspace_root = self.executor.scratch_dir / "worktrees"
         summary_path = local_run_dir / "summary.json"
         manifest_path = local_run_dir / "artifact-manifest.json"
+        worker_recipe = self._worker_recipe(config)
+        worker_recipe_bytes = worker_recipe.encode("utf-8")
+        worker_recipe_sha256 = hashlib.sha256(worker_recipe_bytes).hexdigest()
+        local_recipe = local_run_dir / "inputs" / "recipe.lock.yaml"
+        _write_private_bytes(local_recipe, worker_recipe_bytes)
         started_at = utc_now()
         base_record: dict[str, JSONValue] = {
             "schema_version": 1,
@@ -265,6 +271,9 @@ class KubernetesTargetSupervisor:
             "namespace": self.executor.namespace,
             "pod": self.executor.pod,
             "container": self.executor.container,
+            "local_recipe": str(local_recipe),
+            "remote_recipe": str(remote_recipe),
+            "recipe_sha256": worker_recipe_sha256,
             "remote_run_dir": str(remote_run_dir),
             "started_at": started_at,
             "status": "running",
@@ -289,9 +298,15 @@ class KubernetesTargetSupervisor:
         worker_payload: Mapping[str, JSONValue] | None = None
         error: str | None = None
         try:
+            self._stage_recipe(
+                remote_run_dir,
+                remote_recipe,
+                worker_recipe_bytes,
+                worker_recipe_sha256,
+                local_run_dir,
+            )
             worker = self._run_worker(
-                recipe.resolve(),
-                values=None if values is None else values.resolve(),
+                remote_recipe,
                 name=selected_name,
                 run_uid=run_uid,
                 remote_runs_root=remote_runs_root,
@@ -407,18 +422,142 @@ class KubernetesTargetSupervisor:
             include_raw_profiles=True,
         )
 
+    def _worker_recipe(self, config: OptimizationConfig) -> str:
+        """Build the fully resolved recipe consumed by the Pod worker."""
+
+        document = copy.deepcopy(dict(config.resolved_document))
+        document.pop("execution", None)
+
+        def rewrite_project_path(
+            keys: tuple[str, ...],
+            resolved: Path,
+            *,
+            field: str,
+        ) -> None:
+            current: object = document
+            for key in keys[:-1]:
+                if not isinstance(current, dict):
+                    return
+                current = current.get(key)
+            if not isinstance(current, dict):
+                return
+            raw = current.get(keys[-1])
+            if not isinstance(raw, str):
+                return
+            project = self.executor.local_project_dir or _discover_project_root(resolved)
+            try:
+                relative = resolved.resolve().relative_to(project)
+            except ValueError as exc:
+                if not Path(raw).expanduser().is_absolute():
+                    raise RemoteConfigError(
+                        f"{field} resolves outside local project directory {project}; "
+                        "only the resolved recipe is staged remotely"
+                    ) from exc
+                return
+            current[keys[-1]] = str(self.executor.project_dir.joinpath(*relative.parts))
+
+        optimization = document.get("optimization")
+        if not isinstance(optimization, dict):  # pragma: no cover - config is validated
+            raise RemoteConfigError("resolved recipe has no optimization mapping")
+        workspace = optimization.get("workspace")
+        if isinstance(workspace, dict):
+            workspace.pop("root_dir", None)
+            if config.optimization.workspace is not None:
+                rewrite_project_path(
+                    ("optimization", "workspace", "repository"),
+                    config.optimization.workspace.repository,
+                    field="optimization.workspace.repository",
+                )
+        planner = optimization.get("planner")
+        if not isinstance(planner, dict):  # pragma: no cover - config is validated
+            raise RemoteConfigError("resolved recipe has no planner mapping")
+        rewrite_project_path(
+            ("optimization", "planner", "patch_catalog"),
+            config.optimization.planner.patch_catalog,
+            field="optimization.planner.patch_catalog",
+        )
+        if config.target is not None and config.target.runtime is not None:
+            for name, component in config.target.runtime.expected.components.items():
+                if component.path is not None:
+                    rewrite_project_path(
+                        ("target", "runtime", "expected", "components", name, "path"),
+                        component.path,
+                        field=f"target.runtime.expected.components.{name}.path",
+                    )
+        return yaml.safe_dump(document, allow_unicode=True, sort_keys=False)
+
+    def _stage_recipe(
+        self,
+        remote_run_dir: PurePosixPath,
+        remote_recipe: PurePosixPath,
+        contents: bytes,
+        expected_sha256: str,
+        local_run_dir: Path,
+    ) -> None:
+        """Create one private, immutable Pod input without transferring values files."""
+
+        writer = """\
+import hashlib
+import os
+from pathlib import Path
+import sys
+
+data = sys.stdin.buffer.read()
+run_dir = Path(sys.argv[1])
+recipe = Path(sys.argv[2])
+run_dir.parent.mkdir(parents=True, exist_ok=True)
+run_dir.mkdir(mode=0o700, exist_ok=False)
+recipe.parent.mkdir(mode=0o700)
+descriptor = os.open(recipe, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+with os.fdopen(descriptor, "wb") as handle:
+    handle.write(data)
+    handle.flush()
+    os.fsync(handle.fileno())
+print(hashlib.sha256(data).hexdigest())
+"""
+        argv = [
+            *self._kubectl_exec_prefix(stdin=True),
+            self.executor.python,
+            "-c",
+            writer,
+            str(remote_run_dir),
+            str(remote_recipe),
+        ]
+        try:
+            completed = subprocess.run(
+                argv,
+                input=contents,
+                capture_output=True,
+                timeout=120,
+                check=False,
+                shell=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise RemoteExecutionError("timed out while staging the remote recipe") from exc
+        except OSError as exc:
+            raise RemoteExecutionError(f"cannot stage the remote recipe: {exc}") from exc
+        control = local_run_dir / "control"
+        _write_private_bytes(control / "recipe-stage.stdout.log", completed.stdout)
+        _write_private_bytes(control / "recipe-stage.stderr.log", completed.stderr)
+        if completed.returncode != 0:
+            detail = completed.stderr.decode("utf-8", errors="replace").strip()
+            raise RemoteExecutionError(
+                f"remote recipe staging exited with status {completed.returncode}: {detail}"
+            )
+        observed_sha256 = completed.stdout.decode("ascii", errors="strict").strip()
+        if observed_sha256 != expected_sha256:
+            raise RemoteExecutionError("remote recipe digest does not match the local input")
+
     def _run_worker(
         self,
-        recipe: Path,
+        remote_recipe: PurePosixPath,
         *,
-        values: Path | None,
         name: str | None,
         run_uid: str,
         remote_runs_root: PurePosixPath,
         remote_workspace_root: PurePosixPath,
         local_run_dir: Path,
     ) -> ExecutionResult:
-        remote_recipe = self._remote_project_path(recipe)
         argv = [
             *self._kubectl_exec_prefix(),
             "/usr/bin/env",
@@ -438,8 +577,6 @@ class KubernetesTargetSupervisor:
             "--internal-workspace-root",
             str(remote_workspace_root),
         ]
-        if values is not None:
-            argv.extend(("--values", str(self._remote_project_path(values))))
         if name is not None:
             argv.extend(("--name", name))
         return CommandExecutor(local_run_dir / "control").run(
@@ -504,11 +641,14 @@ class KubernetesTargetSupervisor:
             added=added,
         )
 
-    def _kubectl_exec_prefix(self) -> tuple[str, ...]:
+    def _kubectl_exec_prefix(self, *, stdin: bool = False) -> tuple[str, ...]:
         argv = [self.executor.kubectl]
         if self.executor.context is not None:
             argv.extend(("--context", self.executor.context))
-        argv.extend(("--namespace", self.executor.namespace, "exec", self.executor.pod))
+        argv.extend(("--namespace", self.executor.namespace, "exec"))
+        if stdin:
+            argv.append("--stdin")
+        argv.append(self.executor.pod)
         if self.executor.container is not None:
             argv.extend(("--container", self.executor.container))
         argv.append("--")
@@ -791,6 +931,22 @@ def _write_json(path: Path, value: Mapping[str, JSONValue]) -> None:
         encoding="utf-8",
     )
     os.replace(temporary, path)
+
+
+def _write_private_bytes(path: Path, value: bytes) -> None:
+    parent_existed = path.parent.exists()
+    path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+    if not parent_existed:
+        path.parent.chmod(0o700)
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(value)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except BaseException:
+        path.unlink(missing_ok=True)
+        raise
 
 
 def _sha256(path: Path) -> str:

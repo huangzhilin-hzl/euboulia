@@ -546,6 +546,46 @@ def test_recipe_values_produce_normalized_executable_configuration(tmp_path: Pat
     require_optimization_execution_lock(config)
 
 
+def test_resolved_recipe_can_move_without_changing_source_relative_paths(
+    tmp_path: Path,
+) -> None:
+    template, values = write_input_template(tmp_path)
+    document = yaml.safe_load(template.read_text(encoding="utf-8"))
+    document["optimization"]["workspace"] = {
+        "repository": "source/sglang",
+        "root_dir": "state/worktrees",
+    }
+    document["target"]["runtime"]["expected"]["components"]["sglang"]["path"] = (
+        "source/sglang"
+    )
+    document["execution"] = {
+        "artifacts_dir": "state/artifacts",
+        "ledger": "state/artifacts/experiments.jsonl",
+        "events": "state/artifacts/events.jsonl",
+        "memory": "state/artifacts/memory.sqlite3",
+    }
+    template.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+    expected = load_optimization_config(template, values)
+    destination = tmp_path / "private" / "baseline" / "recipe.lock.yaml"
+
+    destination.parent.mkdir(parents=True)
+    destination.write_text(
+        dump_resolved_optimization_config(expected, destination=destination),
+        encoding="utf-8",
+    )
+    actual = load_optimization_config(destination)
+
+    assert actual.optimization.planner.patch_catalog == (
+        expected.optimization.planner.patch_catalog
+    )
+    assert actual.optimization.workspace == expected.optimization.workspace
+    assert actual.target is not None and actual.target.runtime is not None
+    assert actual.target.runtime.expected.components["sglang"].path == (
+        expected.target.runtime.expected.components["sglang"].path
+    )
+    assert actual.execution == expected.execution
+
+
 def test_execution_lock_rejects_floating_managed_identity(tmp_path: Path) -> None:
     source = tmp_path / "floating.yaml"
     source.write_text(

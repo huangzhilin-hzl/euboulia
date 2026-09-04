@@ -1,7 +1,7 @@
 # Copy this host-only file to ~/.config/euboulia/config.yaml and replace the
 # local path and Pod coordinates. It is deliberately separate from scenario recipes.
 storage:
-  root: /absolute/local/path/euboulia-runs
+  root: ~/.local/share/euboulia
   sync:
     raw_profiles: on_demand
 

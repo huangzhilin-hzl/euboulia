@@ -98,13 +98,15 @@ records locally:
 
 ```console
 uv run euboulia target run \
-  --recipe examples/scenarios/dsv4-megamoe.lock.yaml \
+  --recipe ~/.local/share/euboulia/experiments/dsv4-baseline/recipe.lock.yaml \
   --executor h20-pod \
   --name dsv4-baseline
 ```
 
 Configure Pod coordinates and local storage in `~/.config/euboulia/config.yaml`; see
-`examples/runtime/kubernetes.yaml`. Scenario recipes do not contain local result paths.
+`examples/runtime/kubernetes.yaml`. Keep private values and lock files in a local
+experiment directory outside the checkout. The controller sends only the resolved lock
+to the Pod; scenario recipes do not contain local result paths.
 
 An active managed run has five independent permissions:
 

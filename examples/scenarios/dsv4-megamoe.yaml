@@ -7,7 +7,8 @@
 #   euboulia target plan --recipe examples/scenarios/dsv4-megamoe.yaml
 # Bind the immutable image, model, SGLang, and DeepGEMM identities before execution:
 #   euboulia target resolve --recipe examples/scenarios/dsv4-megamoe.yaml \
-#     --values dsv4-values.yaml --output examples/scenarios/dsv4-megamoe.lock.yaml
+#     --values ~/.local/share/euboulia/experiments/dsv4-baseline/values.yaml \
+#     --output ~/.local/share/euboulia/experiments/dsv4-baseline/recipe.lock.yaml
 schema_version: 3
 name: ds-v4-flash-dspark-cp8-tp8-ep8-megamoe
 framework: sglang

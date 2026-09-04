@@ -110,7 +110,8 @@ def test_target_resolve_writes_lock_that_runs_without_values(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     template, values = write_input_template(tmp_path)
-    lock = tmp_path / "template.lock.yaml"
+    lock = tmp_path / "private-experiments" / "baseline" / "recipe.lock.yaml"
+    expected = load_optimization_config(template, values)
 
     exit_code = main(
         [
@@ -131,9 +132,15 @@ def test_target_resolve_writes_lock_that_runs_without_values(
     assert payload["resolved"] is True
     assert payload["bound_inputs"] == ["container_image", "sglang_revision"]
     assert lock.is_file()
+    assert lock.parent.stat().st_mode & 0o777 == 0o700
+    assert lock.stat().st_mode & 0o777 == 0o600
     locked_config = load_optimization_config(lock)
     assert locked_config.baseline.source_revision == "b" * 40
     assert locked_config.input_bindings == {}
+    assert (
+        locked_config.optimization.planner.patch_catalog
+        == expected.optimization.planner.patch_catalog
+    )
 
 
 def test_target_run_rejects_unresolved_template_before_artifact_write(

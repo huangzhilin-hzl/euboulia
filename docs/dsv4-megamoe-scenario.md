@@ -47,11 +47,11 @@ revision, and 30 workload points:
 ```console
 uv run euboulia target resolve \
   --recipe examples/scenarios/dsv4-megamoe.yaml \
-  --values dsv4-values.yaml \
-  --output examples/scenarios/dsv4-megamoe.lock.yaml
+  --values ~/.local/share/euboulia/experiments/dsv4-baseline/values.yaml \
+  --output ~/.local/share/euboulia/experiments/dsv4-baseline/recipe.lock.yaml
 
 uv run euboulia target plan \
-  --recipe examples/scenarios/dsv4-megamoe.lock.yaml
+  --recipe ~/.local/share/euboulia/experiments/dsv4-baseline/recipe.lock.yaml
 ```
 
 The recipe does not hand-maintain model, suite, baseline, or point IDs. Euboulia
@@ -63,10 +63,14 @@ After review, execute exactly one baseline (no generated candidate):
 
 ```console
 uv run euboulia target run \
-  --recipe examples/scenarios/dsv4-megamoe.lock.yaml \
+  --recipe ~/.local/share/euboulia/experiments/dsv4-baseline/recipe.lock.yaml \
   --executor h20-pod \
   --name dsv4-megamoe-baseline
 ```
+
+The private experiment directory is local-only. `values.yaml` never leaves the
+controller. The remote supervisor stages only the resolved lock in the run-specific
+Pod scratch directory and records its SHA-256 locally.
 
 The executor and canonical local storage are machine-specific and therefore live in
 `~/.config/euboulia/config.yaml`, not in the scenario. Start from

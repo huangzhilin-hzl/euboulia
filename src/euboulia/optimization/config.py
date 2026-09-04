@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import math
+import os
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -2344,14 +2346,71 @@ def require_optimization_execution_lock(config: OptimizationConfig) -> None:
         raise OptimizationConfigError("execution recipe is not locked: " + "; ".join(issues))
 
 
-def dump_resolved_optimization_config(config: OptimizationConfig) -> str:
-    """Serialize the exact bound recipe used for identity and execution."""
+def dump_resolved_optimization_config(
+    config: OptimizationConfig,
+    *,
+    destination: str | Path | None = None,
+) -> str:
+    """Serialize the bound recipe without changing source-relative path meaning."""
+
+    document = copy.deepcopy(dict(config.resolved_document))
+    if destination is not None:
+        _rebase_resolved_document_paths(
+            document,
+            config,
+            Path(destination).expanduser().resolve(),
+        )
 
     return yaml.safe_dump(
-        dict(config.resolved_document),
+        document,
         allow_unicode=True,
         sort_keys=False,
     )
+
+
+def _rebase_resolved_document_paths(
+    document: dict[str, JSONValue],
+    config: OptimizationConfig,
+    destination: Path,
+) -> None:
+    """Rebase only fields whose schema semantics are relative to the recipe file."""
+
+    def rebase(keys: tuple[str, ...], resolved: Path) -> None:
+        current: object = document
+        for key in keys[:-1]:
+            if not isinstance(current, dict):
+                return
+            current = current.get(key)
+        if not isinstance(current, dict):
+            return
+        raw = current.get(keys[-1])
+        if not isinstance(raw, str) or Path(raw).expanduser().is_absolute():
+            return
+        relative = os.path.relpath(resolved, destination.parent)
+        current[keys[-1]] = Path(relative).as_posix()
+
+    rebase(
+        ("optimization", "planner", "patch_catalog"),
+        config.optimization.planner.patch_catalog,
+    )
+    workspace = config.optimization.workspace
+    if workspace is not None:
+        rebase(("optimization", "workspace", "repository"), workspace.repository)
+        rebase(("optimization", "workspace", "root_dir"), workspace.root_dir)
+    if config.target is not None and config.target.runtime is not None:
+        for name, component in config.target.runtime.expected.components.items():
+            if component.path is not None:
+                rebase(
+                    ("target", "runtime", "expected", "components", name, "path"),
+                    component.path,
+                )
+    for field_name, resolved in (
+        ("artifacts_dir", config.execution.artifacts_dir),
+        ("ledger", config.execution.experiment_ledger),
+        ("events", config.execution.event_ledger),
+        ("memory", config.execution.memory),
+    ):
+        rebase(("execution", field_name), resolved)
 
 
 __all__ = [

@@ -19,6 +19,14 @@ build/
 .env
 .env.*
 !.env.example
+*.lock.yaml
+*.lock.yml
+*.values.yaml
+*.values.yml
+*-values.yaml
+*-values.yml
+values.yaml
+values.yml
 
 # Euboulia experiment evidence and heavyweight profiler output
 experiments/
