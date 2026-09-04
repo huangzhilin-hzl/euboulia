@@ -94,11 +94,12 @@ uv run euboulia optimize plan \
 ```
 
 Run a locked target scenario in a newly created Kubernetes Pod while keeping canonical
-records locally. Supply the selected node name or InternalIP for this run:
+records locally. Set `EXPERIMENT_DIR` to a private directory outside the checkout and
+supply the selected node name or InternalIP for this run:
 
 ```console
 uv run euboulia target run \
-  --recipe ~/.local/share/euboulia/experiments/dsv4-baseline/recipe.lock.yaml \
+  --recipe "$EXPERIMENT_DIR/recipe.lock.yaml" \
   --executor gpu-worker \
   --node NODE_NAME_OR_INTERNAL_IP \
   --name dsv4-baseline

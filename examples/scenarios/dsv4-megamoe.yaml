@@ -7,9 +7,10 @@
 # Inspect required bindings without side effects:
 #   euboulia target plan --recipe examples/scenarios/dsv4-megamoe.yaml
 # Bind the immutable image, model, SGLang, and DeepGEMM identities before execution:
+#   Set EXPERIMENT_DIR to a private directory outside the checkout.
 #   euboulia target resolve --recipe examples/scenarios/dsv4-megamoe.yaml \
-#     --values ~/.local/share/euboulia/experiments/dsv4-megamoe/values.yaml \
-#     --output ~/.local/share/euboulia/experiments/dsv4-megamoe/recipe.lock.yaml
+#     --values "$EXPERIMENT_DIR/values.yaml" \
+#     --output "$EXPERIMENT_DIR/recipe.lock.yaml"
 schema_version: 3
 name: ds-v4-flash-dspark-cp8-tp8-ep8-megamoe
 framework: sglang

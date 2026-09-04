@@ -234,14 +234,16 @@ executor-mounted secrets and are rejected when embedded in an HTTP URL.
 missing inputs. Active runs reject missing bindings before creating events, memory,
 worktrees, or artifacts. Bind values directly with `--values`, or create a lock recipe:
 
+Set `EXPERIMENT_DIR` to the private directory selected for this experiment:
+
 ```console
 uv run euboulia target resolve \
   --recipe scenario.yaml \
-  --values ~/.local/share/euboulia/experiments/gpu-baseline/values.yaml \
-  --output ~/.local/share/euboulia/experiments/gpu-baseline/recipe.lock.yaml
+  --values "$EXPERIMENT_DIR/values.yaml" \
+  --output "$EXPERIMENT_DIR/recipe.lock.yaml"
 
 uv run euboulia target run \
-  --recipe ~/.local/share/euboulia/experiments/gpu-baseline/recipe.lock.yaml \
+  --recipe "$EXPERIMENT_DIR/recipe.lock.yaml" \
   --executor gpu-worker \
   --node NODE_NAME_OR_INTERNAL_IP
 ```
@@ -256,10 +258,10 @@ The recommended local layout is:
 
 ```text
 ~/.config/euboulia/config.yaml
-~/.local/share/euboulia/experiments/<experiment>/values.yaml
-~/.local/share/euboulia/experiments/<experiment>/recipe.lock.yaml
-~/.local/share/euboulia/runs/<run-uid>/
-~/.local/share/euboulia/memory.sqlite3
+<experiment-dir>/values.yaml
+<experiment-dir>/recipe.lock.yaml
+<storage.root>/runs/<run-uid>/
+<storage.root>/memory.sqlite3
 ```
 
 Managed schema-v3 runs also require an image digest, a full baseline Git commit, and a
