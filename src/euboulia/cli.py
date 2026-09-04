@@ -232,6 +232,11 @@ def build_parser() -> argparse.ArgumentParser:
     target_run_parser.add_argument("--internal-run-uid", help=argparse.SUPPRESS)
     target_run_parser.add_argument("--internal-artifacts-root", type=Path, help=argparse.SUPPRESS)
     target_run_parser.add_argument("--internal-workspace-root", type=Path, help=argparse.SUPPRESS)
+    target_run_parser.add_argument(
+        "--internal-source-bundles-root",
+        type=Path,
+        help=argparse.SUPPRESS,
+    )
     target_run_parser.add_argument("--controller-run-uid", help=argparse.SUPPRESS)
     target_run_parser.add_argument("--json", action="store_true")
     target_run_parser.set_defaults(handler=_target_run)
@@ -584,15 +589,18 @@ def _target_plan(args: argparse.Namespace) -> int:
 
 def _target_run(args: argparse.Namespace) -> int:
     config = load_optimization_config(args.recipe, args.values)
-    internal_values = (
+    internal_storage_values = (
         args.internal_run_uid,
         args.internal_artifacts_root,
         args.internal_workspace_root,
     )
-    if any(value is not None for value in internal_values) and not all(
-        value is not None for value in internal_values
+    if any(value is not None for value in internal_storage_values) and not all(
+        value is not None for value in internal_storage_values
     ):
         raise RemoteConfigError("internal worker storage arguments must be supplied together")
+    if args.internal_source_bundles_root is not None and args.internal_run_uid is None:
+        raise RemoteConfigError("internal source bundles require internal worker storage")
+    internal_values = (*internal_storage_values, args.internal_source_bundles_root)
     if args.executor is not None and any(value is not None for value in internal_values):
         raise RemoteConfigError("--executor cannot be combined with internal worker arguments")
     if args.controller_run_uid is not None and args.executor is None:
@@ -644,7 +652,9 @@ def _target_run(args: argparse.Namespace) -> int:
             workspace_root=args.internal_workspace_root,
         )
     try:
-        result = OptimizationRunner().validate_baseline(config, name=args.name, run_uid=run_uid)
+        result = OptimizationRunner(
+            source_bundles_root=args.internal_source_bundles_root,
+        ).validate_baseline(config, name=args.name, run_uid=run_uid)
     except KeyboardInterrupt:
         if run_uid is not None:
             write_run_progress(

@@ -11,6 +11,7 @@ import os
 import shutil
 import subprocess
 import tarfile
+import tempfile
 import threading
 import time
 from collections.abc import Callable, Mapping
@@ -29,6 +30,11 @@ from euboulia.optimization.config import (
 from euboulia.optimization.contracts import utc_now
 from euboulia.optimization.events import EventLedger, EventType, OptimizationEvent
 from euboulia.optimization.memory import SQLiteMemoryStore
+from euboulia.optimization.workspace import (
+    SourceBundle,
+    create_source_bundle,
+    prepare_git_source,
+)
 from euboulia.run_identity import new_run_uid, normalize_run_name, normalize_run_uid
 
 _MANAGED_BY_LABEL = "app.kubernetes.io/managed-by"
@@ -423,7 +429,30 @@ class KubernetesTargetSupervisor:
         worker_payload: Mapping[str, JSONValue] | None = None
         error: str | None = None
         cancelled = False
+        source_transfer: tempfile.TemporaryDirectory[str] | None = None
+        source_bundles: Mapping[str, SourceBundle] = {}
+        remote_source_bundles_root: PurePosixPath | None = None
         try:
+            if getattr(config, "sources", {}):
+                record_phase(
+                    "allocating",
+                    infrastructure_state="not_created",
+                    detail="preparing locked source bundles on the controller",
+                )
+                transfer_parent = self.storage.root / ".source-transfer"
+                transfer_parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+                source_transfer = tempfile.TemporaryDirectory(
+                    prefix=f"{run_uid}-",
+                    dir=transfer_parent,
+                )
+                source_bundles = self._prepare_controller_source_bundles(
+                    config,
+                    Path(source_transfer.name),
+                    local_run_dir,
+                )
+                remote_source_bundles_root = (
+                    self.executor.scratch_dir / "source-bundles" / run_uid
+                )
             record_phase(
                 "allocating",
                 infrastructure_state="pod_pending",
@@ -461,7 +490,28 @@ class KubernetesTargetSupervisor:
                 worker_recipe_sha256,
                 local_run_dir,
             )
-            record_phase("preparing_sources", detail="remote worker started")
+            if remote_source_bundles_root is not None:
+                self._stage_source_bundles(
+                    source_bundles,
+                    remote_source_bundles_root,
+                    local_run_dir,
+                    timeout_seconds=(
+                        config.optimization.workspace.timeout_seconds
+                        if config.optimization.workspace is not None
+                        else 300.0
+                    ),
+                )
+                assert source_transfer is not None
+                source_transfer.cleanup()
+                source_transfer = None
+            record_phase(
+                "preparing_sources",
+                detail=(
+                    "remote worker started from controller-staged sources"
+                    if remote_source_bundles_root is not None
+                    else "remote worker started"
+                ),
+            )
             worker = self._run_worker(
                 remote_recipe,
                 name=selected_name,
@@ -469,6 +519,7 @@ class KubernetesTargetSupervisor:
                 remote_runs_root=remote_runs_root,
                 remote_workspace_root=remote_workspace_root,
                 local_run_dir=local_run_dir,
+                source_bundles_root=remote_source_bundles_root,
             )
             if worker.error is None and not worker.timed_out and worker.returncode in {0, 1}:
                 worker_payload = _read_last_json_object(worker.stdout_path)
@@ -487,6 +538,8 @@ class KubernetesTargetSupervisor:
         except (OSError, RemoteExecutionError, ValueError) as exc:
             error = str(exc)
         finally:
+            if source_transfer is not None:
+                source_transfer.cleanup()
             if self._pod is not None:
                 try:
                     record_phase(
@@ -1184,6 +1237,152 @@ print(hashlib.sha256(data).hexdigest())
         if observed_sha256 != expected_sha256:
             raise RemoteExecutionError("remote recipe digest does not match the local input")
 
+    def _prepare_controller_source_bundles(
+        self,
+        config: OptimizationConfig,
+        transfer_dir: Path,
+        local_run_dir: Path,
+    ) -> Mapping[str, SourceBundle]:
+        """Resolve locked sources locally and package only each pinned revision."""
+
+        workspace = config.optimization.workspace
+        if workspace is None:
+            raise RemoteConfigError("optimization.workspace is required for source delivery")
+        cache_root = self.storage.root / "source-cache"
+        cache_root.mkdir(parents=True, mode=0o700, exist_ok=True)
+        evidence_dir = local_run_dir / "control" / "source-delivery"
+        bundles: dict[str, SourceBundle] = {}
+        for source_name, source in sorted(config.sources.items()):
+            prepared = prepare_git_source(
+                source_name,
+                source,
+                cache_root,
+                evidence_dir,
+                timeout_seconds=workspace.timeout_seconds,
+            )
+            bundles[source_name] = create_source_bundle(
+                prepared,
+                transfer_dir / f"{source_name}.bundle",
+                evidence_dir,
+                timeout_seconds=workspace.timeout_seconds,
+            )
+        _write_json(
+            evidence_dir / "source-delivery.json",
+            {
+                "schema_version": 1,
+                "transport": "controller_bundle",
+                "sources": {
+                    name: {
+                        "ref": bundle.ref,
+                        "revision": bundle.revision,
+                        "sha256": bundle.sha256,
+                        "size_bytes": bundle.size_bytes,
+                    }
+                    for name, bundle in sorted(bundles.items())
+                },
+            },
+        )
+        return bundles
+
+    def _stage_source_bundles(
+        self,
+        bundles: Mapping[str, SourceBundle],
+        remote_root: PurePosixPath,
+        local_run_dir: Path,
+        *,
+        timeout_seconds: float,
+    ) -> None:
+        """Stream verified source bundles into the run-owned Pod without credentials."""
+
+        for name, bundle in sorted(bundles.items()):
+            self._stage_file(
+                bundle.path,
+                remote_root / f"{name}.bundle",
+                bundle.sha256,
+                local_run_dir,
+                label=f"source-{name}-stage",
+                timeout_seconds=timeout_seconds,
+            )
+
+    def _stage_file(
+        self,
+        source: Path,
+        destination: PurePosixPath,
+        expected_sha256: str,
+        local_run_dir: Path,
+        *,
+        label: str,
+        timeout_seconds: float,
+    ) -> None:
+        if self._pod is None:
+            raise RemoteExecutionError("cannot stage a file before the owned Pod exists")
+        self._assert_owned_pod(self._pod)
+        writer = """\
+import hashlib
+import os
+from pathlib import Path
+import sys
+
+destination = Path(sys.argv[1])
+destination.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+descriptor = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+digest = hashlib.sha256()
+with os.fdopen(descriptor, "wb") as handle:
+    while True:
+        chunk = sys.stdin.buffer.read(1024 * 1024)
+        if not chunk:
+            break
+        handle.write(chunk)
+        digest.update(chunk)
+    handle.flush()
+    os.fsync(handle.fileno())
+print(digest.hexdigest())
+"""
+        argv = [
+            *self._kubectl_exec_prefix(stdin=True),
+            self.executor.python,
+            "-c",
+            writer,
+            str(destination),
+        ]
+        completed_stdout = b""
+        completed_stderr = b""
+        returncode: int | None = None
+        try:
+            with source.open("rb") as source_file:
+                process = subprocess.Popen(
+                    argv,
+                    stdin=source_file,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    shell=False,
+                )
+                try:
+                    completed_stdout, completed_stderr = process.communicate(
+                        timeout=timeout_seconds
+                    )
+                except subprocess.TimeoutExpired as exc:
+                    process.kill()
+                    completed_stdout, completed_stderr = process.communicate()
+                    raise RemoteExecutionError(
+                        f"timed out while staging {source.name}"
+                    ) from exc
+                returncode = process.returncode
+        except OSError as exc:
+            raise RemoteExecutionError(f"cannot stage {source.name}: {exc}") from exc
+        finally:
+            control = local_run_dir / "control"
+            _write_private_bytes(control / f"{label}.stdout.log", completed_stdout)
+            _write_private_bytes(control / f"{label}.stderr.log", completed_stderr)
+        if returncode != 0:
+            detail = completed_stderr.decode("utf-8", errors="replace").strip()
+            raise RemoteExecutionError(
+                f"staging {source.name} exited with status {returncode}: {detail}"
+            )
+        observed_sha256 = completed_stdout.decode("ascii", errors="strict").strip()
+        if observed_sha256 != expected_sha256:
+            raise RemoteExecutionError(f"staged {source.name} digest does not match")
+
     def _run_worker(
         self,
         remote_recipe: PurePosixPath,
@@ -1193,6 +1392,7 @@ print(hashlib.sha256(data).hexdigest())
         remote_runs_root: PurePosixPath,
         remote_workspace_root: PurePosixPath,
         local_run_dir: Path,
+        source_bundles_root: PurePosixPath | None = None,
     ) -> ExecutionResult:
         argv = [
             *self._kubectl_exec_prefix(),
@@ -1213,6 +1413,8 @@ print(hashlib.sha256(data).hexdigest())
             "--internal-workspace-root",
             str(remote_workspace_root),
         ]
+        if source_bundles_root is not None:
+            argv.extend(("--internal-source-bundles-root", str(source_bundles_root)))
         if name is not None:
             argv.extend(("--name", name))
         results: list[ExecutionResult] = []

@@ -227,8 +227,9 @@ commit and digest placeholders are rejected.
 Each managed Git source has an independent repository, full branch/tag ref, and
 immutable revision. The ref preserves selection intent; execution always checks out
 the revision. Build commands can address dependency worktrees with placeholders such
-as `{source.deepgemm}`. Repository credentials remain in the Git credential helper or
-executor-mounted secrets and are rejected when embedded in an HTTP URL.
+as `{source.deepgemm}`. Repository credentials remain in the local Git credential
+helper or SSH agent and are rejected when embedded in an HTTP URL. Kubernetes workers
+receive source bundles rather than repository credentials.
 
 `target plan` and `optimize plan` may inspect an unresolved template and report its
 missing inputs. Active runs reject missing bindings before creating events, memory,
@@ -284,10 +285,12 @@ and secret references, so they stay next to the user's private runtime config. R
 executor for experiments with the same runtime resource profile; define another executor
 and template when the accelerator type or cluster policy changes.
 
-The local supervisor generates `run_uid`, creates a uniquely named Pod in exactly the
-configured namespace, and records the Pod UID before executing anything. It transfers
-the local checkout and fully resolved recipe, but never the values file or host runtime
-config. On success or failure it applies the configured artifact sync policy and verifies
+The local supervisor generates `run_uid`, resolves each locked source through a persistent
+single-branch, no-tags controller cache, and creates an exact-revision Git bundle. It then
+creates a uniquely named Pod in exactly the configured namespace and records the Pod UID
+before executing anything. It transfers those bundles, the local checkout, and the fully
+resolved recipe, but never the values file, Git credentials, or host runtime config. On
+success or failure it applies the configured artifact sync policy and verifies
 the resulting manifest. It writes `run.json`, `events.jsonl`, `summary.json`, and
 `artifact-manifest.json` under `<storage.root>/runs/<run-uid>`. If nothing remains
 remote-only, it deletes the Pod with a Kubernetes UID precondition. With

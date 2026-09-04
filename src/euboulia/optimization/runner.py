@@ -85,6 +85,7 @@ from euboulia.optimization.target import (
     TargetSpec,
 )
 from euboulia.optimization.workspace import (
+    STAGED_SOURCE_REF,
     GitWorktreeWorkspace,
     PatchLimits,
     PatchRejected,
@@ -233,9 +234,14 @@ class OptimizationRunner:
         self,
         target_controller: TargetController | None = None,
         profiler: SGLangProfiler | None = None,
+        *,
+        source_bundles_root: Path | None = None,
     ) -> None:
         self._target_controller = target_controller
         self._profiler = profiler
+        self._source_bundles_root = (
+            None if source_bundles_root is None else source_bundles_root.resolve()
+        )
         self._active_profile_manifest: Path | None = None
 
     @staticmethod
@@ -1663,8 +1669,8 @@ class OptimizationRunner:
             baseline_evaluation=baseline_evaluation,
         )
 
-    @staticmethod
     def _prepare_managed_workspace(
+        self,
         config: OptimizationConfig,
         run_uid: str,
         iteration_id: str,
@@ -1683,12 +1689,23 @@ class OptimizationRunner:
         prepared_sources = {}
         source_evidence = source_evidence_dir or role_root / f"{role}-source-evidence"
         for source_name, source in config.sources.items():
+            transport_repository: Path | None = None
+            transport_ref: str | None = None
+            if self._source_bundles_root is not None:
+                transport_repository = self._source_bundles_root / f"{source_name}.bundle"
+                if not transport_repository.is_file() or transport_repository.is_symlink():
+                    raise OptimizationRuntimeError(
+                        f"staged source bundle is missing or invalid: {transport_repository}"
+                    )
+                transport_ref = STAGED_SOURCE_REF
             prepared_sources[source_name] = prepare_git_source(
                 source_name,
                 source,
                 workspace_config.root_dir / ".source-cache",
                 source_evidence,
                 timeout_seconds=workspace_config.timeout_seconds,
+                transport_repository=transport_repository,
+                transport_ref=transport_ref,
             )
 
         if workspace_config.source is not None:

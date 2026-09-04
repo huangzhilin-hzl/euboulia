@@ -48,9 +48,10 @@ champion.
 5. Run it on a user-selected node.
 6. Review the local summary, evidence, and memory before starting another iteration.
 
-Euboulia creates a dedicated Pod in the configured namespace, stages the locked run,
-collects verified results locally, and deletes only the Pod owned by that run. If
-required evidence cannot be synchronized, the Pod is retained for explicit recovery.
+Euboulia resolves locked Git sources through the local controller, transfers exact
+revision bundles to a dedicated Pod in the configured namespace, collects verified
+results locally, and deletes only the Pod owned by that run. If required evidence
+cannot be synchronized, the Pod is retained for explicit recovery.
 
 ## Quick start
 

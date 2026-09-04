@@ -11,8 +11,8 @@ The selected node and template must satisfy `target.hardware` in the resolved re
 provide:
 
 - `/home/admin/model/DeepSeek-V4-Flash-0731` contains the local model;
-- Git can authenticate to every private repository through a credential helper or
-  executor-mounted secret; credentials must not appear in values or the lock;
+- the local controller can authenticate to every private repository through its Git
+  credential helper or SSH agent; credentials must not appear in values or the lock;
 - `lm_eval` with API extras is installed in the image at the exact version selected
   in the values file; and
 - volumes, GPU resources, tolerations, image-pull secrets, and other cluster policy
@@ -90,10 +90,11 @@ for every remote run; Euboulia resolves the value to `spec.nodeName`.
 time-sortable ULID `run_uid` used by artifacts, workspaces, service manifests, and
 event correlation.
 
-The lock requires an immutable commit for each source. The worker fetches each ref
-into a reusable Pod-local cache, checks out the locked commits into separate per-run
-worktrees, installs SGLang editable with `--no-deps`, and installs DeepGEMM from its
-own worktree last. Euboulia starts a new process group and can stop only
+The lock requires an immutable commit for each source. The controller fetches only the
+declared branch without tags into a persistent local cache, verifies the locked commit,
+and transfers an exact-revision Git bundle. The worker creates separate per-run worktrees,
+installs SGLang editable with `--no-deps`, and installs DeepGEMM from its own worktree last.
+Euboulia starts a new process group and can stop only
 that signed, owned process. It never discovers or kills an existing server.
 
 `target run` profiles the owned baseline before its unprofiled matrix;

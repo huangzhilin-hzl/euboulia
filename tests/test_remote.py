@@ -2,6 +2,7 @@ import base64
 import hashlib
 import io
 import json
+import subprocess
 import tarfile
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
@@ -11,7 +12,7 @@ import yaml
 
 import euboulia.remote as remote
 from euboulia.execution import ExecutionResult
-from euboulia.optimization.config import load_optimization_config
+from euboulia.optimization.config import SourceConfig, load_optimization_config
 from euboulia.optimization.events import EventLedger, EventType
 
 
@@ -538,6 +539,141 @@ def test_stage_recipe_streams_only_the_lock_and_verifies_its_digest(
     assert (local_run_dir / "control" / "recipe-stage.stdout.log").stat().st_mode & 0o777 == 0o600
 
 
+def test_source_bundle_is_streamed_to_the_owned_pod_and_digest_checked(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    supervisor = remote.KubernetesTargetSupervisor(
+        _executor(tmp_path),
+        remote.LocalStorageConfig(root=tmp_path / "results"),
+    )
+    run_uid = "run-01HF7YAT000000000000000000"
+    supervisor._pod = remote.OwnedPod(
+        name="euboulia-run-01hf7yat000000000000000000",
+        uid="pod-uid",
+        run_uid=run_uid,
+        node_name="worker-1",
+    )
+    monkeypatch.setattr(supervisor, "_assert_owned_pod", lambda pod: None)
+    contents = b"bundle payload\x00with binary data"
+    source = tmp_path / "sglang.bundle"
+    source.write_bytes(contents)
+    digest = hashlib.sha256(contents).hexdigest()
+    observed: dict[str, object] = {}
+
+    class FakeProcess:
+        returncode = 0
+
+        def communicate(self, timeout: float) -> tuple[bytes, bytes]:
+            observed["timeout"] = timeout
+            stream = observed["stdin"]
+            assert isinstance(stream, io.BufferedReader)
+            observed["contents"] = stream.read()
+            return (digest + "\n").encode(), b""
+
+        def kill(self) -> None:  # pragma: no cover - successful transfer does not kill
+            raise AssertionError("unexpected kill")
+
+    def fake_popen(argv: list[str], **kwargs: object) -> FakeProcess:
+        observed["argv"] = argv
+        observed.update(kwargs)
+        return FakeProcess()
+
+    monkeypatch.setattr(remote.subprocess, "Popen", fake_popen)
+    local_run_dir = tmp_path / "local-run"
+    local_run_dir.mkdir(mode=0o700)
+    destination = PurePosixPath("/scratch/source-bundles") / run_uid / "sglang.bundle"
+
+    supervisor._stage_file(
+        source,
+        destination,
+        digest,
+        local_run_dir,
+        label="source-sglang-stage",
+        timeout_seconds=300,
+    )
+
+    argv = observed["argv"]
+    assert isinstance(argv, list)
+    assert "--stdin" in argv
+    assert argv[-1] == str(destination)
+    assert observed["contents"] == contents
+    assert observed["timeout"] == 300
+    assert observed["shell"] is False
+    assert (local_run_dir / "control/source-sglang-stage.stderr.log").is_file()
+
+
+def test_controller_source_delivery_uses_persistent_cache_and_exact_bundle(
+    tmp_path: Path,
+) -> None:
+    repository = tmp_path / "source"
+    repository.mkdir()
+    for arguments in (
+        ("init",),
+        ("config", "user.email", "euboulia@example.invalid"),
+        ("config", "user.name", "Euboulia Tests"),
+    ):
+        subprocess.run(
+            ["git", "-C", str(repository), *arguments],
+            check=True,
+            capture_output=True,
+        )
+    (repository / "source.py").write_text("VALUE = 1\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "-C", str(repository), "add", "source.py"],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(repository), "commit", "-m", "source"],
+        check=True,
+        capture_output=True,
+    )
+    revision = subprocess.run(
+        ["git", "-C", str(repository), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    ref = subprocess.run(
+        ["git", "-C", str(repository), "symbolic-ref", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    storage = remote.LocalStorageConfig(root=tmp_path / "results")
+    supervisor = remote.KubernetesTargetSupervisor(_executor(tmp_path), storage)
+    config = SimpleNamespace(
+        sources={
+            "sglang": SourceConfig(
+                repository=str(repository),
+                ref=ref,
+                revision=revision,
+            )
+        },
+        optimization=SimpleNamespace(workspace=SimpleNamespace(timeout_seconds=30)),
+    )
+    local_run_dir = storage.runs_dir / "run-test"
+    local_run_dir.mkdir(parents=True)
+
+    bundles = supervisor._prepare_controller_source_bundles(
+        config,  # type: ignore[arg-type]
+        tmp_path / "transfer",
+        local_run_dir,
+    )
+
+    assert set(bundles) == {"sglang"}
+    assert bundles["sglang"].revision == revision
+    assert any((storage.root / "source-cache").iterdir())
+    manifest = json.loads(
+        (local_run_dir / "control/source-delivery/source-delivery.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert manifest["transport"] == "controller_bundle"
+    assert manifest["sources"]["sglang"]["revision"] == revision
+
+
 @pytest.mark.parametrize(
     ("worker_passed", "returncode", "unsynced_raw"),
     [(True, 0, False), (False, 1, False), (True, 0, True)],
@@ -758,12 +894,17 @@ def test_remote_worker_keeps_the_selected_kubeconfig_environment(
         remote_runs_root=PurePosixPath("/scratch/runs"),
         remote_workspace_root=PurePosixPath("/scratch/worktrees"),
         local_run_dir=tmp_path,
+        source_bundles_root=PurePosixPath("/scratch/source-bundles/run-test"),
     )
 
     assert result.returncode == 0
     allowlist = observed["env_allowlist"]
     assert isinstance(allowlist, frozenset)
     assert "KUBECONFIG" in allowlist
+    argv = observed["argv"]
+    assert isinstance(argv, list)
+    source_root_index = argv.index("--internal-source-bundles-root")
+    assert argv[source_root_index + 1] == "/scratch/source-bundles/run-test"
 
 
 def test_live_service_logs_are_mirrored_incrementally(
