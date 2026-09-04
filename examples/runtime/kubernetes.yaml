@@ -1,17 +1,19 @@
 # Copy this host-only file to ~/.config/euboulia/config.yaml and replace the
-# local path and Pod coordinates. It is deliberately separate from scenario recipes.
+# local paths and cluster policy. It is deliberately separate from scenario recipes.
 storage:
   root: ~/.local/share/euboulia
   sync:
-    raw_profiles: on_demand
+    raw_profiles: always
 
 executors:
   h20-pod:
     type: kubernetes
     namespace: inference
-    pod: dsv4-h20
+    pod_template: ./pod-template.yaml
     container: runtime
-    # The local checkout must already be available at this path in the Pod.
+    # Euboulia transfers the local checkout here after creating its Pod.
     project_dir: /workspace/euboulia
     scratch_dir: /home/admin/.cache/euboulia
+    local_project_dir: ../..
     python: python3
+    startup_timeout_seconds: 600

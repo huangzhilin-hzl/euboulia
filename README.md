@@ -93,20 +93,21 @@ uv run euboulia optimize plan \
   --recipe examples/optimization-sglang.yaml
 ```
 
-Run a locked target scenario in a configured Kubernetes Pod while keeping canonical
-records locally:
+Run a locked target scenario in a newly created Kubernetes Pod while keeping canonical
+records locally. Supply the selected node name or InternalIP for this run:
 
 ```console
 uv run euboulia target run \
-  --recipe ~/.local/share/euboulia/experiments/dsv4-baseline/recipe.lock.yaml \
+  --recipe ~/julian/euboulia-data/experiments/dsv4-baseline/recipe.lock.yaml \
   --executor h20-pod \
+  --node 10.13.3.192 \
   --name dsv4-baseline
 ```
 
-Configure Pod coordinates and local storage in `~/.config/euboulia/config.yaml`; see
-`examples/runtime/kubernetes.yaml`. Keep private values and lock files in a local
-experiment directory outside the checkout. The controller sends only the resolved lock
-to the Pod; scenario recipes do not contain local result paths.
+Configure the namespace, private Pod template, and local storage in
+`~/.config/euboulia/config.yaml`; see `examples/runtime/kubernetes.yaml`. The controller
+creates one uniquely named Pod, transfers the checkout and resolved lock, synchronizes
+verified results, and deletes only that exact Pod. Values files never enter the Pod.
 
 An active managed run has five independent permissions:
 

@@ -6,15 +6,16 @@ checked-in recipe is `examples/scenarios/dsv4-megamoe.yaml`.
 
 ## Preconditions
 
-Run the Euboulia controller locally and configure a worker in the declared single-node
-H20 Pod. Before execution, the Pod must provide:
+Run the Euboulia controller locally and configure a private single-node H20 Pod template.
+The template must provide:
 
 - `/home/admin/model/DeepSeek-V4-Flash-0731` contains the local model;
 - Git can authenticate to every private repository through a credential helper or
   executor-mounted secret; credentials must not appear in values or the lock;
 - `lm_eval` with API extras is installed in the image at the exact version selected
   in the values file; and
-- the same Euboulia checkout is available at the executor's `project_dir`.
+- volumes, GPU resources, tolerations, image-pull secrets, and other cluster policy
+  needed by the selected node.
 
 The checked-in recipe is intentionally unresolved. Create a local values file with the
 immutable image reference and exact SGLang commit supplied by the user or deployment
@@ -69,18 +70,19 @@ After review, execute exactly one baseline (no generated candidate):
 uv run euboulia target run \
   --recipe ~/julian/euboulia-data/experiments/dsv4-megamoe/recipe.lock.yaml \
   --executor h20-pod \
+  --node 10.13.3.192 \
   --name dsv4-megamoe-baseline
 ```
 
 The private experiment directory is local-only. `values.yaml` never leaves the
-controller. The remote supervisor stages only the resolved lock in the run-specific
-Pod scratch directory and records its SHA-256 locally.
+controller. The remote supervisor stages the local checkout and resolved lock in a
+new run-specific Pod and records the lock's SHA-256 locally.
 
 The executor and canonical local storage are machine-specific and therefore live in
 `~/.config/euboulia/config.yaml`, not in the scenario. Start from
-`examples/runtime/kubernetes.yaml`. The configured `project_dir` must contain the
-same Euboulia checkout in the Pod; the model and SGLang paths remain Pod paths in the
-scenario.
+`examples/runtime/kubernetes.yaml` and keep the real Pod template next to that private
+config. `--node` accepts either a Kubernetes node name or its InternalIP and is required
+for every remote run; Euboulia resolves the value to `spec.nodeName`.
 
 `--name` is optional, non-unique display metadata. Euboulia generates an immutable,
 time-sortable ULID `run_uid` used by artifacts, workspaces, service manifests, and
@@ -143,13 +145,17 @@ owned service logs, per-command evidence, and these files:
 - `euboulia-accuracy.json`, produced directly by external `lm_eval` during
   qualification.
 
-Detached worktrees remain in the configured Pod scratch directory. Raw profile traces
-stay in the Pod by default and remain addressable through `artifact-manifest.json`.
-Pull a complete immutable snapshot explicitly when needed:
+All indexed artifacts, including retained raw profiles, are synchronized before the
+ephemeral Pod is deleted. If synchronization or verification fails, the exact owned Pod
+is retained for recovery:
 
 ```console
 uv run euboulia target artifacts pull \
   --executor h20-pod \
   --run-uid <run-uid> \
   --destination /absolute/local/path/raw-snapshot
+
+uv run euboulia target cleanup \
+  --executor h20-pod \
+  --run-uid <run-uid>
 ```

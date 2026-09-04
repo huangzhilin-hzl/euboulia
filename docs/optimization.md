@@ -242,7 +242,8 @@ uv run euboulia target resolve \
 
 uv run euboulia target run \
   --recipe ~/julian/euboulia-data/experiments/h20-baseline/recipe.lock.yaml \
-  --executor h20-pod
+  --executor h20-pod \
+  --node 10.13.3.192
 ```
 
 Values and lock files are private experiment inputs. Keep them under a local experiment
@@ -272,17 +273,34 @@ when present, owns the SGLang service lifecycle, captures the configured profile
 executes the qualification evaluation. These are fixed command semantics rather than
 separate authorization flags.
 
-For remote execution, executor coordinates and canonical storage are host policy, not
-scenario content. Put them in `~/.config/euboulia/config.yaml` (see
-`examples/runtime/kubernetes.yaml`) and select the executor with `--executor`. The
-local supervisor generates `run_uid`, records start/completion events immediately,
-materializes the fully resolved recipe under the private local run directory, and sends
-only that recipe to `<scratch_dir>/runs/<run-uid>/inputs/recipe.lock.yaml`. The original
-values file and host runtime config never enter the Pod. The supervisor then runs the
-worker and always attempts artifact retrieval on success or failure. It writes
-`run.json`, `events.jsonl`, `summary.json`, and `artifact-manifest.json` under
-`<storage.root>/runs/<run-uid>`. Raw profiles remain remote unless the sync policy is
-`always` or `target artifacts pull` is used.
+For remote execution, the namespace, Pod template, and canonical storage are host
+policy, not scenario content. Put them in `~/.config/euboulia/config.yaml` (see
+`examples/runtime/kubernetes.yaml`) and select the executor with `--executor`. Pass the
+node name or InternalIP through `--node` for each run; it is never stored in static
+configuration.
+
+The local supervisor generates `run_uid`, creates a uniquely named Pod in exactly the
+configured namespace, and records the Pod UID before executing anything. It transfers
+the local checkout and fully resolved recipe, but never the values file or host runtime
+config. On success or failure it synchronizes and verifies the complete artifact set,
+writes `run.json`, `events.jsonl`, `summary.json`, and `artifact-manifest.json` under
+`<storage.root>/runs/<run-uid>`, then deletes the Pod with a Kubernetes UID precondition.
+Every Pod operation checks the exact namespace, name, UID, run annotation, and ownership
+labels. Euboulia never searches for or mutates unrelated Pods.
+
+If transfer or verification fails, the owned Pod is retained. A later controller can use
+the local `run_uid` record to retrieve it, then explicitly clean it up:
+
+```console
+uv run euboulia target artifacts pull \
+  --executor h20-pod \
+  --run-uid <run-uid> \
+  --destination /absolute/local/path/recovery
+
+uv run euboulia target cleanup \
+  --executor h20-pod \
+  --run-uid <run-uid>
+```
 
 Pre-reviewed candidate patches remain separate experiment inputs. Every active run writes
 the exact bound document to
@@ -496,7 +514,7 @@ fixed unless one of those is the variable under test.
 Torch, CUDA, NCCL, Triton, FlashInfer, DeepGEMM, DeepEP, and `sgl-kernel`. The runner
 captures observable state before launch and can fail on a mismatch. A component with
 `source: <name>` is observed from that run's isolated source worktree rather than a
-fixed Pod path.
+fixed image path.
 
 Some values, such as a container digest, may be declared but unobservable from a
 local process. `capture.require_observed` decides whether that absence is fatal;

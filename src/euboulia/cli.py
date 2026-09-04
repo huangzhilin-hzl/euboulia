@@ -200,6 +200,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="Kubernetes executor name from the local runtime config",
     )
     target_run_parser.add_argument(
+        "--node",
+        help="Kubernetes node name or InternalIP (required with --executor)",
+    )
+    target_run_parser.add_argument(
         "--runtime-config",
         type=Path,
         help="local runtime config (default: ~/.config/euboulia/config.yaml)",
@@ -225,6 +229,15 @@ def build_parser() -> argparse.ArgumentParser:
     target_artifacts_pull_parser.add_argument("--destination", required=True, type=Path)
     target_artifacts_pull_parser.add_argument("--json", action="store_true")
     target_artifacts_pull_parser.set_defaults(handler=_target_artifacts_pull)
+
+    target_cleanup_parser = target_commands.add_parser(
+        "cleanup", help="delete one retained Pod after verifying its local ownership record"
+    )
+    target_cleanup_parser.add_argument("--run-uid", required=True)
+    target_cleanup_parser.add_argument("--executor", required=True)
+    target_cleanup_parser.add_argument("--runtime-config", type=Path)
+    target_cleanup_parser.add_argument("--json", action="store_true")
+    target_cleanup_parser.set_defaults(handler=_target_cleanup)
     return parser
 
 
@@ -512,6 +525,10 @@ def _target_run(args: argparse.Namespace) -> int:
         raise RemoteConfigError("internal worker storage arguments must be supplied together")
     if args.executor is not None and any(value is not None for value in internal_values):
         raise RemoteConfigError("--executor cannot be combined with internal worker arguments")
+    if args.executor is not None and args.node is None:
+        raise RemoteConfigError("--node is required with --executor")
+    if args.executor is None and args.node is not None:
+        raise RemoteConfigError("--node requires --executor")
     if args.executor is not None:
         require_optimization_execution_lock(config)
         runtime = load_host_runtime_config(args.runtime_config)
@@ -521,6 +538,7 @@ def _target_run(args: argparse.Namespace) -> int:
         ).run(
             config,
             name=args.name,
+            node=args.node,
         )
         if args.json:
             _print_json(remote.to_dict())
@@ -529,6 +547,9 @@ def _target_run(args: argparse.Namespace) -> int:
                 print(f"Name: {remote.name}")
             print(f"Run UID: {remote.run_uid}")
             print(f"Status: {remote.status}")
+            print(
+                f"Pod: {remote.namespace}/{remote.pod} node={remote.node} cleanup={remote.cleanup}"
+            )
             print(f"Local records: {remote.local_run_dir}")
             print(f"Remote artifacts: {remote.remote_run_dir}")
             if remote.sync is not None:
@@ -584,6 +605,26 @@ def _target_artifacts_pull(args: argparse.Namespace) -> int:
             f"Artifact sync: local={sync.local_dir} remote={sync.remote_dir} "
             f"added={sync.added} modified={sync.modified} deleted={sync.deleted}"
         )
+    return 0
+
+
+def _target_cleanup(args: argparse.Namespace) -> int:
+    runtime = load_host_runtime_config(args.runtime_config)
+    pod = KubernetesTargetSupervisor(
+        runtime.executor(args.executor),
+        runtime.storage,
+    ).cleanup(args.run_uid)
+    payload = {
+        "run_uid": pod.run_uid,
+        "namespace": runtime.executor(args.executor).namespace,
+        "pod": pod.name,
+        "pod_uid": pod.uid,
+        "deleted": True,
+    }
+    if args.json:
+        _print_json(payload)
+    else:
+        print(f"Deleted owned Pod: {payload['namespace']}/{pod.name} uid={pod.uid}")
     return 0
 
 

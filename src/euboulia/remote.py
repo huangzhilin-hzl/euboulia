@@ -27,6 +27,11 @@ from euboulia.optimization.events import EventLedger, EventType, OptimizationEve
 from euboulia.optimization.memory import SQLiteMemoryStore
 from euboulia.run_identity import new_run_uid, normalize_run_name, normalize_run_uid
 
+_MANAGED_BY_LABEL = "app.kubernetes.io/managed-by"
+_RUN_LABEL = "euboulia.io/run"
+_RUN_UID_ANNOTATION = "euboulia.io/run-uid"
+_EXECUTOR_ANNOTATION = "euboulia.io/executor"
+
 
 class RemoteConfigError(ValueError):
     """Raised when the host-only runtime configuration is invalid."""
@@ -69,7 +74,7 @@ class LocalStorageConfig:
 class KubernetesExecutorConfig:
     name: str
     namespace: str
-    pod: str
+    pod_template: Path
     project_dir: PurePosixPath
     scratch_dir: PurePosixPath
     container: str | None = None
@@ -77,9 +82,10 @@ class KubernetesExecutorConfig:
     python: str = "python3"
     kubectl: str = "kubectl"
     local_project_dir: Path | None = None
+    startup_timeout_seconds: int = 600
 
     def __post_init__(self) -> None:
-        for field_name in ("name", "namespace", "pod", "python", "kubectl"):
+        for field_name in ("name", "namespace", "python", "kubectl"):
             value = getattr(self, field_name)
             if not isinstance(value, str) or not value.strip() or value.startswith("-"):
                 raise RemoteConfigError(f"executor.{field_name} must be a safe non-empty string")
@@ -92,6 +98,10 @@ class KubernetesExecutorConfig:
                         f"executor.{field_name} must be a safe non-empty string"
                     )
                 object.__setattr__(self, field_name, value.strip())
+        template = self.pod_template.expanduser().resolve()
+        if not template.is_file():
+            raise RemoteConfigError(f"executor.pod_template does not exist: {template}")
+        object.__setattr__(self, "pod_template", template)
         for field_name in ("project_dir", "scratch_dir"):
             value = PurePosixPath(getattr(self, field_name))
             if not value.is_absolute() or ".." in value.parts:
@@ -103,6 +113,22 @@ class KubernetesExecutorConfig:
                 "local_project_dir",
                 self.local_project_dir.expanduser().resolve(),
             )
+        if (
+            not isinstance(self.startup_timeout_seconds, int)
+            or isinstance(self.startup_timeout_seconds, bool)
+            or self.startup_timeout_seconds <= 0
+        ):
+            raise RemoteConfigError("executor.startup_timeout_seconds must be a positive integer")
+
+
+@dataclass(frozen=True, slots=True)
+class OwnedPod:
+    """Exact identity of one Pod created for one Euboulia run."""
+
+    name: str
+    uid: str
+    run_uid: str
+    node_name: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,6 +173,11 @@ class RemoteTargetRunResult:
     status: str
     passed: bool
     executor: str
+    namespace: str
+    pod: str | None
+    pod_uid: str | None
+    node: str | None
+    cleanup: str
     local_run_dir: Path
     remote_run_dir: PurePosixPath
     summary_path: Path
@@ -163,6 +194,11 @@ class RemoteTargetRunResult:
             "status": self.status,
             "passed": self.passed,
             "executor": self.executor,
+            "namespace": self.namespace,
+            "pod": self.pod,
+            "pod_uid": self.pod_uid,
+            "node": self.node,
+            "cleanup": self.cleanup,
             "local_run_dir": str(self.local_run_dir),
             "remote_run_dir": str(self.remote_run_dir),
             "summary_path": str(self.summary_path),
@@ -234,14 +270,17 @@ class KubernetesTargetSupervisor:
     ) -> None:
         self.executor = executor
         self.storage = storage
+        self._pod: OwnedPod | None = None
 
     def run(
         self,
         config: OptimizationConfig,
         *,
         name: str | None,
+        node: str,
     ) -> RemoteTargetRunResult:
         selected_name = normalize_run_name(name)
+        requested_node = _safe_argument(node, "node")
         run_uid = new_run_uid()
         local_run_dir = self.storage.runs_dir / run_uid
         local_run_dir.mkdir(parents=True, mode=0o700, exist_ok=False)
@@ -267,7 +306,10 @@ class KubernetesTargetSupervisor:
             "executor": self.executor.name,
             "executor_type": "kubernetes",
             "namespace": self.executor.namespace,
-            "pod": self.executor.pod,
+            "pod": None,
+            "pod_uid": None,
+            "requested_node": requested_node,
+            "node": None,
             "container": self.executor.container,
             "local_recipe": str(local_recipe),
             "remote_recipe": str(remote_recipe),
@@ -275,6 +317,7 @@ class KubernetesTargetSupervisor:
             "remote_run_dir": str(remote_run_dir),
             "started_at": started_at,
             "status": "running",
+            "cleanup": "not_created",
         }
         _write_json(local_run_dir / "run.json", base_record)
         ledger.append(
@@ -285,7 +328,7 @@ class KubernetesTargetSupervisor:
                     "name": selected_name,
                     "executor": self.executor.name,
                     "namespace": self.executor.namespace,
-                    "pod": self.executor.pod,
+                    "requested_node": requested_node,
                     "remote_run_dir": str(remote_run_dir),
                 },
             )
@@ -296,6 +339,18 @@ class KubernetesTargetSupervisor:
         worker_payload: Mapping[str, JSONValue] | None = None
         error: str | None = None
         try:
+            self._pod = self._create_pod(config, run_uid=run_uid, node=requested_node)
+            base_record.update(
+                {
+                    "pod": self._pod.name,
+                    "pod_uid": self._pod.uid,
+                    "node": self._pod.node_name,
+                    "cleanup": "retained",
+                }
+            )
+            _write_json(local_run_dir / "run.json", base_record)
+            self._wait_pod_ready(self._pod)
+            self._stage_project(local_run_dir)
             self._stage_recipe(
                 remote_run_dir,
                 remote_recipe,
@@ -325,11 +380,16 @@ class KubernetesTargetSupervisor:
         except (OSError, RemoteExecutionError, ValueError) as exc:
             error = str(exc)
         finally:
-            try:
-                sync = self._pull_artifacts(remote_run_dir, local_run_dir / "artifacts")
-            except (OSError, RemoteExecutionError, tarfile.TarError) as exc:
-                sync_error = f"artifact sync failed: {exc}"
-                error = sync_error if error is None else f"{error}; {sync_error}"
+            if self._pod is not None:
+                try:
+                    sync = self._pull_artifacts(
+                        remote_run_dir,
+                        local_run_dir / "artifacts",
+                        include_raw_profiles=True,
+                    )
+                except (OSError, RemoteExecutionError, tarfile.TarError) as exc:
+                    sync_error = f"artifact sync failed: {exc}"
+                    error = sync_error if error is None else f"{error}; {sync_error}"
 
         manifest_error: str | None = None
         if sync is None:
@@ -340,6 +400,7 @@ class KubernetesTargetSupervisor:
                     local_run_dir / "artifacts",
                     manifest_path,
                     executor=self.executor,
+                    pod_name=self._pod.name if self._pod is not None else None,
                     remote_run_dir=remote_run_dir,
                     run_uid=run_uid,
                 )
@@ -354,11 +415,25 @@ class KubernetesTargetSupervisor:
                     "run_uid": run_uid,
                     "executor": self.executor.name,
                     "verified": False,
-                    "remote_uri": _kubernetes_uri(self.executor, remote_run_dir),
+                    "remote_uri": (
+                        None
+                        if self._pod is None
+                        else _kubernetes_uri(self.executor, self._pod.name, remote_run_dir)
+                    ),
                     "artifacts": [],
                     "error": manifest_error,
                 },
             )
+
+        cleanup = cast(str, base_record["cleanup"])
+        if self._pod is not None and manifest_error is None:
+            try:
+                self._delete_owned_pod(self._pod)
+                cleanup = "deleted"
+            except (OSError, RemoteExecutionError, ValueError) as exc:
+                cleanup_error = f"Pod cleanup failed: {exc}"
+                error = cleanup_error if error is None else f"{error}; {cleanup_error}"
+                cleanup = "retained"
 
         completed = worker_payload is not None and error is None and sync is not None
         passed = completed and worker_payload is not None and worker_payload.get("passed") is True
@@ -372,6 +447,7 @@ class KubernetesTargetSupervisor:
             "worker": None if worker is None else cast(JSONValue, worker.to_dict()),
             "result": None if worker_payload is None else dict(worker_payload),
             "sync": None if sync is None else sync.to_dict(),
+            "cleanup": cleanup,
             "error": error,
         }
         _write_json(summary_path, summary)
@@ -395,6 +471,11 @@ class KubernetesTargetSupervisor:
             status=status,
             passed=passed,
             executor=self.executor.name,
+            namespace=self.executor.namespace,
+            pod=None if self._pod is None else self._pod.name,
+            pod_uid=None if self._pod is None else self._pod.uid,
+            node=None if self._pod is None else self._pod.node_name,
+            cleanup=cleanup,
             local_run_dir=local_run_dir,
             remote_run_dir=remote_run_dir,
             summary_path=summary_path,
@@ -406,15 +487,412 @@ class KubernetesTargetSupervisor:
         )
 
     def pull_snapshot(self, run_uid: str, destination: Path) -> SyncSummary:
-        """Pull a complete immutable snapshot, including raw profiles, on demand."""
+        """Pull from a retained Pod only after proving exact local ownership."""
 
         selected_uid = normalize_run_uid(run_uid)
+        self._pod = self._owned_pod_from_run_record(selected_uid)
         remote_run_dir = self.executor.scratch_dir / "runs" / selected_uid
         return self._pull_artifacts(
             remote_run_dir,
             destination.expanduser().resolve(),
             include_raw_profiles=True,
         )
+
+    def cleanup(self, run_uid: str) -> OwnedPod:
+        """Delete exactly one retained Pod recorded as owned by this executor."""
+
+        selected_uid = normalize_run_uid(run_uid)
+        pod = self._owned_pod_from_run_record(selected_uid)
+        self._delete_owned_pod(pod)
+        record_path = self.storage.runs_dir / selected_uid / "run.json"
+        record = dict(_mapping(json.loads(record_path.read_text(encoding="utf-8")), "run record"))
+        record["cleanup"] = "deleted"
+        record["cleanup_at"] = utc_now()
+        _write_json(record_path, cast(Mapping[str, JSONValue], record))
+        return pod
+
+    def _create_pod(
+        self,
+        config: OptimizationConfig,
+        *,
+        run_uid: str,
+        node: str,
+    ) -> OwnedPod:
+        node_name = self._resolve_node_name(node)
+        manifest = self._pod_manifest(config, run_uid=run_uid, node_name=node_name)
+        argv = [*self._kubectl_prefix(), "create", "--filename=-", "--output=json"]
+        try:
+            completed = subprocess.run(
+                argv,
+                input=json.dumps(manifest, ensure_ascii=False).encode("utf-8"),
+                capture_output=True,
+                timeout=120,
+                check=False,
+                shell=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise RemoteExecutionError("timed out while creating the Pod") from exc
+        except OSError as exc:
+            raise RemoteExecutionError(f"cannot create the Pod: {exc}") from exc
+        if completed.returncode != 0:
+            detail = completed.stderr.decode("utf-8", errors="replace").strip()
+            raise RemoteExecutionError(
+                f"Pod creation exited with status {completed.returncode}: {detail}"
+            )
+        try:
+            payload = json.loads(completed.stdout)
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise RemoteExecutionError("kubectl create returned invalid Pod JSON") from exc
+        pod = self._owned_pod_from_payload(payload, expected_run_uid=run_uid)
+        if pod.node_name != node_name:
+            raise RemoteExecutionError(
+                f"created Pod reports node {pod.node_name!r}, expected {node_name!r}"
+            )
+        return pod
+
+    def _pod_manifest(
+        self,
+        config: OptimizationConfig,
+        *,
+        run_uid: str,
+        node_name: str,
+    ) -> dict[str, object]:
+        try:
+            loaded: object = yaml.safe_load(self.executor.pod_template.read_text(encoding="utf-8"))
+        except (OSError, yaml.YAMLError) as exc:
+            raise RemoteConfigError(f"cannot load Pod template: {exc}") from exc
+        template = dict(_mapping(loaded, "executor.pod_template"))
+        if template.get("apiVersion") != "v1" or template.get("kind") != "Pod":
+            raise RemoteConfigError("executor.pod_template must describe one v1 Pod")
+        template.pop("status", None)
+        metadata = dict(_mapping(template.get("metadata", {}), "Pod template metadata"))
+        template_namespace = metadata.get("namespace")
+        if template_namespace is not None and template_namespace != self.executor.namespace:
+            raise RemoteConfigError(
+                "Pod template namespace must match the executor namespace exactly"
+            )
+        for field_name in (
+            "creationTimestamp",
+            "generateName",
+            "managedFields",
+            "name",
+            "ownerReferences",
+            "resourceVersion",
+            "selfLink",
+            "uid",
+        ):
+            metadata.pop(field_name, None)
+        pod_name = _pod_name(run_uid)
+        metadata["name"] = pod_name
+        metadata["namespace"] = self.executor.namespace
+        labels = dict(_mapping(metadata.get("labels", {}), "Pod template metadata.labels"))
+        labels[_MANAGED_BY_LABEL] = "euboulia"
+        labels[_RUN_LABEL] = _run_label_value(run_uid)
+        metadata["labels"] = labels
+        annotations = dict(
+            _mapping(metadata.get("annotations", {}), "Pod template metadata.annotations")
+        )
+        annotations[_RUN_UID_ANNOTATION] = run_uid
+        annotations[_EXECUTOR_ANNOTATION] = self.executor.name
+        metadata["annotations"] = annotations
+        template["metadata"] = metadata
+
+        spec = dict(_mapping(template.get("spec"), "Pod template spec"))
+        spec["nodeName"] = node_name
+        spec["restartPolicy"] = "Never"
+        raw_containers = spec.get("containers")
+        if not isinstance(raw_containers, list) or not raw_containers:
+            raise RemoteConfigError("Pod template spec.containers must be a non-empty list")
+        containers: list[dict[str, object]] = []
+        selected_indexes: list[int] = []
+        for index, raw_container in enumerate(raw_containers):
+            container = dict(_mapping(raw_container, f"Pod template container {index}"))
+            containers.append(container)
+            if self.executor.container is None or container.get("name") == self.executor.container:
+                selected_indexes.append(index)
+        if self.executor.container is None and len(containers) != 1:
+            raise RemoteConfigError(
+                "executor.container is required when the Pod template has multiple containers"
+            )
+        if len(selected_indexes) != 1:
+            raise RemoteConfigError(
+                f"Pod template must contain exactly one container named {self.executor.container!r}"
+            )
+        if config.target is None or config.target.runtime is None:
+            raise RemoteConfigError("target.runtime is required for Kubernetes execution")
+        expected_container = config.target.runtime.expected.container
+        if expected_container is None:
+            raise RemoteConfigError(
+                "target.runtime.expected.container is required for Kubernetes execution"
+            )
+        containers[selected_indexes[0]]["image"] = expected_container.image
+        spec["containers"] = containers
+        template["spec"] = spec
+        return template
+
+    def _resolve_node_name(self, requested: str) -> str:
+        selected = _safe_argument(requested, "node")
+        argv = [*self._kubectl_prefix(namespaced=False), "get", "nodes", "--output=json"]
+        try:
+            completed = subprocess.run(
+                argv,
+                capture_output=True,
+                timeout=60,
+                check=False,
+                shell=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise RemoteExecutionError(f"cannot resolve node {selected!r}: {exc}") from exc
+        if completed.returncode != 0:
+            detail = completed.stderr.decode("utf-8", errors="replace").strip()
+            raise RemoteExecutionError(f"cannot list Kubernetes nodes: {detail}")
+        try:
+            payload = json.loads(completed.stdout)
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise RemoteExecutionError("kubectl get nodes returned invalid JSON") from exc
+        items = payload.get("items") if isinstance(payload, dict) else None
+        if not isinstance(items, list):
+            raise RemoteExecutionError("kubectl get nodes returned no item list")
+        matches: set[str] = set()
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            metadata = item.get("metadata")
+            status = item.get("status")
+            node_name = metadata.get("name") if isinstance(metadata, dict) else None
+            if not isinstance(node_name, str):
+                continue
+            if node_name == selected:
+                matches.add(node_name)
+            addresses = status.get("addresses") if isinstance(status, dict) else None
+            if isinstance(addresses, list):
+                for address in addresses:
+                    if isinstance(address, dict) and address.get("address") == selected:
+                        matches.add(node_name)
+        if len(matches) != 1:
+            detail = "not found" if not matches else "ambiguous"
+            raise RemoteExecutionError(f"Kubernetes node or address {selected!r} is {detail}")
+        return next(iter(matches))
+
+    def _wait_pod_ready(self, pod: OwnedPod) -> None:
+        self._assert_owned_pod(pod)
+        argv = [
+            *self._kubectl_prefix(),
+            "wait",
+            "--for=condition=Ready",
+            f"pod/{pod.name}",
+            f"--timeout={self.executor.startup_timeout_seconds}s",
+        ]
+        try:
+            completed = subprocess.run(
+                argv,
+                capture_output=True,
+                timeout=self.executor.startup_timeout_seconds + 30,
+                check=False,
+                shell=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise RemoteExecutionError(f"cannot wait for owned Pod {pod.name}: {exc}") from exc
+        if completed.returncode != 0:
+            detail = completed.stderr.decode("utf-8", errors="replace").strip()
+            raise RemoteExecutionError(f"owned Pod {pod.name} did not become Ready: {detail}")
+
+    def _stage_project(self, local_run_dir: Path) -> None:
+        project = self.executor.local_project_dir or _discover_project_root(Path(__file__))
+        prepare = """\
+from pathlib import Path
+import sys
+
+destination = Path(sys.argv[1])
+destination.mkdir(parents=True, exist_ok=True)
+if any(destination.iterdir()):
+    raise SystemExit(f"project destination is not empty: {destination}")
+"""
+        prepare_argv = [
+            *self._kubectl_exec_prefix(),
+            self.executor.python,
+            "-c",
+            prepare,
+            str(self.executor.project_dir),
+        ]
+        try:
+            prepared = subprocess.run(
+                prepare_argv,
+                capture_output=True,
+                timeout=120,
+                check=False,
+                shell=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise RemoteExecutionError(f"cannot prepare the Pod project directory: {exc}") from exc
+        control = local_run_dir / "control"
+        _write_private_bytes(control / "project-stage.prepare.stderr.log", prepared.stderr)
+        if prepared.returncode != 0:
+            detail = prepared.stderr.decode("utf-8", errors="replace").strip()
+            raise RemoteExecutionError(f"cannot prepare the Pod project directory: {detail}")
+
+        # Archive tracked HEAD only: ignored values, credentials, and unrelated
+        # untracked files can never leak into the worker Pod.
+        local_argv = ["git", "archive", "--format=tar", "HEAD"]
+        remote_argv = [
+            *self._kubectl_exec_prefix(stdin=True),
+            "tar",
+            "-C",
+            str(self.executor.project_dir),
+            "-xf",
+            "-",
+        ]
+        local_stderr = control / "project-stage.local.stderr.log"
+        remote_stderr = control / "project-stage.remote.stderr.log"
+        with local_stderr.open("xb") as local_error, remote_stderr.open("xb") as remote_error:
+            local_process = subprocess.Popen(
+                local_argv,
+                cwd=project,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=local_error,
+                shell=False,
+            )
+            if local_process.stdout is None:  # pragma: no cover - PIPE guarantees this
+                raise RemoteExecutionError("local project archive has no stdout")
+            remote_process = subprocess.Popen(
+                remote_argv,
+                stdin=local_process.stdout,
+                stdout=subprocess.DEVNULL,
+                stderr=remote_error,
+                shell=False,
+            )
+            local_process.stdout.close()
+            remote_returncode = remote_process.wait()
+            local_returncode = local_process.wait()
+        if local_returncode != 0 or remote_returncode != 0:
+            raise RemoteExecutionError(
+                "project transfer failed "
+                f"(local tar={local_returncode}, Pod tar={remote_returncode})"
+            )
+
+    def _owned_pod_from_run_record(self, run_uid: str) -> OwnedPod:
+        path = self.storage.runs_dir / run_uid / "run.json"
+        try:
+            payload: object = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            message = f"cannot read local run ownership record {path}: {exc}"
+            raise RemoteExecutionError(message) from exc
+        record = _mapping(payload, "local run ownership record")
+        if record.get("run_uid") != run_uid:
+            raise RemoteExecutionError("local run ownership record has a different run_uid")
+        if record.get("executor") != self.executor.name:
+            raise RemoteExecutionError("local run ownership record belongs to another executor")
+        if record.get("namespace") != self.executor.namespace:
+            raise RemoteExecutionError("local run ownership record belongs to another namespace")
+        pod_name = record.get("pod")
+        pod_uid = record.get("pod_uid")
+        node_name = record.get("node")
+        if not all(isinstance(value, str) and value for value in (pod_name, pod_uid, node_name)):
+            raise RemoteExecutionError("local run ownership record has no complete Pod identity")
+        pod = OwnedPod(
+            name=cast(str, pod_name),
+            uid=cast(str, pod_uid),
+            run_uid=run_uid,
+            node_name=cast(str, node_name),
+        )
+        self._assert_owned_pod(pod)
+        return pod
+
+    def _assert_owned_pod(self, pod: OwnedPod) -> None:
+        argv = [*self._kubectl_prefix(), "get", "pod", pod.name, "--output=json"]
+        try:
+            completed = subprocess.run(
+                argv,
+                capture_output=True,
+                timeout=60,
+                check=False,
+                shell=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise RemoteExecutionError(f"cannot verify Pod ownership: {exc}") from exc
+        if completed.returncode != 0:
+            detail = completed.stderr.decode("utf-8", errors="replace").strip()
+            raise RemoteExecutionError(f"cannot verify Pod ownership: {detail}")
+        try:
+            payload = json.loads(completed.stdout)
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise RemoteExecutionError("kubectl get pod returned invalid JSON") from exc
+        observed = self._owned_pod_from_payload(payload, expected_run_uid=pod.run_uid)
+        if observed != pod:
+            raise RemoteExecutionError(
+                f"refusing to operate on Pod {pod.name}: immutable Pod identity changed"
+            )
+
+    def _owned_pod_from_payload(
+        self,
+        payload: object,
+        *,
+        expected_run_uid: str,
+    ) -> OwnedPod:
+        raw = _mapping(payload, "Pod")
+        metadata = _mapping(raw.get("metadata"), "Pod metadata")
+        spec = _mapping(raw.get("spec"), "Pod spec")
+        labels = _mapping(metadata.get("labels", {}), "Pod labels")
+        annotations = _mapping(metadata.get("annotations", {}), "Pod annotations")
+        if metadata.get("namespace") != self.executor.namespace:
+            raise RemoteExecutionError("Pod is outside the configured namespace")
+        if labels.get(_MANAGED_BY_LABEL) != "euboulia":
+            raise RemoteExecutionError("Pod is not labelled as managed by Euboulia")
+        if labels.get(_RUN_LABEL) != _run_label_value(expected_run_uid):
+            raise RemoteExecutionError("Pod run ownership label does not match")
+        if annotations.get(_RUN_UID_ANNOTATION) != expected_run_uid:
+            raise RemoteExecutionError("Pod run ownership annotation does not match")
+        if annotations.get(_EXECUTOR_ANNOTATION) != self.executor.name:
+            raise RemoteExecutionError("Pod executor ownership annotation does not match")
+        name = metadata.get("name")
+        uid = metadata.get("uid")
+        node_name = spec.get("nodeName")
+        if not all(isinstance(value, str) and value for value in (name, uid, node_name)):
+            raise RemoteExecutionError("Pod response has no complete immutable identity")
+        return OwnedPod(
+            name=cast(str, name),
+            uid=cast(str, uid),
+            run_uid=expected_run_uid,
+            node_name=cast(str, node_name),
+        )
+
+    def _delete_owned_pod(self, pod: OwnedPod) -> None:
+        self._assert_owned_pod(pod)
+        uri = f"/api/v1/namespaces/{self.executor.namespace}/pods/{pod.name}"
+        delete_options = {
+            "apiVersion": "v1",
+            "kind": "DeleteOptions",
+            "preconditions": {"uid": pod.uid},
+        }
+        argv = [
+            *self._kubectl_prefix(namespaced=False),
+            "delete",
+            f"--raw={uri}",
+            "--filename=-",
+        ]
+        try:
+            completed = subprocess.run(
+                argv,
+                input=json.dumps(delete_options).encode("utf-8"),
+                capture_output=True,
+                timeout=120,
+                check=False,
+                shell=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise RemoteExecutionError(f"cannot delete owned Pod {pod.name}: {exc}") from exc
+        if completed.returncode != 0:
+            detail = completed.stderr.decode("utf-8", errors="replace").strip()
+            raise RemoteExecutionError(f"cannot delete owned Pod {pod.name}: {detail}")
+
+    def _kubectl_prefix(self, *, namespaced: bool = True) -> tuple[str, ...]:
+        argv = [self.executor.kubectl]
+        if self.executor.context is not None:
+            argv.extend(("--context", self.executor.context))
+        if namespaced:
+            argv.extend(("--namespace", self.executor.namespace))
+        return tuple(argv)
 
     def _worker_recipe(self, config: OptimizationConfig) -> str:
         """Build the fully resolved recipe consumed by the Pod worker."""
@@ -445,7 +923,7 @@ class KubernetesTargetSupervisor:
                 if not Path(raw).expanduser().is_absolute():
                     raise RemoteConfigError(
                         f"{field} resolves outside local project directory {project}; "
-                        "only the resolved recipe is staged remotely"
+                        "only tracked project files and the resolved recipe are staged remotely"
                     ) from exc
                 return
             current[keys[-1]] = str(self.executor.project_dir.joinpath(*relative.parts))
@@ -639,13 +1117,13 @@ print(hashlib.sha256(data).hexdigest())
         )
 
     def _kubectl_exec_prefix(self, *, stdin: bool = False) -> tuple[str, ...]:
-        argv = [self.executor.kubectl]
-        if self.executor.context is not None:
-            argv.extend(("--context", self.executor.context))
-        argv.extend(("--namespace", self.executor.namespace, "exec"))
+        if self._pod is None:
+            raise RemoteExecutionError("no owned Pod is attached to this supervisor")
+        self._assert_owned_pod(self._pod)
+        argv = [*self._kubectl_prefix(), "exec"]
         if stdin:
             argv.append("--stdin")
-        argv.append(self.executor.pod)
+        argv.append(self._pod.name)
         if self.executor.container is not None:
             argv.extend(("--container", self.executor.container))
         argv.append("--")
@@ -714,7 +1192,7 @@ def _parse_executor(
     allowed = {
         "type",
         "namespace",
-        "pod",
+        "pod_template",
         "container",
         "context",
         "project_dir",
@@ -722,6 +1200,7 @@ def _parse_executor(
         "local_project_dir",
         "python",
         "kubectl",
+        "startup_timeout_seconds",
     }
     _reject_unknown(raw, allowed, f"executors.{name}")
     kind = _string(raw.get("type"), f"executors.{name}.type")
@@ -731,7 +1210,11 @@ def _parse_executor(
     return KubernetesExecutorConfig(
         name=name,
         namespace=_string(raw.get("namespace"), f"executors.{name}.namespace"),
-        pod=_string(raw.get("pod"), f"executors.{name}.pod"),
+        pod_template=_local_path(
+            raw.get("pod_template"),
+            f"executors.{name}.pod_template",
+            source,
+        ),
         container=_optional_string(raw.get("container"), f"executors.{name}.container"),
         context=_optional_string(raw.get("context"), f"executors.{name}.context"),
         project_dir=PurePosixPath(_string(raw.get("project_dir"), f"executors.{name}.project_dir")),
@@ -747,6 +1230,10 @@ def _parse_executor(
         ),
         python=_string(raw.get("python", "python3"), f"executors.{name}.python"),
         kubectl=_string(raw.get("kubectl", "kubectl"), f"executors.{name}.kubectl"),
+        startup_timeout_seconds=_positive_int(
+            raw.get("startup_timeout_seconds", 600),
+            f"executors.{name}.startup_timeout_seconds",
+        ),
     )
 
 
@@ -788,10 +1275,13 @@ def _write_local_artifact_manifest(
     destination: Path,
     *,
     executor: KubernetesExecutorConfig,
+    pod_name: str | None,
     remote_run_dir: PurePosixPath,
     run_uid: str,
 ) -> None:
     index_path = local_artifacts_dir / "artifact-index.json"
+    if pod_name is None:
+        raise RemoteExecutionError("artifact snapshot has no owned Pod identity")
     if not index_path.is_file():
         raise RemoteExecutionError("artifact snapshot has no artifact-index.json")
     parsed = json.loads(index_path.read_text(encoding="utf-8"))
@@ -843,7 +1333,11 @@ def _write_local_artifact_manifest(
                 "retention": cast(str, retention),
                 "synced": synced,
                 "local_path": str(local_path) if synced else None,
-                "remote_uri": _kubernetes_uri(executor, remote_run_dir / safe_relative),
+                "remote_uri": _kubernetes_uri(
+                    executor,
+                    pod_name,
+                    remote_run_dir / safe_relative,
+                ),
             }
         )
     actual_paths = {
@@ -862,7 +1356,7 @@ def _write_local_artifact_manifest(
             "run_uid": normalized_uid,
             "executor": executor.name,
             "verified": True,
-            "remote_uri": _kubernetes_uri(executor, remote_run_dir),
+            "remote_uri": _kubernetes_uri(executor, pod_name, remote_run_dir),
             "artifacts": cast(JSONValue, artifacts),
         },
     )
@@ -870,10 +1364,11 @@ def _write_local_artifact_manifest(
 
 def _kubernetes_uri(
     executor: KubernetesExecutorConfig,
+    pod_name: str,
     path: PurePosixPath,
 ) -> str:
     container = "" if executor.container is None else f"/{executor.container}"
-    return f"kubernetes://{executor.namespace}/{executor.pod}{container}{path.as_posix()}"
+    return f"kubernetes://{executor.namespace}/{pod_name}{container}{path.as_posix()}"
 
 
 def _read_last_json_object(path: Path) -> Mapping[str, JSONValue]:
@@ -971,6 +1466,28 @@ def _optional_string(value: object, path: str) -> str | None:
     return None if value is None else _string(value, path)
 
 
+def _positive_int(value: object, path: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        raise RemoteConfigError(f"{path} must be a positive integer")
+    return value
+
+
+def _safe_argument(value: object, path: str) -> str:
+    selected = _string(value, path)
+    if selected.startswith("-") or any(character.isspace() for character in selected):
+        raise RemoteConfigError(f"{path} must be a safe command argument")
+    return selected
+
+
+def _run_label_value(run_uid: str) -> str:
+    return hashlib.sha256(normalize_run_uid(run_uid).encode("utf-8")).hexdigest()[:24]
+
+
+def _pod_name(run_uid: str) -> str:
+    suffix = normalize_run_uid(run_uid).lower()
+    return f"euboulia-{suffix}"[:63].rstrip("-")
+
+
 def _local_path(value: object, path: str, source: Path) -> Path:
     candidate = Path(_string(value, path)).expanduser()
     if not candidate.is_absolute():
@@ -984,6 +1501,7 @@ __all__ = [
     "KubernetesExecutorConfig",
     "KubernetesTargetSupervisor",
     "LocalStorageConfig",
+    "OwnedPod",
     "RemoteConfigError",
     "RemoteExecutionError",
     "RemoteTargetRunResult",

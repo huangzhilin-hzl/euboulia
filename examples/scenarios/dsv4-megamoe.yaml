@@ -2,8 +2,8 @@
 # ds-v4-flash-dspark-cp8-tp8-ep8_megamoe_test_plan.md
 #
 # The local controller may execute this recipe through a configured Kubernetes
-# executor. The Pod must contain the model and this checkout; declared Git sources
-# are fetched into per-run isolated worktrees by the worker.
+# executor. Euboulia creates the Pod and stages this checkout; the Pod template must
+# expose the model path. Declared Git sources use per-run isolated worktrees.
 # Inspect required bindings without side effects:
 #   euboulia target plan --recipe examples/scenarios/dsv4-megamoe.yaml
 # Bind the immutable image, model, SGLang, and DeepGEMM identities before execution:

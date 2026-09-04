@@ -3,6 +3,7 @@ import io
 import json
 import tarfile
 from pathlib import Path, PurePosixPath
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -14,10 +15,11 @@ from euboulia.optimization.events import EventLedger, EventType
 
 
 def _executor(tmp_path: Path) -> remote.KubernetesExecutorConfig:
+    template = Path(__file__).resolve().parents[1] / "examples/runtime/pod-template.yaml"
     return remote.KubernetesExecutorConfig(
         name="h20-pod",
         namespace="inference",
-        pod="dsv4-h20",
+        pod_template=template,
         container="runtime",
         project_dir=PurePosixPath("/workspace/euboulia"),
         scratch_dir=PurePosixPath("/home/admin/.cache/euboulia"),
@@ -37,13 +39,23 @@ executors:
   h20-pod:
     type: kubernetes
     namespace: inference
-    pod: dsv4-h20
+    pod_template: ./pod-template.yaml
     container: runtime
     project_dir: /workspace/euboulia
     scratch_dir: /home/admin/.cache/euboulia
     local_project_dir: .
 """.strip()
         + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "pod-template.yaml").write_text(
+        "apiVersion: v1\n"
+        "kind: Pod\n"
+        "metadata: {}\n"
+        "spec:\n"
+        "  containers:\n"
+        "    - name: runtime\n"
+        "      image: placeholder.invalid/image\n",
         encoding="utf-8",
     )
 
@@ -55,6 +67,194 @@ executors:
     assert config.storage.sync.raw_profiles == "on_demand"
     assert executor.project_dir == PurePosixPath("/workspace/euboulia")
     assert executor.scratch_dir == PurePosixPath("/home/admin/.cache/euboulia")
+    assert executor.pod_template == (tmp_path / "pod-template.yaml").resolve()
+
+
+def test_pod_manifest_owns_identity_namespace_node_and_recipe_image(tmp_path: Path) -> None:
+    supervisor = remote.KubernetesTargetSupervisor(
+        _executor(tmp_path),
+        remote.LocalStorageConfig(root=tmp_path / "results"),
+    )
+    config = SimpleNamespace(
+        target=SimpleNamespace(
+            runtime=SimpleNamespace(
+                expected=SimpleNamespace(
+                    container=SimpleNamespace(image="registry.example/sglang@sha256:" + "a" * 64)
+                )
+            )
+        )
+    )
+    run_uid = "run-01HF7YAT000000000000000000"
+
+    manifest = supervisor._pod_manifest(config, run_uid=run_uid, node_name="worker-8")
+
+    assert manifest["metadata"]["name"] == "euboulia-run-01hf7yat000000000000000000"
+    assert manifest["metadata"]["namespace"] == "inference"
+    assert manifest["metadata"]["labels"]["app.kubernetes.io/managed-by"] == "euboulia"
+    assert manifest["metadata"]["annotations"]["euboulia.io/run-uid"] == run_uid
+    assert manifest["spec"]["nodeName"] == "worker-8"
+    assert manifest["spec"]["containers"][0]["image"].endswith("a" * 64)
+
+
+def test_pod_template_cannot_override_configured_namespace(tmp_path: Path) -> None:
+    template = tmp_path / "pod.yaml"
+    template.write_text(
+        "apiVersion: v1\nkind: Pod\nmetadata:\n  namespace: somebody-else\n"
+        "spec:\n  containers:\n    - name: runtime\n      image: placeholder\n",
+        encoding="utf-8",
+    )
+    executor = remote.KubernetesExecutorConfig(
+        name="worker",
+        namespace="inference",
+        pod_template=template,
+        container="runtime",
+        project_dir=PurePosixPath("/workspace/euboulia"),
+        scratch_dir=PurePosixPath("/scratch/euboulia"),
+    )
+    supervisor = remote.KubernetesTargetSupervisor(
+        executor,
+        remote.LocalStorageConfig(root=tmp_path / "results"),
+    )
+    config = SimpleNamespace(
+        target=SimpleNamespace(
+            runtime=SimpleNamespace(
+                expected=SimpleNamespace(
+                    container=SimpleNamespace(image="image@sha256:" + "a" * 64)
+                )
+            )
+        )
+    )
+
+    with pytest.raises(remote.RemoteConfigError, match="namespace must match"):
+        supervisor._pod_manifest(
+            config,
+            run_uid="run-01HF7YAT000000000000000000",
+            node_name="worker-8",
+        )
+
+
+def test_delete_uses_exact_owned_pod_uid_as_api_precondition(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    supervisor = remote.KubernetesTargetSupervisor(
+        _executor(tmp_path),
+        remote.LocalStorageConfig(root=tmp_path / "results"),
+    )
+    pod = remote.OwnedPod(
+        name="euboulia-run-01hf7yat000000000000000000",
+        uid="7e0f5c37-12aa-45d9-a17a-d7a3a0861111",
+        run_uid="run-01HF7YAT000000000000000000",
+        node_name="worker-8",
+    )
+    monkeypatch.setattr(supervisor, "_assert_owned_pod", lambda candidate: None)
+    observed: dict[str, object] = {}
+
+    def fake_run(argv: list[str], **kwargs: object) -> object:
+        observed["argv"] = argv
+        observed.update(kwargs)
+        return remote.subprocess.CompletedProcess(argv, 0, stdout=b"{}", stderr=b"")
+
+    monkeypatch.setattr(remote.subprocess, "run", fake_run)
+
+    supervisor._delete_owned_pod(pod)
+
+    assert observed["argv"] == [
+        "kubectl",
+        "delete",
+        "--raw=/api/v1/namespaces/inference/pods/euboulia-run-01hf7yat000000000000000000",
+        "--filename=-",
+    ]
+    delete_options = json.loads(observed["input"])
+    assert delete_options["preconditions"] == {"uid": pod.uid}
+
+
+def test_create_uses_unique_name_and_only_the_configured_namespace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    supervisor = remote.KubernetesTargetSupervisor(
+        _executor(tmp_path),
+        remote.LocalStorageConfig(root=tmp_path / "results"),
+    )
+    run_uid = "run-01HF7YAT000000000000000000"
+    pod_name = "euboulia-run-01hf7yat000000000000000000"
+    monkeypatch.setattr(supervisor, "_resolve_node_name", lambda node: "worker-8")
+    monkeypatch.setattr(
+        supervisor,
+        "_pod_manifest",
+        lambda config, run_uid, node_name: {
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "metadata": {"name": pod_name, "namespace": "inference"},
+        },
+    )
+    payload = {
+        "metadata": {
+            "name": pod_name,
+            "namespace": "inference",
+            "uid": "owned-uid",
+            "labels": {
+                "app.kubernetes.io/managed-by": "euboulia",
+                "euboulia.io/run": remote._run_label_value(run_uid),
+            },
+            "annotations": {
+                "euboulia.io/run-uid": run_uid,
+                "euboulia.io/executor": "h20-pod",
+            },
+        },
+        "spec": {"nodeName": "worker-8"},
+    }
+    observed: dict[str, object] = {}
+
+    def fake_run(argv: list[str], **kwargs: object) -> object:
+        observed["argv"] = argv
+        observed.update(kwargs)
+        return remote.subprocess.CompletedProcess(
+            argv,
+            0,
+            stdout=json.dumps(payload).encode("utf-8"),
+            stderr=b"",
+        )
+
+    monkeypatch.setattr(remote.subprocess, "run", fake_run)
+
+    pod = supervisor._create_pod(object(), run_uid=run_uid, node="10.0.0.8")  # type: ignore[arg-type]
+
+    assert pod.name == pod_name
+    assert observed["argv"] == [
+        "kubectl",
+        "--namespace",
+        "inference",
+        "create",
+        "--filename=-",
+        "--output=json",
+    ]
+    submitted = json.loads(observed["input"])
+    assert submitted["metadata"] == {"name": pod_name, "namespace": "inference"}
+
+
+def test_ownership_check_rejects_an_unmanaged_pod(tmp_path: Path) -> None:
+    supervisor = remote.KubernetesTargetSupervisor(
+        _executor(tmp_path),
+        remote.LocalStorageConfig(root=tmp_path / "results"),
+    )
+    payload = {
+        "metadata": {
+            "name": "somebody-elses-pod",
+            "namespace": "inference",
+            "uid": "foreign-uid",
+            "labels": {},
+            "annotations": {},
+        },
+        "spec": {"nodeName": "worker-8"},
+    }
+
+    with pytest.raises(remote.RemoteExecutionError, match="not labelled as managed"):
+        supervisor._owned_pod_from_payload(
+            payload,
+            expected_run_uid="run-01HF7YAT000000000000000000",
+        )
 
 
 def test_worker_recipe_is_resolved_and_contains_no_host_storage_or_values_path(
@@ -87,7 +287,6 @@ def test_worker_recipe_is_resolved_and_contains_no_host_storage_or_values_path(
         _executor(repository),
         remote.LocalStorageConfig(root=tmp_path / "results"),
     )
-
     document = yaml.safe_load(supervisor._worker_recipe(config))
 
     assert "inputs" not in document
@@ -161,6 +360,13 @@ def test_stage_recipe_streams_only_the_lock_and_verifies_its_digest(
         remote.LocalStorageConfig(root=tmp_path / "results"),
     )
     run_uid = "run-01HF7YAT000000000000000000"
+    supervisor._pod = remote.OwnedPod(
+        name="euboulia-run-01hf7yat000000000000000000",
+        uid="pod-uid",
+        run_uid=run_uid,
+        node_name="worker-1",
+    )
+    monkeypatch.setattr(supervisor, "_assert_owned_pod", lambda pod: None)
     remote_run_dir = supervisor.executor.scratch_dir / "runs" / run_uid
     remote_recipe = remote_run_dir / "inputs" / "recipe.lock.yaml"
     contents = b"schema_version: 3\nname: private-test\n"
@@ -197,7 +403,7 @@ def test_stage_recipe_streams_only_the_lock_and_verifies_its_digest(
         "inference",
         "exec",
         "--stdin",
-        "dsv4-h20",
+        "euboulia-run-01hf7yat000000000000000000",
     ]
     assert str(remote_recipe) == argv[-1]
     assert observed["input"] == contents
@@ -222,6 +428,20 @@ def test_remote_supervisor_keeps_completed_results_locally(
         "_worker_recipe",
         lambda config: "schema_version: 3\nname: private-test\n",
     )
+    owned_pod = remote.OwnedPod(
+        name="euboulia-run-01hf7yat000000000000000000",
+        uid="pod-uid",
+        run_uid=run_uid,
+        node_name="worker-1",
+    )
+    monkeypatch.setattr(
+        supervisor,
+        "_create_pod",
+        lambda config, run_uid, node: owned_pod,
+    )
+    monkeypatch.setattr(supervisor, "_wait_pod_ready", lambda pod: None)
+    monkeypatch.setattr(supervisor, "_stage_project", lambda local_run_dir: None)
+    monkeypatch.setattr(supervisor, "_delete_owned_pod", lambda pod: None)
 
     def fake_stage(
         remote_run_dir: PurePosixPath,
@@ -268,7 +488,7 @@ def test_remote_supervisor_keeps_completed_results_locally(
         *,
         include_raw_profiles: bool | None = None,
     ) -> remote.SyncSummary:
-        assert include_raw_profiles is None
+        assert include_raw_profiles is True
         destination.mkdir(parents=True)
         validation = destination / "target-validation/validation.json"
         validation.parent.mkdir(parents=True)
@@ -297,7 +517,7 @@ def test_remote_supervisor_keeps_completed_results_locally(
     monkeypatch.setattr(supervisor, "_run_worker", fake_worker)
     monkeypatch.setattr(supervisor, "_pull_artifacts", fake_pull)
 
-    result = supervisor.run(object(), name="baseline")  # type: ignore[arg-type]
+    result = supervisor.run(object(), name="baseline", node="10.0.0.8")  # type: ignore[arg-type]
 
     assert result.status == "completed"
     assert result.passed is worker_passed
@@ -322,7 +542,7 @@ def test_remote_supervisor_keeps_completed_results_locally(
     manifest = json.loads(result.artifact_manifest_path.read_text(encoding="utf-8"))
     assert manifest["artifacts"][0]["synced"] is True
     assert manifest["artifacts"][0]["remote_uri"].startswith(
-        "kubernetes://inference/dsv4-h20/runtime/"
+        "kubernetes://inference/euboulia-run-01hf7yat000000000000000000/runtime/"
     )
 
 
@@ -373,6 +593,7 @@ def test_artifact_manifest_rejects_a_corrupted_snapshot(tmp_path: Path) -> None:
             snapshot,
             tmp_path / "manifest.json",
             executor=_executor(tmp_path),
+            pod_name="euboulia-run-01hf7yat000000000000000000",
             remote_run_dir=PurePosixPath("/home/admin/.cache/euboulia/runs/" + run_uid),
             run_uid=run_uid,
         )
