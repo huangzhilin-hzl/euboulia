@@ -12,7 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.resources import files
 from pathlib import Path
 from typing import Any, cast
-from urllib.parse import unquote, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 from euboulia import __version__
 from euboulia.control import (
@@ -20,7 +20,6 @@ from euboulia.control import (
     TaskManager,
     controller_log_path,
     read_memory_entries,
-    read_text_tail,
 )
 from euboulia.models import JSONValue
 from euboulia.progress import RUN_PHASES, read_run_progress
@@ -28,7 +27,16 @@ from euboulia.run_identity import normalize_run_uid
 
 _CONTROL_HEADER = "X-Euboulia-Control"
 _MAX_REQUEST_BYTES = 64 * 1024
+_MAX_LOG_CHUNK_BYTES = 64 * 1024
 _LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost"})
+_LOG_SOURCE_LABELS = {
+    "controller": "Controller",
+    "kubernetes": "Kubernetes",
+    "worker_stdout": "Worker stdout",
+    "worker_stderr": "Worker stderr",
+    "sglang_stdout": "SGLang stdout",
+    "sglang_stderr": "SGLang stderr",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,8 +95,21 @@ class ControlApplication:
             "summary": None if summary is None else dict(summary),
             "validation": None if validation is None else dict(validation),
             "artifacts": _artifact_view(manifest, run_dir),
-            "log": read_text_tail(controller_log_path(root, selected_uid)),
+            "log_sources": _log_source_view(root, run_dir, selected_uid),
         }
+
+    def run_log(self, run_uid: str, *, source: str, after: int) -> dict[str, JSONValue]:
+        selected_uid = normalize_run_uid(run_uid)
+        if self.manager.store.get(selected_uid) is None:
+            raise KeyError(selected_uid)
+        if source not in _LOG_SOURCE_LABELS:
+            raise ValueError(f"unknown run log source: {source}")
+        if isinstance(after, bool) or not isinstance(after, int) or after < 0:
+            raise ValueError("log cursor must be a non-negative integer")
+        root = self.manager.runtime.storage.root
+        run_dir = self.manager.runtime.storage.runs_dir / selected_uid
+        path = _log_source_path(root, run_dir, selected_uid, source)
+        return _read_log_chunk(path, source=source, after=after)
 
     def memory(self, *, limit: int = 200) -> dict[str, JSONValue]:
         entries = read_memory_entries(self.manager.runtime.storage.memory_path, limit=limit)
@@ -124,7 +145,8 @@ class EubouliaRequestHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
     def do_GET(self) -> None:
-        path = urlsplit(self.path).path
+        request = urlsplit(self.path)
+        path = request.path
         try:
             if path == "/":
                 self._send_bytes(HTTPStatus.OK, _index_html(), "text/html; charset=utf-8")
@@ -137,6 +159,18 @@ class EubouliaRequestHandler(BaseHTTPRequestHandler):
                 return
             if path == "/api/memory":
                 self._send_json(HTTPStatus.OK, self.server.application.memory())
+                return
+            log_run_uid = _run_log_route(path)
+            if log_run_uid is not None:
+                query = parse_qs(request.query, keep_blank_values=True)
+                self._send_json(
+                    HTTPStatus.OK,
+                    self.server.application.run_log(
+                        log_run_uid,
+                        source=_single_query_value(query, "source", default="controller"),
+                        after=_non_negative_query_int(query, "after", default=0),
+                    ),
+                )
                 return
             run_uid = _run_path(path)
             if run_uid is not None:
@@ -282,6 +316,43 @@ def _cancel_path(path: str) -> str | None:
     return None
 
 
+def _run_log_route(path: str) -> str | None:
+    parts = path.strip("/").split("/")
+    if len(parts) == 4 and parts[:2] == ["api", "runs"] and parts[3] == "logs":
+        return unquote(parts[2])
+    return None
+
+
+def _single_query_value(
+    query: Mapping[str, list[str]],
+    name: str,
+    *,
+    default: str,
+) -> str:
+    values = query.get(name)
+    if values is None:
+        return default
+    if len(values) != 1 or not values[0]:
+        raise ValueError(f"query parameter {name} must have one non-empty value")
+    return values[0]
+
+
+def _non_negative_query_int(
+    query: Mapping[str, list[str]],
+    name: str,
+    *,
+    default: int,
+) -> int:
+    raw = _single_query_value(query, name, default=str(default))
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"query parameter {name} must be an integer") from exc
+    if value < 0:
+        raise ValueError(f"query parameter {name} must be non-negative")
+    return value
+
+
 def _content_length(raw: str | None, *, allow_zero: bool = False) -> int:
     if raw is None:
         return 0 if allow_zero else _raise_length()
@@ -345,6 +416,85 @@ def _artifact_view(
                 copied["local_path"] = str(run_dir / "artifacts" / relative)
             items.append(cast(JSONValue, copied))
     return {"manifest": dict(manifest), "items": items}
+
+
+def _log_source_view(root: Path, run_dir: Path, run_uid: str) -> list[JSONValue]:
+    sources: list[JSONValue] = []
+    for source, label in _LOG_SOURCE_LABELS.items():
+        path = _log_source_path(root, run_dir, run_uid, source)
+        sources.append(
+            {
+                "source": source,
+                "label": label,
+                "available": path is not None,
+                "size_bytes": None if path is None else path.stat().st_size,
+            }
+        )
+    return sources
+
+
+def _log_source_path(root: Path, run_dir: Path, run_uid: str, source: str) -> Path | None:
+    if source == "controller":
+        return _regular_file(controller_log_path(root, run_uid))
+    if source == "kubernetes":
+        return _regular_file(run_dir / "live" / "kubernetes.log")
+    if source in {"worker_stdout", "worker_stderr"}:
+        suffix = "stdout" if source.endswith("stdout") else "stderr"
+        return _latest_regular_file(run_dir / "control", f"pod-worker-*.{suffix}.log")
+    if source in {"sglang_stdout", "sglang_stderr"}:
+        suffix = "stdout" if source.endswith("stdout") else "stderr"
+        live = _regular_file(run_dir / "live" / f"sglang.{suffix}.log")
+        return live or _latest_regular_file(
+            run_dir / "artifacts" / "target-validation" / "service",
+            f"service-*.{suffix}.log",
+        )
+    return None
+
+
+def _regular_file(path: Path) -> Path | None:
+    return path if path.is_file() and not path.is_symlink() else None
+
+
+def _latest_regular_file(directory: Path, pattern: str) -> Path | None:
+    if not directory.is_dir() or directory.is_symlink():
+        return None
+    matches = sorted(
+        (path for path in directory.glob(pattern) if path.is_file() and not path.is_symlink()),
+        key=lambda path: (path.stat().st_mtime_ns, path.name),
+    )
+    return matches[-1] if matches else None
+
+
+def _read_log_chunk(path: Path | None, *, source: str, after: int) -> dict[str, JSONValue]:
+    label = _LOG_SOURCE_LABELS[source]
+    if path is None:
+        return {
+            "source": source,
+            "label": label,
+            "available": False,
+            "offset": 0,
+            "next_offset": 0,
+            "reset": after != 0,
+            "content": "",
+            "eof": True,
+        }
+    size = path.stat().st_size
+    reset = after > size or (after == 0 and size > _MAX_LOG_CHUNK_BYTES)
+    offset = max(0, size - _MAX_LOG_CHUNK_BYTES) if reset else after
+    with path.open("rb") as handle:
+        handle.seek(offset)
+        data = handle.read(_MAX_LOG_CHUNK_BYTES)
+    next_offset = offset + len(data)
+    return {
+        "source": source,
+        "label": label,
+        "available": True,
+        "offset": offset,
+        "next_offset": next_offset,
+        "reset": reset,
+        "content": data.decode("utf-8", errors="replace"),
+        "eof": next_offset >= size,
+    }
 
 
 __all__ = [

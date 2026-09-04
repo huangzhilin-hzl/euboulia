@@ -170,6 +170,7 @@
     .status { display: inline-flex; align-items: center; gap: 6px; font-family: var(--mono); font-size: 9px; text-transform: uppercase; letter-spacing: .08em; }
     .status::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
     .status.running, .status.queued { color: var(--cyan); }
+    .status.running::before { animation: status-breathe 1.8s ease-in-out infinite; }
     .status.completed { color: var(--ok); }
     .status.failed { color: var(--coral); }
     .status.cancelled, .status.disconnected { color: var(--amber); }
@@ -179,7 +180,7 @@
     .detail-line { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
     .detail-name { margin: 5px 0 0; font-size: clamp(20px, 2vw, 29px); line-height: 1.2; font-weight: 560; letter-spacing: -.02em; }
     .uid { margin-top: 9px; color: var(--quiet); font-family: var(--mono); font-size: 10px; word-break: break-all; }
-    .state-grid { margin-top: 20px; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+    .state-grid { margin-top: 20px; display: grid; grid-template-columns: repeat(auto-fit, minmax(118px, 1fr)); gap: 8px; }
     .state-card { border: 1px solid var(--line-soft); border-radius: 11px; padding: 11px 12px; background: rgba(8,11,15,.42); }
     .state-label { color: var(--quiet); font-size: 9px; text-transform: uppercase; letter-spacing: .1em; }
     .state-value { margin-top: 6px; font-family: var(--mono); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -196,7 +197,8 @@
     .phase.done::before { background: var(--ok); border-color: var(--ok); }
     .phase.done::after { background: rgba(134,239,172,.5); }
     .phase.current { color: var(--acid); }
-    .phase.current::before { background: var(--ink); border-color: var(--acid); box-shadow: 0 0 0 4px rgba(217,255,98,.1); }
+    .phase.current::before { background: var(--ink); border-color: var(--acid); box-shadow: 0 0 0 4px rgba(217,255,98,.1); animation: phase-breathe 1.8s ease-in-out infinite; }
+    .timeline.running .phase.current::after { background: linear-gradient(90deg, rgba(134,239,172,.45), var(--acid), rgba(217,255,98,.08)); background-size: 200% 100%; animation: signal-flow 2.2s linear infinite; }
 
     .tabs { height: 49px; padding: 0 24px; display: flex; align-items: end; gap: 22px; border-bottom: 1px solid var(--line-soft); }
     .tab { height: 49px; padding: 0 1px; border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--quiet); cursor: pointer; }
@@ -205,6 +207,23 @@
     .signal { border: 1px solid var(--line-soft); border-radius: 12px; background: #090c10; overflow: hidden; }
     .signal-head { padding: 9px 13px; border-bottom: 1px solid var(--line-soft); color: var(--quiet); font-family: var(--mono); font-size: 9px; }
     pre { margin: 0; padding: 15px; max-height: 280px; overflow: auto; white-space: pre-wrap; word-break: break-word; color: #bac4cf; font: 10px/1.7 var(--mono); }
+    .activity-list { margin-top: 16px; border: 1px solid var(--line-soft); border-radius: 12px; background: #090c10; overflow: hidden; }
+    .activity-row { display: grid; grid-template-columns: 78px 92px minmax(0, 1fr); gap: 12px; padding: 10px 13px; border-bottom: 1px solid rgba(32,40,51,.72); align-items: baseline; }
+    .activity-row:last-child { border-bottom: 0; }
+    .activity-time, .activity-phase { color: var(--quiet); font-family: var(--mono); font-size: 9px; }
+    .activity-phase { color: var(--cyan); text-transform: uppercase; }
+    .activity-detail { color: #bac4cf; font-size: 10px; line-height: 1.5; }
+    .console { border: 1px solid var(--line-soft); border-radius: 12px; background: #080b0f; overflow: hidden; }
+    .console-toolbar { min-height: 43px; padding: 7px 10px; border-bottom: 1px solid var(--line-soft); display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+    .log-sources { display: flex; flex-wrap: wrap; gap: 5px; }
+    .log-source { border: 1px solid transparent; border-radius: 7px; background: transparent; color: var(--quiet); padding: 5px 8px; font-family: var(--mono); font-size: 8px; cursor: pointer; }
+    .log-source:hover:not(:disabled) { color: var(--paper); background: var(--ink-3); }
+    .log-source.active { color: var(--ink); background: var(--cyan); }
+    .log-source:disabled { opacity: .32; cursor: not-allowed; }
+    .live-indicator { display: inline-flex; align-items: center; gap: 6px; color: var(--cyan); font-family: var(--mono); font-size: 8px; letter-spacing: .08em; }
+    .live-indicator::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: var(--cyan); animation: status-breathe 1.8s ease-in-out infinite; }
+    .console pre { min-height: 250px; max-height: 430px; white-space: pre; word-break: normal; color: #c8d2dc; }
+    .console-empty { color: var(--quiet); }
     .kv-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
     .kv { border-bottom: 1px solid var(--line-soft); padding: 10px 0; min-width: 0; }
     .kv-key { color: var(--quiet); font-size: 10px; }
@@ -238,6 +257,19 @@
     .toast.show { transform: translateY(0); }
     .toast.error { border-color: rgba(255,125,110,.5); color: #ffc1ba; }
     .hidden { display: none !important; }
+
+    @keyframes status-breathe {
+      0%, 100% { opacity: .5; box-shadow: 0 0 0 0 rgba(110,231,242,0); }
+      50% { opacity: 1; box-shadow: 0 0 0 5px rgba(110,231,242,.1); }
+    }
+    @keyframes phase-breathe {
+      0%, 100% { box-shadow: 0 0 0 4px rgba(217,255,98,.08); }
+      50% { box-shadow: 0 0 0 8px rgba(217,255,98,.14); }
+    }
+    @keyframes signal-flow { to { background-position: -200% 0; } }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { animation-duration: .001ms !important; animation-iteration-count: 1 !important; scroll-behavior: auto !important; }
+    }
 
     @media (max-width: 1050px) {
       .shell { grid-template-columns: 74px 1fr; }
@@ -345,7 +377,10 @@
   <div class="toast" id="toast" role="status"></div>
 
   <script>
-    const state = { status: null, runs: [], selected: null, detail: null, view: "runs", tab: "signal", busy: false };
+    const state = {
+      status: null, runs: [], selected: null, detail: null, view: "runs", tab: "activity",
+      busy: false, refreshing: false, logSource: "controller", logOffsets: {}, logContent: {}
+    };
     const terminal = new Set(["completed", "failed", "cancelled"]);
     const phaseGroups = [
       ["submitted", "allocating"], ["pod_ready", "staging"], ["preparing_sources", "capturing_provenance"],
@@ -371,6 +406,14 @@
       if (seconds < 3600) return Math.floor(seconds / 60) + "m ago";
       if (seconds < 86400) return Math.floor(seconds / 3600) + "h ago";
       return new Date(value).toLocaleString();
+    }
+    function elapsedTime(started, finished = null) {
+      if (!started) return "—";
+      const end = finished ? Date.parse(finished) : Date.now();
+      let seconds = Math.max(0, Math.floor((end - Date.parse(started)) / 1000));
+      const hours = Math.floor(seconds / 3600); seconds %= 3600;
+      const minutes = Math.floor(seconds / 60); seconds %= 60;
+      return hours ? `${hours}h ${String(minutes).padStart(2, "0")}m` : `${minutes}m ${String(seconds).padStart(2, "0")}s`;
     }
     function humanBytes(value) {
       if (typeof value !== "number") return "—";
@@ -422,6 +465,7 @@
       if (state.selected !== requested) return;
       state.detail = payload;
       renderDetail();
+      if (state.tab === "console") await loadLog();
     }
     async function loadMemory() {
       const payload = await api("/api/memory");
@@ -458,7 +502,9 @@
         meta.appendChild(element("span", "", relativeTime(run.updated_at)));
         row.append(top, meta);
         row.addEventListener("click", async () => {
-          state.selected = run.run_uid; state.tab = "signal"; renderRuns();
+          state.selected = run.run_uid; state.tab = "activity";
+          state.logSource = "controller"; state.logOffsets = {}; state.logContent = {};
+          renderRuns();
           try { await loadDetail(run.run_uid); } catch (error) { toast(error.message, true); }
         });
         list.appendChild(row);
@@ -488,13 +534,24 @@
       }
       hero.appendChild(line);
       const grid = element("div", "state-grid");
-      grid.append(stateCard("task", run.status), stateCard("phase", run.phase), stateCard("infrastructure", run.infrastructure_state), stateCard("artifacts", run.artifact_state));
+      const elapsed = stateCard("elapsed", elapsedTime(run.started_at || run.submitted_at, run.finished_at));
+      elapsed.querySelector(".state-value").classList.add("elapsed-value");
+      elapsed.querySelector(".state-value").dataset.started = run.started_at || run.submitted_at;
+      if (run.finished_at) elapsed.querySelector(".state-value").dataset.finished = run.finished_at;
+      grid.append(
+        stateCard("task", run.status),
+        stateCard("phase", run.phase),
+        stateCard("infrastructure", run.infrastructure_state),
+        stateCard("artifacts", run.artifact_state),
+        elapsed,
+        stateCard("last signal", relativeTime(run.updated_at))
+      );
       hero.appendChild(grid);
       host.appendChild(hero);
 
       const timelineWrap = element("div", "timeline-wrap");
       timelineWrap.appendChild(element("div", "section-label", run.detail || "Awaiting progress"));
-      const timeline = element("div", "timeline");
+      const timeline = element("div", "timeline" + (!terminal.has(run.status) ? " running" : ""));
       const observed = new Set((detail.events || []).map(event => event.phase));
       const currentIndex = phaseGroups.findIndex(group => group.includes(run.phase));
       phaseGroups.forEach((group, index) => {
@@ -507,19 +564,25 @@
       host.appendChild(timelineWrap);
 
       const tabs = element("div", "tabs");
-      [["signal", "Live signal"], ["result", "Result"], ["artifacts", "Artifacts"]].forEach(([key, label]) => {
+      [["activity", "Activity"], ["console", "Console"], ["result", "Result"], ["artifacts", "Artifacts"]].forEach(([key, label]) => {
         const tab = element("button", "tab" + (state.tab === key ? " active" : ""), label);
-        tab.addEventListener("click", () => { state.tab = key; renderDetail(); });
+        tab.addEventListener("click", async () => {
+          state.tab = key; renderDetail();
+          if (key === "console") {
+            try { await loadLog(); } catch (error) { toast(error.message, true); }
+          }
+        });
         tabs.appendChild(tab);
       });
       host.appendChild(tabs);
       const content = element("div", "tab-content");
-      if (state.tab === "signal") renderSignal(content, detail);
+      if (state.tab === "activity") renderActivity(content, detail);
+      if (state.tab === "console") renderConsole(content, detail);
       if (state.tab === "result") renderResult(content, detail);
       if (state.tab === "artifacts") renderArtifacts(content, detail.artifacts);
       host.appendChild(content);
     }
-    function renderSignal(host, detail) {
+    function renderActivity(host, detail) {
       const run = detail.run;
       const metadata = run.metadata || {};
       const hardware = metadata.hardware || {};
@@ -535,9 +598,69 @@
         kv("Progress", run.total_units ? `${run.completed_units || 0} / ${run.total_units}` : "phase-level")
       );
       host.appendChild(grid);
-      const signal = element("div", "signal"); signal.style.marginTop = "16px";
-      signal.append(element("div", "signal-head", "controller.log · latest 128 KiB"), element("pre", "", detail.log || "No controller output yet."));
-      host.appendChild(signal);
+      const activity = element("div", "activity-list");
+      activity.appendChild(element("div", "signal-head", "RUN ACTIVITY · STRUCTURED CONTROL EVENTS"));
+      const events = (detail.events || []).slice(-80);
+      if (!events.length) {
+        activity.appendChild(element("div", "activity-row", "No activity recorded yet."));
+      } else {
+        events.forEach(event => {
+          const row = element("div", "activity-row");
+          row.append(
+            element("span", "activity-time", new Date(event.occurred_at).toLocaleTimeString()),
+            element("span", "activity-phase", event.phase),
+            element("span", "activity-detail", event.detail || `${event.status} · ${event.infrastructure_state}`)
+          );
+          activity.appendChild(row);
+        });
+      }
+      host.appendChild(activity);
+    }
+    function renderConsole(host, detail) {
+      const sources = detail.log_sources || [];
+      if (!sources.some(source => source.source === state.logSource && source.available)) {
+        const first = sources.find(source => source.available);
+        if (first) state.logSource = first.source;
+      }
+      const consoleNode = element("div", "console");
+      const toolbar = element("div", "console-toolbar");
+      const sourceList = element("div", "log-sources");
+      sources.forEach(source => {
+        const button = element("button", "log-source" + (source.source === state.logSource ? " active" : ""), source.label);
+        button.type = "button";
+        button.disabled = !source.available;
+        button.addEventListener("click", async () => {
+          state.logSource = source.source; renderDetail();
+          try { await loadLog(); } catch (error) { toast(error.message, true); }
+        });
+        sourceList.appendChild(button);
+      });
+      toolbar.appendChild(sourceList);
+      if (!terminal.has(detail.run.status)) toolbar.appendChild(element("span", "live-indicator", "LIVE"));
+      consoleNode.appendChild(toolbar);
+      const output = element("pre", state.logContent[state.logSource] ? "" : "console-empty", state.logContent[state.logSource] || "Waiting for output from this source.");
+      output.id = "consoleOutput";
+      consoleNode.appendChild(output);
+      host.appendChild(consoleNode);
+      output.scrollTop = output.scrollHeight;
+    }
+    async function loadLog() {
+      if (!state.selected || state.tab !== "console") return;
+      const source = state.logSource;
+      const after = state.logOffsets[source] || 0;
+      const payload = await api(`/api/runs/${encodeURIComponent(state.selected)}/logs?source=${encodeURIComponent(source)}&after=${after}`);
+      if (payload.reset) state.logContent[source] = "";
+      if (payload.content) {
+        state.logContent[source] = (state.logContent[source] || "") + payload.content;
+        if (state.logContent[source].length > 384 * 1024) state.logContent[source] = state.logContent[source].slice(-384 * 1024);
+      }
+      state.logOffsets[source] = payload.next_offset;
+      const output = $("consoleOutput");
+      if (output && state.tab === "console" && state.logSource === source) {
+        output.textContent = state.logContent[source] || "Waiting for output from this source.";
+        output.classList.toggle("console-empty", !state.logContent[source]);
+        output.scrollTop = output.scrollHeight;
+      }
     }
     function kv(key, value) {
       const node = element("div", "kv");
@@ -633,13 +756,22 @@
       finally { state.busy = false; $("submitButton").disabled = false; }
     });
     async function refresh(notify = false) {
+      if (state.refreshing) return;
+      state.refreshing = true;
       try { await loadRuns(); if (notify) toast("State refreshed"); }
       catch (error) { toast(error.message, true); }
+      finally { state.refreshing = false; }
+    }
+    function updateLiveClocks() {
+      document.querySelectorAll(".elapsed-value[data-started]").forEach(node => {
+        node.textContent = elapsedTime(node.dataset.started, node.dataset.finished || null);
+      });
     }
     async function boot() {
       try { await loadStatus(); await loadRuns({ keepSelection: false }); }
       catch (error) { toast(error.message, true); }
-      window.setInterval(() => { if (!document.hidden && !state.busy) refresh(false); }, 2500);
+      window.setInterval(updateLiveClocks, 1000);
+      window.setInterval(() => { if (!document.hidden && !state.busy) refresh(false); }, 1500);
     }
     boot();
   </script>
