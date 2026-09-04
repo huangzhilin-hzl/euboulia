@@ -557,8 +557,11 @@ class KubernetesTargetSupervisor:
         self._delete_owned_pod(pod)
         record_path = self.storage.runs_dir / selected_uid / "run.json"
         record = dict(_mapping(json.loads(record_path.read_text(encoding="utf-8")), "run record"))
+        cleanup_at = utc_now()
         record["cleanup"] = "deleted"
-        record["cleanup_at"] = utc_now()
+        record["cleanup_at"] = cleanup_at
+        record["infrastructure_state"] = "pod_deleted"
+        record["updated_at"] = cleanup_at
         _write_json(record_path, cast(Mapping[str, JSONValue], record))
         return pod
 

@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import yaml
@@ -122,3 +123,44 @@ def test_control_database_schema_is_replaced_directly(tmp_path: Path) -> None:
     assert version == ControlStore.SCHEMA_VERSION
     assert tuple(columns) == ControlStore.SCHEMA_COLUMNS
     assert replaced.list() == ()
+
+
+def test_reconcile_repairs_deleted_infrastructure_for_a_terminal_run(tmp_path: Path) -> None:
+    runtime = _runtime(tmp_path)
+    source_lock, _ = _lock(tmp_path)
+    manager = TaskManager(runtime)
+    run = manager.submit(recipe=source_lock, executor="gpu", node="worker-8")
+    failed = manager.store.update(
+        run.run_uid,
+        status="failed",
+        phase="failed",
+        infrastructure_state="pod_retained",
+        artifact_state="partial",
+        detail="owned Pod retained for recovery",
+        exit_code=1,
+        finished_at="2026-09-04T07:00:00+00:00",
+    )
+    run_dir = tmp_path / "local-state" / "runs" / run.run_uid
+    run_dir.mkdir(parents=True)
+    (run_dir / "run.json").write_text(
+        json.dumps(
+            {
+                "run_uid": run.run_uid,
+                "status": "failed",
+                "infrastructure_state": "pod_retained",
+                "cleanup": "deleted",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    manager.reconcile()
+
+    reconciled = manager.store.get(run.run_uid)
+    assert reconciled is not None
+    assert reconciled.status == "failed"
+    assert reconciled.phase == "failed"
+    assert reconciled.exit_code == failed.exit_code == 1
+    assert reconciled.infrastructure_state == "pod_deleted"
+    assert reconciled.detail == "owned Pod deleted after terminal run"
+    assert manager.store.events(run.run_uid)[-1]["infrastructure_state"] == "pod_deleted"

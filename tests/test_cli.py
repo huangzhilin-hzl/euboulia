@@ -2,12 +2,16 @@ import json
 from pathlib import Path
 
 import pytest
+import yaml
 from test_config import VALID_CONFIG, write_config
 from test_optimization_config import write_input_template
 
+import euboulia.cli as cli
 from euboulia.cli import build_parser, main
+from euboulia.control import ControlStore
 from euboulia.optimization.config import load_optimization_config
 from euboulia.optimization.events import EventLedger, EventType, OptimizationEvent
+from euboulia.remote import OwnedPod
 
 
 def test_plan_cli_renders_without_execution(tmp_path: Path) -> None:
@@ -272,6 +276,91 @@ def test_target_cleanup_parser_identifies_one_owned_run() -> None:
 
     assert args.run_uid == "run-01HF7YAT000000000000000000"
     assert args.executor == "h20-pod"
+
+
+def test_target_cleanup_updates_control_plane_immediately(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_uid = "run-01HF7YAT000000000000000000"
+    template = tmp_path / "pod-template.yaml"
+    template.write_text(
+        "apiVersion: v1\nkind: Pod\nmetadata: {}\nspec:\n"
+        "  containers:\n    - name: runtime\n      image: placeholder.invalid/image\n",
+        encoding="utf-8",
+    )
+    state_root = tmp_path / "local-state"
+    runtime = tmp_path / "runtime.yaml"
+    runtime.write_text(
+        yaml.safe_dump(
+            {
+                "storage": {"root": str(state_root)},
+                "executors": {
+                    "gpu": {
+                        "type": "kubernetes",
+                        "namespace": "private-inference",
+                        "pod_template": str(template),
+                        "container": "runtime",
+                        "project_dir": "/workspace/euboulia",
+                        "scratch_dir": "/scratch/euboulia",
+                    }
+                },
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    store = ControlStore(state_root)
+    store.create(
+        run_uid=run_uid,
+        name="baseline",
+        recipe_name="test-recipe",
+        recipe_path=tmp_path / "recipe.lock.yaml",
+        recipe_sha256="a" * 64,
+        executor="gpu",
+        node="worker-8",
+        runtime_config=runtime,
+        metadata={},
+    )
+    store.update(
+        run_uid,
+        status="failed",
+        phase="failed",
+        infrastructure_state="pod_retained",
+        artifact_state="partial",
+        finished_at="2026-09-04T07:00:00+00:00",
+    )
+    pod = OwnedPod(
+        name="euboulia-run-01hf7yat000000000000000000",
+        uid="pod-uid",
+        run_uid=run_uid,
+        node_name="worker-8",
+    )
+    monkeypatch.setattr(
+        cli.KubernetesTargetSupervisor,
+        "cleanup",
+        lambda self, selected_uid: pod,
+    )
+
+    exit_code = main(
+        [
+            "target",
+            "cleanup",
+            "--run-uid",
+            run_uid,
+            "--executor",
+            "gpu",
+            "--runtime-config",
+            str(runtime),
+        ]
+    )
+
+    assert exit_code == 0
+    updated = ControlStore(state_root).get(run_uid)
+    assert updated is not None
+    assert updated.status == "failed"
+    assert updated.infrastructure_state == "pod_deleted"
+    assert updated.detail == "owned Pod deleted after terminal run"
 
 
 def test_config_remains_a_compatible_alias_for_recipe() -> None:
