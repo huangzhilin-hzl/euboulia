@@ -205,6 +205,40 @@ def test_target_run_parser_accepts_optional_name() -> None:
     assert args.runtime_config == Path("runtime.yaml")
 
 
+def test_serve_and_control_plane_commands_have_focused_interfaces() -> None:
+    serve_args = build_parser().parse_args(
+        ["serve", "--runtime-config", "runtime.yaml", "--port", "9000", "--max-parallel", "3"]
+    )
+    submit_args = build_parser().parse_args(
+        [
+            "target",
+            "submit",
+            "--recipe",
+            "recipe.lock.yaml",
+            "--executor",
+            "gpu",
+            "--node",
+            "worker-8",
+            "--name",
+            "baseline",
+        ]
+    )
+    list_args = build_parser().parse_args(["target", "list", "--limit", "12"])
+    show_args = build_parser().parse_args(
+        ["target", "show", "run-01HF7YAT000000000000000000"]
+    )
+
+    assert serve_args.runtime_config == Path("runtime.yaml")
+    assert serve_args.port == 9000
+    assert serve_args.max_parallel == 3
+    assert submit_args.recipe == Path("recipe.lock.yaml")
+    assert submit_args.executor == "gpu"
+    assert submit_args.node == "worker-8"
+    assert submit_args.name == "baseline"
+    assert list_args.limit == 12
+    assert show_args.run_uid == "run-01HF7YAT000000000000000000"
+
+
 def test_target_artifact_pull_parser_requires_explicit_snapshot_destination() -> None:
     args = build_parser().parse_args(
         [

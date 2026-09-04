@@ -1,0 +1,647 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Euboulia · Inference Lab</title>
+  <style>
+    :root {
+      --ink: #0a0d12;
+      --ink-2: #10151d;
+      --ink-3: #171e28;
+      --line: #2b3441;
+      --line-soft: #202833;
+      --paper: #e8edf2;
+      --muted: #8d99a8;
+      --quiet: #5e6977;
+      --acid: #d9ff62;
+      --cyan: #6ee7f2;
+      --coral: #ff7d6e;
+      --violet: #b9a7ff;
+      --amber: #ffd166;
+      --ok: #86efac;
+      --radius: 17px;
+      --sans: "Avenir Next", Inter, "SF Pro Display", "PingFang SC", "Microsoft YaHei", sans-serif;
+      --mono: "SFMono-Regular", "JetBrains Mono", "Roboto Mono", Consolas, monospace;
+    }
+
+    * { box-sizing: border-box; }
+    html, body { min-height: 100%; }
+    body {
+      margin: 0;
+      background:
+        radial-gradient(circle at 82% -10%, rgba(110, 231, 242, .08), transparent 28rem),
+        var(--ink);
+      color: var(--paper);
+      font-family: var(--sans);
+      font-size: 14px;
+      letter-spacing: .005em;
+    }
+    button, input, select { font: inherit; }
+    button { color: inherit; }
+    ::selection { color: var(--ink); background: var(--acid); }
+
+    .shell { min-height: 100vh; display: grid; grid-template-columns: 224px 1fr; }
+    .rail {
+      position: sticky;
+      top: 0;
+      height: 100vh;
+      padding: 28px 20px;
+      border-right: 1px solid var(--line-soft);
+      background: rgba(8, 11, 15, .86);
+      backdrop-filter: blur(18px);
+      display: flex;
+      flex-direction: column;
+      z-index: 4;
+    }
+    .brand { display: flex; align-items: center; gap: 12px; margin-bottom: 42px; }
+    .brand-mark {
+      width: 37px;
+      height: 37px;
+      display: grid;
+      place-items: center;
+      border: 1px solid var(--acid);
+      border-radius: 11px 11px 11px 3px;
+      color: var(--acid);
+      font-family: var(--mono);
+      font-size: 17px;
+      font-weight: 700;
+      transform: rotate(-2deg);
+      box-shadow: inset 0 0 18px rgba(217, 255, 98, .06);
+    }
+    .brand-name { font-size: 16px; font-weight: 650; letter-spacing: .08em; }
+    .brand-sub { color: var(--quiet); font-family: var(--mono); font-size: 9px; letter-spacing: .16em; margin-top: 2px; }
+
+    .nav { display: grid; gap: 7px; }
+    .nav button {
+      width: 100%;
+      border: 0;
+      border-radius: 11px;
+      background: transparent;
+      color: var(--muted);
+      text-align: left;
+      padding: 11px 12px;
+      cursor: pointer;
+      display: flex;
+      gap: 11px;
+      align-items: center;
+      transition: .16s ease;
+    }
+    .nav button:hover { background: var(--ink-2); color: var(--paper); }
+    .nav button.active { background: var(--paper); color: var(--ink); font-weight: 650; }
+    .nav-icon { width: 20px; font-family: var(--mono); text-align: center; font-size: 12px; }
+    .rail-foot { margin-top: auto; border-top: 1px solid var(--line-soft); padding-top: 18px; }
+    .controller-state { display: flex; align-items: center; gap: 9px; color: var(--muted); font-size: 12px; }
+    .pulse { width: 7px; height: 7px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 0 5px rgba(134,239,172,.08); }
+    .version { margin: 9px 0 0 16px; color: var(--quiet); font-family: var(--mono); font-size: 10px; }
+
+    .workspace { min-width: 0; }
+    .topbar {
+      min-height: 76px;
+      border-bottom: 1px solid var(--line-soft);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 0 32px;
+      background: rgba(10, 13, 18, .78);
+      backdrop-filter: blur(18px);
+      position: sticky;
+      top: 0;
+      z-index: 3;
+    }
+    .eyebrow { color: var(--quiet); font-family: var(--mono); font-size: 10px; letter-spacing: .14em; text-transform: uppercase; }
+    .page-title { margin-top: 4px; font-size: 18px; font-weight: 590; }
+    .actions { display: flex; gap: 9px; }
+    .button {
+      min-height: 38px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: var(--ink-2);
+      padding: 0 14px;
+      white-space: nowrap;
+      cursor: pointer;
+      transition: transform .12s ease, border-color .12s ease, background .12s ease;
+    }
+    .button:hover { transform: translateY(-1px); border-color: #465363; }
+    .button.primary { border-color: var(--acid); background: var(--acid); color: var(--ink); font-weight: 700; }
+    .button.danger { border-color: rgba(255,125,110,.45); color: var(--coral); }
+    .button:disabled { opacity: .45; cursor: not-allowed; transform: none; }
+
+    .main { padding: 28px 32px 44px; }
+    .summary-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 11px; margin-bottom: 22px; }
+    .metric {
+      min-height: 91px;
+      border: 1px solid var(--line-soft);
+      border-radius: var(--radius);
+      padding: 17px 18px;
+      background: linear-gradient(145deg, rgba(23,30,40,.92), rgba(13,17,23,.94));
+      overflow: hidden;
+      position: relative;
+    }
+    .metric::after { content: ""; position: absolute; height: 1px; width: 38%; right: -4%; bottom: 15px; background: var(--line); transform: rotate(-7deg); }
+    .metric-label { color: var(--muted); font-size: 11px; }
+    .metric-value { margin-top: 8px; font-family: var(--mono); font-size: 21px; font-weight: 620; }
+    .metric-value.acid { color: var(--acid); }
+    .metric-value.cyan { color: var(--cyan); }
+
+    .runs-layout { display: grid; grid-template-columns: minmax(300px, 365px) minmax(0, 1fr); gap: 16px; align-items: start; }
+    .panel { border: 1px solid var(--line-soft); border-radius: var(--radius); background: rgba(15,20,27,.78); overflow: hidden; }
+    .panel-head { min-height: 55px; padding: 0 18px; border-bottom: 1px solid var(--line-soft); display: flex; align-items: center; justify-content: space-between; }
+    .panel-title { font-size: 13px; font-weight: 650; }
+    .count { color: var(--quiet); font-family: var(--mono); font-size: 10px; }
+    .run-list { max-height: calc(100vh - 271px); min-height: 440px; overflow: auto; }
+    .run-row {
+      width: 100%;
+      border: 0;
+      border-bottom: 1px solid var(--line-soft);
+      background: transparent;
+      padding: 16px 18px;
+      text-align: left;
+      cursor: pointer;
+      color: inherit;
+      transition: background .14s ease;
+    }
+    .run-row:hover { background: rgba(255,255,255,.025); }
+    .run-row.active { background: linear-gradient(90deg, rgba(217,255,98,.08), transparent); box-shadow: inset 2px 0 var(--acid); }
+    .run-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+    .run-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 590; }
+    .run-meta { margin-top: 8px; display: flex; justify-content: space-between; gap: 12px; color: var(--quiet); font-family: var(--mono); font-size: 10px; }
+    .status { display: inline-flex; align-items: center; gap: 6px; font-family: var(--mono); font-size: 9px; text-transform: uppercase; letter-spacing: .08em; }
+    .status::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+    .status.running, .status.queued { color: var(--cyan); }
+    .status.completed { color: var(--ok); }
+    .status.failed { color: var(--coral); }
+    .status.cancelled, .status.disconnected { color: var(--amber); }
+
+    .detail { min-height: 600px; }
+    .detail-hero { padding: 22px 24px 18px; border-bottom: 1px solid var(--line-soft); }
+    .detail-line { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
+    .detail-name { margin: 5px 0 0; font-size: clamp(20px, 2vw, 29px); line-height: 1.2; font-weight: 560; letter-spacing: -.02em; }
+    .uid { margin-top: 9px; color: var(--quiet); font-family: var(--mono); font-size: 10px; word-break: break-all; }
+    .state-grid { margin-top: 20px; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+    .state-card { border: 1px solid var(--line-soft); border-radius: 11px; padding: 11px 12px; background: rgba(8,11,15,.42); }
+    .state-label { color: var(--quiet); font-size: 9px; text-transform: uppercase; letter-spacing: .1em; }
+    .state-value { margin-top: 6px; font-family: var(--mono); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+    .timeline-wrap { padding: 20px 24px; border-bottom: 1px solid var(--line-soft); }
+    .section-label { color: var(--muted); font-size: 11px; font-weight: 650; margin-bottom: 15px; }
+    .timeline { display: grid; grid-template-columns: repeat(7, minmax(56px, 1fr)); }
+    .phase { position: relative; color: var(--quiet); font-family: var(--mono); font-size: 8px; text-align: center; padding-top: 19px; text-transform: uppercase; }
+    .phase::before { content: ""; width: 7px; height: 7px; border-radius: 50%; position: absolute; left: calc(50% - 4px); top: 0; background: var(--line); border: 1px solid var(--line); z-index: 1; }
+    .phase::after { content: ""; height: 1px; position: absolute; top: 4px; left: 0; right: 0; background: var(--line); }
+    .phase:first-child::after { left: 50%; }
+    .phase:last-child::after { right: 50%; }
+    .phase.done { color: var(--muted); }
+    .phase.done::before { background: var(--ok); border-color: var(--ok); }
+    .phase.done::after { background: rgba(134,239,172,.5); }
+    .phase.current { color: var(--acid); }
+    .phase.current::before { background: var(--ink); border-color: var(--acid); box-shadow: 0 0 0 4px rgba(217,255,98,.1); }
+
+    .tabs { height: 49px; padding: 0 24px; display: flex; align-items: end; gap: 22px; border-bottom: 1px solid var(--line-soft); }
+    .tab { height: 49px; padding: 0 1px; border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--quiet); cursor: pointer; }
+    .tab.active { color: var(--paper); border-color: var(--acid); }
+    .tab-content { padding: 20px 24px 25px; min-height: 225px; }
+    .signal { border: 1px solid var(--line-soft); border-radius: 12px; background: #090c10; overflow: hidden; }
+    .signal-head { padding: 9px 13px; border-bottom: 1px solid var(--line-soft); color: var(--quiet); font-family: var(--mono); font-size: 9px; }
+    pre { margin: 0; padding: 15px; max-height: 280px; overflow: auto; white-space: pre-wrap; word-break: break-word; color: #bac4cf; font: 10px/1.7 var(--mono); }
+    .kv-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+    .kv { border-bottom: 1px solid var(--line-soft); padding: 10px 0; min-width: 0; }
+    .kv-key { color: var(--quiet); font-size: 10px; }
+    .kv-value { margin-top: 5px; font-family: var(--mono); font-size: 11px; word-break: break-word; }
+    .artifact-row { padding: 11px 0; border-bottom: 1px solid var(--line-soft); display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 16px; }
+    .artifact-name { font-family: var(--mono); font-size: 10px; word-break: break-all; }
+    .artifact-meta { color: var(--quiet); font-family: var(--mono); font-size: 9px; }
+
+    .empty { min-height: 420px; display: grid; place-items: center; text-align: center; color: var(--muted); padding: 32px; }
+    .empty-mark { color: var(--acid); font-family: var(--mono); font-size: 28px; margin-bottom: 10px; }
+    .empty small { display: block; color: var(--quiet); max-width: 380px; margin-top: 8px; line-height: 1.7; }
+    .wide-panel { min-height: 560px; }
+    .memory-grid { padding: 18px; display: grid; grid-template-columns: repeat(auto-fill, minmax(285px, 1fr)); gap: 11px; }
+    .memory-card { border: 1px solid var(--line-soft); border-radius: 13px; background: var(--ink-2); padding: 16px; }
+    .memory-summary { line-height: 1.55; margin-bottom: 13px; }
+    .memory-meta { color: var(--quiet); font-family: var(--mono); font-size: 9px; line-height: 1.75; word-break: break-all; }
+
+    dialog { width: min(560px, calc(100vw - 28px)); padding: 0; border: 1px solid #394554; border-radius: 18px; color: var(--paper); background: var(--ink-2); box-shadow: 0 28px 100px rgba(0,0,0,.55); }
+    dialog::backdrop { background: rgba(2,4,7,.72); backdrop-filter: blur(7px); }
+    .dialog-head { display: flex; justify-content: space-between; align-items: center; padding: 20px 22px; border-bottom: 1px solid var(--line-soft); }
+    .dialog-title { font-size: 17px; font-weight: 620; }
+    .close { border: 0; background: transparent; color: var(--muted); font-size: 18px; cursor: pointer; }
+    form { padding: 22px; }
+    .field { display: grid; gap: 7px; margin-bottom: 16px; }
+    label { color: var(--muted); font-size: 11px; }
+    input, select { width: 100%; border: 1px solid var(--line); border-radius: 10px; background: #0b0f15; color: var(--paper); min-height: 43px; padding: 0 12px; outline: none; }
+    input:focus, select:focus { border-color: var(--cyan); box-shadow: 0 0 0 3px rgba(110,231,242,.07); }
+    .hint { margin-top: -6px; color: var(--quiet); font-size: 10px; line-height: 1.5; }
+    .dialog-actions { display: flex; justify-content: flex-end; gap: 9px; margin-top: 23px; }
+    .toast { position: fixed; right: 24px; bottom: 24px; max-width: min(440px, calc(100vw - 48px)); border: 1px solid var(--line); border-radius: 12px; background: #171e28; padding: 13px 16px; box-shadow: 0 15px 55px rgba(0,0,0,.45); transform: translateY(150%); transition: .22s ease; z-index: 20; }
+    .toast.show { transform: translateY(0); }
+    .toast.error { border-color: rgba(255,125,110,.5); color: #ffc1ba; }
+    .hidden { display: none !important; }
+
+    @media (max-width: 1050px) {
+      .shell { grid-template-columns: 74px 1fr; }
+      .rail { padding: 24px 13px; align-items: center; }
+      .brand-copy, .nav-label, .version { display: none; }
+      .brand { margin-bottom: 42px; }
+      .nav button { justify-content: center; padding: 11px; }
+      .nav-icon { width: 22px; }
+      .summary-grid { grid-template-columns: repeat(2, 1fr); }
+      .runs-layout { grid-template-columns: 300px minmax(0, 1fr); }
+      .state-grid { grid-template-columns: repeat(2, 1fr); }
+    }
+    @media (max-width: 760px) {
+      .shell { display: block; }
+      .rail { position: fixed; top: auto; bottom: 0; width: 100%; height: 65px; padding: 8px 16px; border: 0; border-top: 1px solid var(--line); flex-direction: row; }
+      .brand, .rail-foot { display: none; }
+      .nav { width: 100%; grid-template-columns: repeat(3, 1fr); }
+      .nav button { display: grid; gap: 2px; padding: 5px; text-align: center; }
+      .nav-label { display: block; font-size: 9px; }
+      .topbar { padding: 0 16px; }
+      .main { padding: 18px 14px 90px; }
+      .summary-grid { gap: 8px; }
+      .metric { padding: 14px; min-height: 78px; }
+      .metric-value { font-size: 17px; }
+      .runs-layout { display: block; }
+      .runs-layout > .panel:first-child { margin-bottom: 12px; }
+      .run-list { min-height: auto; max-height: 265px; }
+      .timeline { overflow-x: auto; grid-template-columns: repeat(7, 82px); padding-bottom: 8px; }
+      .detail-hero, .timeline-wrap, .tab-content { padding-left: 17px; padding-right: 17px; }
+      .tabs { padding: 0 17px; }
+      .actions .button:not(.primary) { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <aside class="rail">
+      <div class="brand">
+        <div class="brand-mark">EU</div>
+        <div class="brand-copy"><div class="brand-name">EUBOULIA</div><div class="brand-sub">INFERENCE LAB</div></div>
+      </div>
+      <nav class="nav" aria-label="Primary">
+        <button class="active" data-view="runs"><span class="nav-icon">◎</span><span class="nav-label">Runs</span></button>
+        <button data-view="artifacts"><span class="nav-icon">◇</span><span class="nav-label">Artifacts</span></button>
+        <button data-view="memory"><span class="nav-icon">⌁</span><span class="nav-label">Memory</span></button>
+      </nav>
+      <div class="rail-foot">
+        <div class="controller-state"><span class="pulse"></span><span>local controller</span></div>
+        <div class="version" id="version">connecting</div>
+      </div>
+    </aside>
+
+    <div class="workspace">
+      <header class="topbar">
+        <div><div class="eyebrow">experiment control plane</div><div class="page-title" id="pageTitle">Runs</div></div>
+        <div class="actions">
+          <button class="button" id="refreshButton">Refresh</button>
+          <button class="button primary" id="newRunButton">＋ Submit run</button>
+        </div>
+      </header>
+
+      <main class="main">
+        <section class="summary-grid" id="summaryGrid">
+          <div class="metric"><div class="metric-label">Active runs</div><div class="metric-value acid" id="activeCount">—</div></div>
+          <div class="metric"><div class="metric-label">Queued</div><div class="metric-value cyan" id="queuedCount">—</div></div>
+          <div class="metric"><div class="metric-label">Completed</div><div class="metric-value" id="completedCount">—</div></div>
+          <div class="metric"><div class="metric-label">Local evidence</div><div class="metric-value" id="evidenceCount">—</div></div>
+        </section>
+
+        <section id="runsView" class="runs-layout">
+          <div class="panel">
+            <div class="panel-head"><span class="panel-title">Experiment runs</span><span class="count" id="runCount">0 runs</span></div>
+            <div class="run-list" id="runList"></div>
+          </div>
+          <div class="panel detail" id="runDetail">
+            <div class="empty"><div><div class="empty-mark">⌁</div>Select a run<small>任务提交后，Pod 分配、执行阶段、验证结果和同步产物会在这里持续更新。</small></div></div>
+          </div>
+        </section>
+
+        <section id="artifactsView" class="panel wide-panel hidden">
+          <div class="panel-head"><span class="panel-title">Artifact ledger</span><span class="count">local evidence by run</span></div>
+          <div id="artifactLedger"></div>
+        </section>
+
+        <section id="memoryView" class="panel wide-panel hidden">
+          <div class="panel-head"><span class="panel-title">Optimization memory</span><span class="count" id="memoryCount">0 entries</span></div>
+          <div class="memory-grid" id="memoryGrid"></div>
+        </section>
+      </main>
+    </div>
+  </div>
+
+  <dialog id="submitDialog">
+    <div class="dialog-head"><div><div class="eyebrow">immutable submission</div><div class="dialog-title">Submit target validation</div></div><button class="close" id="closeDialog" aria-label="Close">×</button></div>
+    <form id="submitForm">
+      <div class="field"><label for="recipe">Resolved recipe lock</label><input id="recipe" name="recipe" required placeholder="~/julian/euboulia-data/experiments/.../recipe.lock.yaml"></div>
+      <div class="hint">使用已解析的 lock；私密 values 文件不会被控制面保存。</div>
+      <div class="field" style="margin-top:16px"><label for="executor">Executor</label><select id="executor" name="executor" required></select></div>
+      <div class="field"><label for="node">Kubernetes node name or InternalIP</label><input id="node" name="node" required autocomplete="off" placeholder="由你或 Codex 在提交时选择"></div>
+      <div class="field"><label for="runName">Name <span style="color:var(--quiet)">· optional</span></label><input id="runName" name="name" autocomplete="off" placeholder="dsv4-baseline"></div>
+      <div class="hint">Euboulia 只在 executor 配置的 namespace 内创建带 run 身份标记的 Pod。</div>
+      <div class="dialog-actions"><button type="button" class="button" id="cancelDialog">Cancel</button><button class="button primary" id="submitButton" type="submit">Submit</button></div>
+    </form>
+  </dialog>
+  <div class="toast" id="toast" role="status"></div>
+
+  <script>
+    const state = { status: null, runs: [], selected: null, detail: null, view: "runs", tab: "signal", busy: false };
+    const terminal = new Set(["completed", "failed", "cancelled"]);
+    const phaseGroups = [
+      ["submitted", "allocating"], ["pod_ready", "staging"], ["preparing_sources", "capturing_provenance"],
+      ["building", "launching", "waiting_ready"], ["profiling"], ["evaluating"], ["stopping", "syncing", "completed"]
+    ];
+    const phaseLabels = ["allocate", "stage", "prepare", "launch", "profile", "evaluate", "sync"];
+
+    const $ = id => document.getElementById(id);
+    function element(tag, className, text) {
+      const node = document.createElement(tag);
+      if (className) node.className = className;
+      if (text !== undefined && text !== null) node.textContent = String(text);
+      return node;
+    }
+    function clear(node) { while (node.firstChild) node.removeChild(node.firstChild); }
+    function displayName(run) { return run.name || run.recipe_name || run.run_uid; }
+    function shortUid(uid) { return uid.length > 20 ? uid.slice(0, 12) + "…" + uid.slice(-5) : uid; }
+    function relativeTime(value) {
+      if (!value) return "—";
+      const delta = Math.max(0, Date.now() - Date.parse(value));
+      const seconds = Math.floor(delta / 1000);
+      if (seconds < 60) return seconds + "s ago";
+      if (seconds < 3600) return Math.floor(seconds / 60) + "m ago";
+      if (seconds < 86400) return Math.floor(seconds / 3600) + "h ago";
+      return new Date(value).toLocaleString();
+    }
+    function humanBytes(value) {
+      if (typeof value !== "number") return "—";
+      const units = ["B", "KiB", "MiB", "GiB"];
+      let size = value, unit = 0;
+      while (size >= 1024 && unit < units.length - 1) { size /= 1024; unit++; }
+      return size.toFixed(unit ? 1 : 0) + " " + units[unit];
+    }
+    function toast(message, error = false) {
+      const node = $("toast");
+      node.textContent = message;
+      node.className = "toast show" + (error ? " error" : "");
+      window.clearTimeout(toast.timer);
+      toast.timer = window.setTimeout(() => node.classList.remove("show"), 4200);
+    }
+    async function api(path, options = {}) {
+      const response = await fetch(path, { cache: "no-store", ...options });
+      const payload = await response.json().catch(() => ({ error: "invalid server response" }));
+      if (!response.ok) throw new Error(payload.error || `HTTP ${response.status}`);
+      return payload;
+    }
+
+    async function loadStatus() {
+      state.status = await api("/api/status");
+      $("version").textContent = "v" + state.status.version;
+      const select = $("executor");
+      clear(select);
+      state.status.executors.forEach(item => {
+        const option = element("option", "", `${item.name} · ${item.namespace}`);
+        option.value = item.name;
+        select.appendChild(option);
+      });
+    }
+    async function loadRuns({ keepSelection = true } = {}) {
+      const payload = await api("/api/runs");
+      state.runs = payload.runs;
+      if (!keepSelection || !state.runs.some(run => run.run_uid === state.selected)) {
+        state.selected = state.runs.length ? state.runs[0].run_uid : null;
+      }
+      renderSummary();
+      renderRuns();
+      renderArtifactLedger();
+      if (state.selected && state.view === "runs") await loadDetail(state.selected);
+    }
+    async function loadDetail(uid) {
+      if (!uid) return;
+      const requested = uid;
+      const payload = await api(`/api/runs/${encodeURIComponent(uid)}`);
+      if (state.selected !== requested) return;
+      state.detail = payload;
+      renderDetail();
+    }
+    async function loadMemory() {
+      const payload = await api("/api/memory");
+      renderMemory(payload.entries);
+    }
+
+    function renderSummary() {
+      const active = state.runs.filter(run => run.status === "running" || run.status === "disconnected").length;
+      const queued = state.runs.filter(run => run.status === "queued").length;
+      const completed = state.runs.filter(run => run.status === "completed").length;
+      const evidence = state.runs.filter(run => run.artifact_state === "verified").length;
+      $("activeCount").textContent = active;
+      $("queuedCount").textContent = queued;
+      $("completedCount").textContent = completed;
+      $("evidenceCount").textContent = evidence;
+    }
+    function renderRuns() {
+      const list = $("runList");
+      clear(list);
+      $("runCount").textContent = `${state.runs.length} run${state.runs.length === 1 ? "" : "s"}`;
+      if (!state.runs.length) {
+        const empty = element("div", "empty");
+        empty.appendChild(element("div", "", "No runs submitted yet"));
+        list.appendChild(empty);
+        return;
+      }
+      state.runs.forEach(run => {
+        const row = element("button", "run-row" + (run.run_uid === state.selected ? " active" : ""));
+        const top = element("div", "run-top");
+        top.appendChild(element("div", "run-name", displayName(run)));
+        top.appendChild(element("span", `status ${run.status}`, run.status));
+        const meta = element("div", "run-meta");
+        meta.appendChild(element("span", "", run.phase));
+        meta.appendChild(element("span", "", relativeTime(run.updated_at)));
+        row.append(top, meta);
+        row.addEventListener("click", async () => {
+          state.selected = run.run_uid; state.tab = "signal"; renderRuns();
+          try { await loadDetail(run.run_uid); } catch (error) { toast(error.message, true); }
+        });
+        list.appendChild(row);
+      });
+    }
+    function stateCard(label, value) {
+      const card = element("div", "state-card");
+      card.append(element("div", "state-label", label), element("div", "state-value", value || "—"));
+      return card;
+    }
+    function renderDetail() {
+      const host = $("runDetail");
+      clear(host);
+      const detail = state.detail;
+      if (!detail) return;
+      const run = detail.run;
+      const hero = element("div", "detail-hero");
+      const line = element("div", "detail-line");
+      const identity = element("div");
+      identity.append(element("div", "eyebrow", `${run.recipe_name} · ${run.executor}`), element("h1", "detail-name", displayName(run)), element("div", "uid", run.run_uid));
+      line.appendChild(identity);
+      if (["queued", "running", "disconnected"].includes(run.status)) {
+        const cancel = element("button", "button danger", run.cancel_requested ? "Cancel requested" : "Cancel run");
+        cancel.disabled = run.cancel_requested;
+        cancel.addEventListener("click", () => cancelRun(run));
+        line.appendChild(cancel);
+      }
+      hero.appendChild(line);
+      const grid = element("div", "state-grid");
+      grid.append(stateCard("task", run.status), stateCard("phase", run.phase), stateCard("infrastructure", run.infrastructure_state), stateCard("artifacts", run.artifact_state));
+      hero.appendChild(grid);
+      host.appendChild(hero);
+
+      const timelineWrap = element("div", "timeline-wrap");
+      timelineWrap.appendChild(element("div", "section-label", run.detail || "Awaiting progress"));
+      const timeline = element("div", "timeline");
+      const observed = new Set((detail.events || []).map(event => event.phase));
+      const currentIndex = phaseGroups.findIndex(group => group.includes(run.phase));
+      phaseGroups.forEach((group, index) => {
+        let klass = "phase";
+        if (group.some(phase => observed.has(phase)) || currentIndex > index || run.status === "completed") klass += " done";
+        if (currentIndex === index && !terminal.has(run.status)) klass += " current";
+        timeline.appendChild(element("div", klass, phaseLabels[index]));
+      });
+      timelineWrap.appendChild(timeline);
+      host.appendChild(timelineWrap);
+
+      const tabs = element("div", "tabs");
+      [["signal", "Live signal"], ["result", "Result"], ["artifacts", "Artifacts"]].forEach(([key, label]) => {
+        const tab = element("button", "tab" + (state.tab === key ? " active" : ""), label);
+        tab.addEventListener("click", () => { state.tab = key; renderDetail(); });
+        tabs.appendChild(tab);
+      });
+      host.appendChild(tabs);
+      const content = element("div", "tab-content");
+      if (state.tab === "signal") renderSignal(content, detail);
+      if (state.tab === "result") renderResult(content, detail);
+      if (state.tab === "artifacts") renderArtifacts(content, detail.artifacts);
+      host.appendChild(content);
+    }
+    function renderSignal(host, detail) {
+      const run = detail.run;
+      const metadata = run.metadata || {};
+      const hardware = metadata.hardware || {};
+      const grid = element("div", "kv-grid");
+      grid.append(
+        kv("Node", run.node),
+        kv("Framework", metadata.framework),
+        kv("Model", metadata.model),
+        kv("Hardware", hardware.accelerator ? `${hardware.accelerator} × ${hardware.accelerator_count || "?"}` : "—"),
+        kv("Workload points", metadata.workload_points),
+        kv("Recipe digest", run.recipe_sha256),
+        kv("Submitted", new Date(run.submitted_at).toLocaleString()),
+        kv("Progress", run.total_units ? `${run.completed_units || 0} / ${run.total_units}` : "phase-level")
+      );
+      host.appendChild(grid);
+      const signal = element("div", "signal"); signal.style.marginTop = "16px";
+      signal.append(element("div", "signal-head", "controller.log · latest 128 KiB"), element("pre", "", detail.log || "No controller output yet."));
+      host.appendChild(signal);
+    }
+    function kv(key, value) {
+      const node = element("div", "kv");
+      node.append(element("div", "kv-key", key), element("div", "kv-value", value === null || value === undefined ? "—" : value));
+      return node;
+    }
+    function flatten(value, prefix = "") {
+      const rows = [];
+      if (value && typeof value === "object" && !Array.isArray(value)) {
+        Object.entries(value).forEach(([key, child]) => {
+          const path = prefix ? `${prefix}.${key}` : key;
+          if (child && typeof child === "object") rows.push(...flatten(child, path));
+          else rows.push([path, child]);
+        });
+      }
+      return rows;
+    }
+    function renderResult(host, detail) {
+      const source = detail.validation || detail.summary;
+      if (!source) { host.appendChild(element("div", "empty", "No result has been synchronized yet.")); return; }
+      const grid = element("div", "kv-grid");
+      flatten(source).slice(0, 40).forEach(([key, value]) => grid.appendChild(kv(key, Array.isArray(value) ? JSON.stringify(value) : value)));
+      host.appendChild(grid);
+    }
+    function renderArtifacts(host, artifacts) {
+      const items = artifacts && artifacts.items ? artifacts.items : [];
+      if (!items.length) { host.appendChild(element("div", "empty", "No artifact manifest has been synchronized yet.")); return; }
+      items.forEach(item => {
+        const row = element("div", "artifact-row");
+        const left = element("div");
+        left.append(element("div", "artifact-name", item.path || item.local_path || "artifact"), element("div", "artifact-meta", item.sha256 ? `sha256 ${String(item.sha256).slice(0, 16)}…` : item.local_path || ""));
+        row.append(left, element("div", "artifact-meta", humanBytes(item.size_bytes)));
+        host.appendChild(row);
+      });
+    }
+    function renderArtifactLedger() {
+      const host = $("artifactLedger"); clear(host);
+      if (!state.runs.length) { host.appendChild(element("div", "empty", "No runs or artifacts yet.")); return; }
+      state.runs.forEach(run => {
+        const row = element("button", "run-row");
+        const top = element("div", "run-top");
+        top.append(element("div", "run-name", displayName(run)), element("span", `status ${run.status}`, run.artifact_state));
+        const meta = element("div", "run-meta");
+        meta.append(element("span", "", shortUid(run.run_uid)), element("span", "", relativeTime(run.updated_at)));
+        row.append(top, meta);
+        row.addEventListener("click", async () => { state.selected = run.run_uid; switchView("runs"); await loadDetail(run.run_uid); });
+        host.appendChild(row);
+      });
+    }
+    function renderMemory(entries) {
+      const host = $("memoryGrid"); clear(host);
+      $("memoryCount").textContent = `${entries.length} entr${entries.length === 1 ? "y" : "ies"}`;
+      if (!entries.length) { host.appendChild(element("div", "empty", "No promoted optimization outcomes yet.")); return; }
+      entries.forEach(entry => {
+        const card = element("article", "memory-card");
+        card.append(element("div", "memory-summary", entry.summary || entry.proposal_id), element("div", "memory-meta", `${entry.outcome} · ${entry.framework} @ ${entry.framework_revision}\n${entry.run_uid}\n${entry.created_at}`));
+        host.appendChild(card);
+      });
+    }
+
+    async function cancelRun(run) {
+      const message = run.status === "queued" ? "Cancel this queued run?" : "Cancel this run? Its Euboulia-owned Pod will be retained for recovery.";
+      if (!window.confirm(message)) return;
+      try {
+        await api(`/api/runs/${encodeURIComponent(run.run_uid)}/cancel`, { method: "POST", headers: { "X-Euboulia-Control": "1" } });
+        toast("Cancellation requested"); await loadRuns();
+      } catch (error) { toast(error.message, true); }
+    }
+    function switchView(view) {
+      state.view = view;
+      document.querySelectorAll(".nav button").forEach(button => button.classList.toggle("active", button.dataset.view === view));
+      $("runsView").classList.toggle("hidden", view !== "runs");
+      $("artifactsView").classList.toggle("hidden", view !== "artifacts");
+      $("memoryView").classList.toggle("hidden", view !== "memory");
+      $("summaryGrid").classList.toggle("hidden", view === "memory");
+      $("pageTitle").textContent = view[0].toUpperCase() + view.slice(1);
+      if (view === "memory") loadMemory().catch(error => toast(error.message, true));
+    }
+
+    document.querySelectorAll(".nav button").forEach(button => button.addEventListener("click", () => switchView(button.dataset.view)));
+    $("newRunButton").addEventListener("click", () => $("submitDialog").showModal());
+    $("closeDialog").addEventListener("click", () => $("submitDialog").close());
+    $("cancelDialog").addEventListener("click", () => $("submitDialog").close());
+    $("refreshButton").addEventListener("click", () => refresh(true));
+    $("submitForm").addEventListener("submit", async event => {
+      event.preventDefault(); if (state.busy) return; state.busy = true; $("submitButton").disabled = true;
+      const body = { recipe: $("recipe").value, executor: $("executor").value, node: $("node").value };
+      if ($("runName").value.trim()) body.name = $("runName").value.trim();
+      try {
+        const payload = await api("/api/runs", { method: "POST", headers: { "Content-Type": "application/json", "X-Euboulia-Control": "1" }, body: JSON.stringify(body) });
+        state.selected = payload.run.run_uid; $("submitDialog").close(); $("submitForm").reset(); toast("Run submitted"); switchView("runs"); await loadRuns();
+      } catch (error) { toast(error.message, true); }
+      finally { state.busy = false; $("submitButton").disabled = false; }
+    });
+    async function refresh(notify = false) {
+      try { await loadRuns(); if (notify) toast("State refreshed"); }
+      catch (error) { toast(error.message, true); }
+    }
+    async function boot() {
+      try { await loadStatus(); await loadRuns({ keepSelection: false }); }
+      catch (error) { toast(error.message, true); }
+      window.setInterval(() => { if (!document.hidden && !state.busy) refresh(false); }, 2500);
+    }
+    boot();
+  </script>
+</body>
+</html>
