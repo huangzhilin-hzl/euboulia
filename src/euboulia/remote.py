@@ -17,7 +17,7 @@ from typing import IO, cast
 
 import yaml
 
-from euboulia.execution import CommandExecutor, ExecutionResult
+from euboulia.execution import DEFAULT_ENV_ALLOWLIST, CommandExecutor, ExecutionResult
 from euboulia.models import JSONValue
 from euboulia.optimization.config import (
     OptimizationConfig,
@@ -32,6 +32,7 @@ _MANAGED_BY_LABEL = "app.kubernetes.io/managed-by"
 _RUN_LABEL = "euboulia.io/run"
 _RUN_UID_ANNOTATION = "euboulia.io/run-uid"
 _EXECUTOR_ANNOTATION = "euboulia.io/executor"
+_KUBECTL_ENV_ALLOWLIST = DEFAULT_ENV_ALLOWLIST | frozenset({"KUBECONFIG"})
 
 
 class RemoteConfigError(ValueError):
@@ -1113,6 +1114,7 @@ print(hashlib.sha256(data).hexdigest())
                 results.append(
                     CommandExecutor(local_run_dir / "control").run(
                         argv,
+                        env_allowlist=_KUBECTL_ENV_ALLOWLIST,
                         artifact_prefix="pod-worker",
                     )
                 )
