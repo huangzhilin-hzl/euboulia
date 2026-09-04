@@ -184,6 +184,47 @@ def test_delete_uses_exact_owned_pod_uid_as_api_precondition(
     assert delete_options["preconditions"] == {"uid": pod.uid}
 
 
+def test_cleanup_records_the_deleted_pod_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_uid = "run-01HF7YAT000000000000000000"
+    storage = remote.LocalStorageConfig(root=tmp_path / "results")
+    supervisor = remote.KubernetesTargetSupervisor(_executor(tmp_path), storage)
+    pod = remote.OwnedPod(
+        name="euboulia-run-01hf7yat000000000000000000",
+        uid="7e0f5c37-12aa-45d9-a17a-d7a3a0861111",
+        run_uid=run_uid,
+        node_name="worker-8",
+    )
+    run_dir = storage.runs_dir / run_uid
+    run_dir.mkdir(parents=True)
+    (run_dir / "run.json").write_text(
+        json.dumps(
+            {
+                "run_uid": run_uid,
+                "infrastructure_state": "pod_retained",
+                "cleanup": "retained",
+            }
+        ),
+        encoding="utf-8",
+    )
+    deleted: list[remote.OwnedPod] = []
+    monkeypatch.setattr(supervisor, "_owned_pod_from_run_record", lambda selected: pod)
+    monkeypatch.setattr(supervisor, "_delete_owned_pod", deleted.append)
+    monkeypatch.setattr(remote, "utc_now", lambda: "2026-09-04T08:00:00+00:00")
+
+    cleaned = supervisor.cleanup(run_uid)
+
+    assert cleaned == pod
+    assert deleted == [pod]
+    record = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+    assert record["cleanup"] == "deleted"
+    assert record["infrastructure_state"] == "pod_deleted"
+    assert record["cleanup_at"] == "2026-09-04T08:00:00+00:00"
+    assert record["updated_at"] == record["cleanup_at"]
+
+
 def test_create_uses_unique_name_and_only_the_configured_namespace(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -13,7 +13,7 @@ from typing import Any
 
 from euboulia import __version__
 from euboulia.adapters import AdapterError
-from euboulia.control import ControlError, TaskManager
+from euboulia.control import ControlError, ControlStore, TaskManager
 from euboulia.doctor import required_checks_pass, run_doctor
 from euboulia.ledger import ExperimentLedger, LedgerCorruptionError
 from euboulia.optimization.config import (
@@ -771,6 +771,13 @@ def _target_cleanup(args: argparse.Namespace) -> int:
         runtime.executor(args.executor),
         runtime.storage,
     ).cleanup(args.run_uid)
+    control = ControlStore(runtime.storage.root)
+    if control.get(pod.run_uid) is not None:
+        control.update(
+            pod.run_uid,
+            infrastructure_state="pod_deleted",
+            detail="owned Pod deleted after terminal run",
+        )
     payload = {
         "run_uid": pod.run_uid,
         "namespace": runtime.executor(args.executor).namespace,

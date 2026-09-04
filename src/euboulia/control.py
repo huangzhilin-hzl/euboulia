@@ -658,6 +658,8 @@ class TaskManager:
     def reconcile(self) -> None:
         for task in self.store.list(limit=1000, statuses=frozenset({"running", "disconnected"})):
             self._reconcile_task(task)
+        for task in self.store.list(limit=1000, statuses=_TERMINAL_STATUSES):
+            self._reconcile_terminal_state(task)
 
     def _loop(self) -> None:
         while not self._stop.is_set():
@@ -824,6 +826,20 @@ class TaskManager:
         if changes:
             self.store.update(task.run_uid, **changes)
 
+    def _reconcile_terminal_state(self, task: ControlRun) -> None:
+        """Refresh mutable infrastructure state without reopening a terminal task."""
+
+        record = _read_json(self.runtime.storage.runs_dir / task.run_uid / "run.json")
+        if record is None:
+            return
+        infrastructure = _infrastructure_state(record)
+        if infrastructure is None or infrastructure == task.infrastructure_state:
+            return
+        changes: dict[str, object] = {"infrastructure_state": infrastructure}
+        if record.get("cleanup") == "deleted":
+            changes["detail"] = "owned Pod deleted after terminal run"
+        self.store.update(task.run_uid, **changes)
+
     def _child_exit_code(self, run_uid: str, pid: int | None) -> int | None:
         with self._children_lock:
             process = self._children.get(run_uid)
@@ -929,12 +945,12 @@ def _read_progress_safely(path: Path) -> Mapping[str, JSONValue] | None:
 
 
 def _infrastructure_state(record: Mapping[str, JSONValue]) -> str | None:
-    explicit = record.get("infrastructure_state")
-    if isinstance(explicit, str) and explicit in INFRASTRUCTURE_STATES:
-        return explicit
     cleanup = record.get("cleanup")
     if cleanup == "deleted":
         return "pod_deleted"
+    explicit = record.get("infrastructure_state")
+    if isinstance(explicit, str) and explicit in INFRASTRUCTURE_STATES:
+        return explicit
     if cleanup in {"retained", "retained_for_on_demand_artifacts"}:
         return "pod_retained" if record.get("status") in _TERMINAL_STATUSES else "pod_running"
     if record.get("pod") is not None:
