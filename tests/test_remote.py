@@ -595,6 +595,65 @@ def test_worker_artifact_index_marks_raw_profiles_remote_only(tmp_path: Path) ->
     assert retention["target-validation/profile/raw/rank-0.json"] == "remote_only"
 
 
+def test_remote_worker_keeps_the_selected_kubeconfig_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    supervisor = remote.KubernetesTargetSupervisor(
+        _executor(tmp_path),
+        remote.LocalStorageConfig(root=tmp_path / "results"),
+    )
+    supervisor._pod = remote.OwnedPod(
+        name="euboulia-run-01hf7yat000000000000000000",
+        uid="pod-uid",
+        run_uid="run-01HF7YAT000000000000000000",
+        node_name="worker-8",
+    )
+    monkeypatch.setattr(supervisor, "_assert_owned_pod", lambda pod: None)
+    observed: dict[str, object] = {}
+    stdout = tmp_path / "worker.stdout.log"
+    stderr = tmp_path / "worker.stderr.log"
+    stdout.write_text("{}\n", encoding="utf-8")
+    stderr.write_text("", encoding="utf-8")
+
+    class FakeExecutor:
+        def __init__(self, artifact_dir: Path) -> None:
+            observed["artifact_dir"] = artifact_dir
+
+        def run(self, argv: list[str], **kwargs: object) -> ExecutionResult:
+            observed["argv"] = argv
+            observed.update(kwargs)
+            return ExecutionResult(
+                command_id="worker",
+                argv=tuple(argv),
+                cwd=None,
+                returncode=0,
+                started_at="2026-09-04T00:00:00+00:00",
+                finished_at="2026-09-04T00:00:01+00:00",
+                duration_seconds=1.0,
+                stdout_path=stdout,
+                stderr_path=stderr,
+                environment_keys=("KUBECONFIG",),
+            )
+
+    monkeypatch.setattr(remote, "CommandExecutor", FakeExecutor)
+    monkeypatch.setattr(supervisor, "_mirror_worker_progress", lambda *args: None)
+
+    result = supervisor._run_worker(
+        PurePosixPath("/scratch/runs/run-01HF7YAT000000000000000000/recipe.lock.yaml"),
+        name="baseline",
+        run_uid="run-01HF7YAT000000000000000000",
+        remote_runs_root=PurePosixPath("/scratch/runs"),
+        remote_workspace_root=PurePosixPath("/scratch/worktrees"),
+        local_run_dir=tmp_path,
+    )
+
+    assert result.returncode == 0
+    allowlist = observed["env_allowlist"]
+    assert isinstance(allowlist, frozenset)
+    assert "KUBECONFIG" in allowlist
+
+
 def test_artifact_manifest_rejects_a_corrupted_snapshot(tmp_path: Path) -> None:
     run_uid = "run-01HF7YAT000000000000000000"
     snapshot = tmp_path / "snapshot"
