@@ -6,7 +6,7 @@ import hashlib
 import json
 import re
 import uuid
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -92,6 +92,7 @@ from euboulia.optimization.workspace import (
     create_source_worktree,
     prepare_git_source,
 )
+from euboulia.progress import write_run_progress
 from euboulia.run_identity import new_run_uid, normalize_run_name, normalize_run_uid
 
 
@@ -268,6 +269,10 @@ class OptimizationRunner:
             raise OptimizationRuntimeError("target configuration is required for validation")
         if workspace_config is None:
             raise OptimizationRuntimeError("optimization.workspace is required for validation")
+        lanes = config.optimization.evaluation.lanes
+        if lanes is None:  # normalized managed configurations always provide lanes
+            raise OptimizationRuntimeError("optimization.evaluation.lanes is required")
+        qualification_points = len(lanes.qualification.points)
 
         artifact_dir = config.execution.artifacts_dir / selected_run_uid / "target-validation"
         if artifact_dir.exists() or artifact_dir.is_symlink():
@@ -276,6 +281,13 @@ class OptimizationRunner:
             )
         artifact_dir.mkdir(parents=True)
         _write_resolved_recipe_snapshot(config, artifact_dir)
+        write_run_progress(
+            config.execution.artifacts_dir,
+            selected_run_uid,
+            status="running",
+            phase="preparing_sources",
+            detail="preparing immutable source worktrees",
+        )
 
         workspace = self._prepare_managed_workspace(
             config,
@@ -288,6 +300,13 @@ class OptimizationRunner:
         )
         provenance_record: RuntimeProvenanceRecord | None = None
         if target.runtime is not None:
+            write_run_progress(
+                config.execution.artifacts_dir,
+                selected_run_uid,
+                status="running",
+                phase="capturing_provenance",
+                detail="validating runtime and accelerator identity",
+            )
             provenance_record = capture_runtime_provenance(
                 target.runtime,
                 repository=workspace.path,
@@ -306,7 +325,21 @@ class OptimizationRunner:
         )
         controller = self._target_controller or SGLangTargetController()
         if target_spec.build is not None:
+            write_run_progress(
+                config.execution.artifacts_dir,
+                selected_run_uid,
+                status="running",
+                phase="building",
+                detail="building declared SGLang and operator sources",
+            )
             controller.build(workspace.path, target_spec.build, artifact_dir / "build")
+        write_run_progress(
+            config.execution.artifacts_dir,
+            selected_run_uid,
+            status="running",
+            phase="launching",
+            detail="starting the run-owned SGLang service",
+        )
         handle = controller.start(
             workspace.path,
             target_spec,
@@ -318,6 +351,13 @@ class OptimizationRunner:
         evaluation: TieredEvaluationResult | WorkloadSuiteEvaluationResult | None = None
         profile: ProfileResult | None = None
         try:
+            write_run_progress(
+                config.execution.artifacts_dir,
+                selected_run_uid,
+                status="running",
+                phase="waiting_ready",
+                detail="waiting for the owned service readiness contract",
+            )
             controller.wait_ready(handle)
             context = StageContext(
                 run_uid=selected_run_uid,
@@ -327,6 +367,13 @@ class OptimizationRunner:
                     {Capability.PROFILE_EXECUTION, Capability.BENCHMARK_EXECUTION}
                 ),
                 input_digest=_config_digest(config),
+            )
+            write_run_progress(
+                config.execution.artifacts_dir,
+                selected_run_uid,
+                status="running",
+                phase="profiling",
+                detail="capturing bounded diagnostic profile evidence",
             )
             _, profile = self._capture_running_service_profile(
                 config,
@@ -349,7 +396,32 @@ class OptimizationRunner:
                 "EUBOULIA_TARGET_ARTIFACT_DIR": str(artifact_dir),
                 "EUBOULIA_PROFILE_MANIFEST_PATH": str(profile_manifest),
             }
+            write_run_progress(
+                config.execution.artifacts_dir,
+                selected_run_uid,
+                status="running",
+                phase="evaluating",
+                detail="running the unprofiled qualification lane",
+                completed_units=0,
+                total_units=qualification_points,
+            )
             evaluator = TieredEvaluator(artifact_dir / "evaluations")
+
+            def record_evaluation_progress(
+                completed: int,
+                total: int,
+                point_name: str,
+            ) -> None:
+                write_run_progress(
+                    config.execution.artifacts_dir,
+                    selected_run_uid,
+                    status="running",
+                    phase="evaluating",
+                    detail=f"qualification point {point_name}",
+                    completed_units=completed,
+                    total_units=total,
+                )
+
             evaluation = _execute_workload_suite(
                 config,
                 trial_id="baseline-validation",
@@ -360,8 +432,16 @@ class OptimizationRunner:
                 artifact_dir=artifact_dir / "evaluations" / "baseline-validation",
                 lane="qualification",
                 runtime_environment=runtime_environment,
+                progress=record_evaluation_progress,
             )
         finally:
+            write_run_progress(
+                config.execution.artifacts_dir,
+                selected_run_uid,
+                status="running",
+                phase="stopping",
+                detail="stopping the exact run-owned service",
+            )
             try:
                 controller.stop(handle)
             finally:
@@ -382,6 +462,15 @@ class OptimizationRunner:
         (artifact_dir / "validation.json").write_text(
             json.dumps(result.to_dict(), indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
+        )
+        write_run_progress(
+            config.execution.artifacts_dir,
+            selected_run_uid,
+            status="completed",
+            phase="completed",
+            detail="baseline validation evidence is complete",
+            completed_units=qualification_points,
+            total_units=qualification_points,
         )
         return result
 
@@ -2486,6 +2575,7 @@ def _execute_workload_suite(
     artifact_dir: Path,
     lane: str,
     runtime_environment: Mapping[str, str] | None = None,
+    progress: Callable[[int, int, str], None] | None = None,
 ) -> TieredEvaluationResult | WorkloadSuiteEvaluationResult:
     evaluation = config.optimization.evaluation
     if evaluation.metrics_path is None:
@@ -2502,6 +2592,8 @@ def _execute_workload_suite(
     selected_points = tuple(points_by_name[name] for name in lane_config.points)
     point_results: dict[str, TieredEvaluationResult] = {}
     for index, point in enumerate(selected_points):
+        if progress is not None:
+            progress(index, len(selected_points), point.name)
         point_trial_id = (
             trial_id
             if config.schema_version == 2 and len(config.workload_suite.points) == 1
@@ -2526,6 +2618,8 @@ def _execute_workload_suite(
         )
         point_result = evaluator.execute(evaluator.authorize(plan, approved=True))
         point_results[point.name] = point_result
+        if progress is not None:
+            progress(index + 1, len(selected_points), point.name)
         promotion = evaluation.promotion
         if point_result.outcome is EvaluationOutcome.FAILED and (
             index == 0 or promotion is None or promotion.require_all_points_valid

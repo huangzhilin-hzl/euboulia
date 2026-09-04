@@ -9,6 +9,7 @@ import os
 import shutil
 import subprocess
 import tarfile
+import threading
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
@@ -278,10 +279,11 @@ class KubernetesTargetSupervisor:
         *,
         name: str | None,
         node: str,
+        run_uid: str | None = None,
     ) -> RemoteTargetRunResult:
         selected_name = normalize_run_name(name)
         requested_node = _safe_argument(node, "node")
-        run_uid = new_run_uid()
+        run_uid = new_run_uid() if run_uid is None else normalize_run_uid(run_uid)
         local_run_dir = self.storage.runs_dir / run_uid
         local_run_dir.mkdir(parents=True, mode=0o700, exist_ok=False)
         SQLiteMemoryStore(self.storage.memory_path)
@@ -317,8 +319,26 @@ class KubernetesTargetSupervisor:
             "remote_run_dir": str(remote_run_dir),
             "started_at": started_at,
             "status": "running",
+            "phase": "submitted",
+            "infrastructure_state": "not_created",
+            "artifact_state": "pending",
             "cleanup": "not_created",
         }
+
+        def record_phase(
+            phase: str,
+            *,
+            infrastructure_state: str | None = None,
+            artifact_state: str | None = None,
+        ) -> None:
+            base_record["phase"] = phase
+            if infrastructure_state is not None:
+                base_record["infrastructure_state"] = infrastructure_state
+            if artifact_state is not None:
+                base_record["artifact_state"] = artifact_state
+            base_record["updated_at"] = utc_now()
+            _write_json(local_run_dir / "run.json", base_record)
+
         _write_json(local_run_dir / "run.json", base_record)
         ledger.append(
             OptimizationEvent.create(
@@ -339,7 +359,9 @@ class KubernetesTargetSupervisor:
         unsynced_remote_artifacts = 0
         worker_payload: Mapping[str, JSONValue] | None = None
         error: str | None = None
+        cancelled = False
         try:
+            record_phase("allocating", infrastructure_state="pod_pending")
             self._pod = self._create_pod(config, run_uid=run_uid, node=requested_node)
             base_record.update(
                 {
@@ -349,8 +371,10 @@ class KubernetesTargetSupervisor:
                     "cleanup": "retained",
                 }
             )
-            _write_json(local_run_dir / "run.json", base_record)
+            record_phase("allocating", infrastructure_state="pod_pending")
             self._wait_pod_ready(self._pod)
+            record_phase("pod_ready", infrastructure_state="pod_running")
+            record_phase("staging")
             self._stage_project(local_run_dir)
             self._stage_recipe(
                 remote_run_dir,
@@ -359,6 +383,7 @@ class KubernetesTargetSupervisor:
                 worker_recipe_sha256,
                 local_run_dir,
             )
+            record_phase("preparing_sources")
             worker = self._run_worker(
                 remote_recipe,
                 name=selected_name,
@@ -378,11 +403,15 @@ class KubernetesTargetSupervisor:
                     )
             else:
                 error = worker.error or f"remote worker exited with status {worker.returncode}"
+        except KeyboardInterrupt:
+            cancelled = True
+            error = "run cancelled; the owned Pod was retained for recovery"
         except (OSError, RemoteExecutionError, ValueError) as exc:
             error = str(exc)
         finally:
             if self._pod is not None:
                 try:
+                    record_phase("syncing", artifact_state="syncing")
                     sync = self._pull_artifacts(
                         remote_run_dir,
                         local_run_dir / "artifacts",
@@ -426,7 +455,12 @@ class KubernetesTargetSupervisor:
             )
 
         cleanup = cast(str, base_record["cleanup"])
-        if self._pod is not None and manifest_error is None and unsynced_remote_artifacts == 0:
+        if (
+            not cancelled
+            and self._pod is not None
+            and manifest_error is None
+            and unsynced_remote_artifacts == 0
+        ):
             try:
                 self._delete_owned_pod(self._pod)
                 cleanup = "deleted"
@@ -439,11 +473,21 @@ class KubernetesTargetSupervisor:
 
         completed = worker_payload is not None and error is None and sync is not None
         passed = completed and worker_payload is not None and worker_payload.get("passed") is True
-        status = "completed" if completed else "failed"
+        status = "cancelled" if cancelled else ("completed" if completed else "failed")
+        phase = "cancelled" if cancelled else ("completed" if completed else "failed")
+        infrastructure_state = (
+            "pod_deleted"
+            if cleanup == "deleted"
+            else ("not_created" if self._pod is None else "pod_retained")
+        )
+        artifact_state = "verified" if manifest_error is None else "partial"
         finished_at = utc_now()
         summary: dict[str, JSONValue] = {
             **base_record,
             "status": status,
+            "phase": phase,
+            "infrastructure_state": infrastructure_state,
+            "artifact_state": artifact_state,
             "passed": passed,
             "finished_at": finished_at,
             "worker": None if worker is None else cast(JSONValue, worker.to_dict()),
@@ -456,7 +500,11 @@ class KubernetesTargetSupervisor:
         _write_json(local_run_dir / "run.json", summary)
         ledger.append(
             OptimizationEvent.create(
-                EventType.RUN_COMPLETED if completed else EventType.RUN_FAILED,
+                (
+                    EventType.RUN_STOPPED
+                    if cancelled
+                    else (EventType.RUN_COMPLETED if completed else EventType.RUN_FAILED)
+                ),
                 run_uid,
                 payload={
                     "status": status,
@@ -1056,10 +1104,75 @@ print(hashlib.sha256(data).hexdigest())
         ]
         if name is not None:
             argv.extend(("--name", name))
-        return CommandExecutor(local_run_dir / "control").run(
-            argv,
-            artifact_prefix="pod-worker",
+        results: list[ExecutionResult] = []
+        failures: list[BaseException] = []
+        finished = threading.Event()
+
+        def execute_worker() -> None:
+            try:
+                results.append(
+                    CommandExecutor(local_run_dir / "control").run(
+                        argv,
+                        artifact_prefix="pod-worker",
+                    )
+                )
+            except BaseException as exc:  # preserve the exact failure in the supervisor thread
+                failures.append(exc)
+            finally:
+                finished.set()
+
+        worker_thread = threading.Thread(
+            target=execute_worker,
+            name=f"euboulia-worker-{run_uid}",
+            daemon=True,
         )
+        worker_thread.start()
+        remote_progress = remote_runs_root / run_uid / "progress.json"
+        local_progress = local_run_dir / "worker-progress.json"
+        while not finished.wait(2.0):
+            self._mirror_worker_progress(remote_progress, local_progress, run_uid)
+        self._mirror_worker_progress(remote_progress, local_progress, run_uid)
+        worker_thread.join()
+        if failures:
+            raise failures[0]
+        if len(results) != 1:  # pragma: no cover - worker thread always records one result
+            raise RemoteExecutionError("remote worker did not produce an execution result")
+        return results[0]
+
+    def _mirror_worker_progress(
+        self,
+        remote_progress: PurePosixPath,
+        local_progress: Path,
+        run_uid: str,
+    ) -> None:
+        """Copy one small atomic progress record; missing early records are expected."""
+
+        argv = [*self._kubectl_exec_prefix(), "cat", str(remote_progress)]
+        try:
+            completed = subprocess.run(
+                argv,
+                capture_output=True,
+                timeout=15,
+                check=False,
+                shell=False,
+            )
+        except (OSError, subprocess.TimeoutExpired, RemoteExecutionError):
+            return
+        if completed.returncode != 0 or len(completed.stdout) > 64 * 1024:
+            return
+        try:
+            loaded: object = json.loads(completed.stdout)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return
+        if not isinstance(loaded, dict) or loaded.get("run_uid") != run_uid:
+            return
+        if loaded.get("schema_version") != 1:
+            return
+        if not isinstance(loaded.get("status"), str) or not isinstance(
+            loaded.get("phase"), str
+        ):
+            return
+        _write_json(local_progress, cast(Mapping[str, JSONValue], loaded))
 
     def _pull_artifacts(
         self,
@@ -1409,11 +1522,17 @@ def _discover_project_root(path: Path) -> Path:
 def _write_json(path: Path, value: Mapping[str, JSONValue]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    temporary.write_text(
-        json.dumps(value, ensure_ascii=False, allow_nan=False, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-    os.replace(temporary, path)
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            json.dump(value, handle, ensure_ascii=False, allow_nan=False, indent=2, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
 
 
 def _write_private_bytes(path: Path, value: bytes) -> None:

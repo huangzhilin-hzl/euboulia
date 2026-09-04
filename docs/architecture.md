@@ -91,6 +91,19 @@ The controller never discovers a process by name or port. A signed handle binds 
 exact PID, process group, start identity, run, trial, command digest, endpoint, and
 log paths. This is the only identity that can be stopped.
 
+## Local control plane
+
+`euboulia serve` is the operator view over this lifecycle. It binds only to loopback
+and keeps its queue in `<storage.root>/control.sqlite3`; the database is an index, while
+run directories remain the canonical evidence. Each submitted task stores a private,
+resolved recipe lock and launches an independent local controller process, so closing
+the page or restarting the server does not terminate an active Pod run.
+
+Task status, execution phase, infrastructure state, and artifact state are separate.
+This prevents a retained Pod or partial artifact sync from being hidden behind one
+generic “failed” label. Cancellation targets only the verified controller process for
+that run; an already-created owned Pod is retained for recovery and explicit cleanup.
+
 ## Evaluation semantics
 
 For each fresh service, Euboulia runs correctness before interpreting performance.

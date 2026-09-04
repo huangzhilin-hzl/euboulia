@@ -13,6 +13,7 @@ from typing import Any
 
 from euboulia import __version__
 from euboulia.adapters import AdapterError
+from euboulia.control import ControlError, TaskManager
 from euboulia.doctor import required_checks_pass, run_doctor
 from euboulia.ledger import ExperimentLedger, LedgerCorruptionError
 from euboulia.optimization.config import (
@@ -32,6 +33,7 @@ from euboulia.optimization.planner import PatchCatalogError
 from euboulia.optimization.runner import OptimizationRunner, OptimizationRuntimeError
 from euboulia.optimization.target import TargetError
 from euboulia.optimization.workspace import WorkspaceError
+from euboulia.progress import write_run_progress
 from euboulia.recipe import (
     ConfigError,
     RecipeRunResult,
@@ -103,6 +105,25 @@ def build_parser() -> argparse.ArgumentParser:
     )
     history_parser.add_argument("--json", action="store_true", help="emit machine-readable JSON")
     history_parser.set_defaults(handler=_history)
+
+    serve_parser = subparsers.add_parser(
+        "serve", help="run the loopback-only experiment control plane and web console"
+    )
+    serve_parser.add_argument(
+        "--runtime-config",
+        type=Path,
+        help="local runtime config (default: ~/.config/euboulia/config.yaml)",
+    )
+    serve_parser.add_argument("--host", default="127.0.0.1", help="loopback bind address")
+    serve_parser.add_argument("--port", type=int, default=8765, help="local HTTP port")
+    serve_parser.add_argument(
+        "--max-parallel",
+        type=_positive_integer,
+        default=2,
+        help="maximum concurrently running target tasks",
+    )
+    serve_parser.add_argument("--open", action="store_true", help="open the console in a browser")
+    serve_parser.set_defaults(handler=_serve)
 
     optimize_parser = subparsers.add_parser(
         "optimize", help="run the schema-v2 iterative optimization pipeline"
@@ -211,8 +232,44 @@ def build_parser() -> argparse.ArgumentParser:
     target_run_parser.add_argument("--internal-run-uid", help=argparse.SUPPRESS)
     target_run_parser.add_argument("--internal-artifacts-root", type=Path, help=argparse.SUPPRESS)
     target_run_parser.add_argument("--internal-workspace-root", type=Path, help=argparse.SUPPRESS)
+    target_run_parser.add_argument("--controller-run-uid", help=argparse.SUPPRESS)
     target_run_parser.add_argument("--json", action="store_true")
     target_run_parser.set_defaults(handler=_target_run)
+
+    target_submit_parser = target_commands.add_parser(
+        "submit", help="persist a target run for the local control plane"
+    )
+    _add_recipe_argument(target_submit_parser)
+    target_submit_parser.add_argument("--executor", required=True)
+    target_submit_parser.add_argument("--node", required=True)
+    target_submit_parser.add_argument("--name")
+    target_submit_parser.add_argument("--runtime-config", type=Path)
+    target_submit_parser.add_argument("--json", action="store_true")
+    target_submit_parser.set_defaults(handler=_target_submit)
+
+    target_list_parser = target_commands.add_parser(
+        "list", help="list submitted and historical target runs"
+    )
+    target_list_parser.add_argument("--runtime-config", type=Path)
+    target_list_parser.add_argument("--limit", type=_positive_integer, default=50)
+    target_list_parser.add_argument("--json", action="store_true")
+    target_list_parser.set_defaults(handler=_target_list)
+
+    target_show_parser = target_commands.add_parser(
+        "show", help="show one submitted target run and its local evidence"
+    )
+    target_show_parser.add_argument("run_uid")
+    target_show_parser.add_argument("--runtime-config", type=Path)
+    target_show_parser.add_argument("--json", action="store_true")
+    target_show_parser.set_defaults(handler=_target_show)
+
+    target_cancel_parser = target_commands.add_parser(
+        "cancel", help="cancel one queued or running target run"
+    )
+    target_cancel_parser.add_argument("run_uid")
+    target_cancel_parser.add_argument("--runtime-config", type=Path)
+    target_cancel_parser.add_argument("--json", action="store_true")
+    target_cancel_parser.set_defaults(handler=_target_cancel)
 
     target_artifacts_parser = target_commands.add_parser(
         "artifacts", help="retrieve retained artifacts from a remote target run"
@@ -337,6 +394,19 @@ def _history(args: argparse.Namespace) -> int:
                 f"{experiment.created_at}  {experiment.experiment_id}  "
                 f"{experiment.status.value}  verdict={verdict}"
             )
+    return 0
+
+
+def _serve(args: argparse.Namespace) -> int:
+    from euboulia.server import serve
+
+    serve(
+        runtime_config=args.runtime_config,
+        host=args.host,
+        port=args.port,
+        max_parallel=args.max_parallel,
+        open_browser=args.open,
+    )
     return 0
 
 
@@ -525,6 +595,8 @@ def _target_run(args: argparse.Namespace) -> int:
         raise RemoteConfigError("internal worker storage arguments must be supplied together")
     if args.executor is not None and any(value is not None for value in internal_values):
         raise RemoteConfigError("--executor cannot be combined with internal worker arguments")
+    if args.controller_run_uid is not None and args.executor is None:
+        raise RemoteConfigError("--controller-run-uid requires --executor")
     if args.executor is not None and args.node is None:
         raise RemoteConfigError("--node is required with --executor")
     if args.executor is None and args.node is not None:
@@ -539,6 +611,7 @@ def _target_run(args: argparse.Namespace) -> int:
             config,
             name=args.name,
             node=args.node,
+            run_uid=args.controller_run_uid,
         )
         if args.json:
             _print_json(remote.to_dict())
@@ -571,11 +644,27 @@ def _target_run(args: argparse.Namespace) -> int:
             workspace_root=args.internal_workspace_root,
         )
     try:
-        result = OptimizationRunner().validate_baseline(
-            config,
-            name=args.name,
-            run_uid=run_uid,
-        )
+        result = OptimizationRunner().validate_baseline(config, name=args.name, run_uid=run_uid)
+    except KeyboardInterrupt:
+        if run_uid is not None:
+            write_run_progress(
+                config.execution.artifacts_dir,
+                run_uid,
+                status="cancelled",
+                phase="cancelled",
+                detail="worker interrupted by its owning controller",
+            )
+        raise
+    except Exception as exc:
+        if run_uid is not None:
+            write_run_progress(
+                config.execution.artifacts_dir,
+                run_uid,
+                status="failed",
+                phase="failed",
+                detail=f"{type(exc).__name__}: {exc}"[:512],
+            )
+        raise
     finally:
         if run_uid is not None:
             write_worker_artifact_index(config.execution.artifacts_dir / run_uid, run_uid)
@@ -590,6 +679,74 @@ def _target_run(args: argparse.Namespace) -> int:
         print(f"Artifacts: {result.artifact_dir}")
         print(f"Worktree: {result.workspace_path}")
     return 0 if result.passed else 1
+
+
+def _target_submit(args: argparse.Namespace) -> int:
+    manager = TaskManager(args.runtime_config)
+    run = manager.submit(
+        recipe=args.recipe,
+        executor=args.executor,
+        node=args.node,
+        name=args.name,
+    )
+    if args.json:
+        _print_json(run.to_dict())
+    else:
+        print(f"Submitted: {run.run_uid}")
+        print(f"Status: {run.status}")
+        print(f"Recipe lock: {run.recipe_path}")
+        print("The task starts when `euboulia serve` is running.")
+    return 0
+
+
+def _target_list(args: argparse.Namespace) -> int:
+    manager = TaskManager(args.runtime_config)
+    runs = manager.store.list(limit=args.limit)
+    if args.json:
+        _print_json({"runs": [run.to_dict() for run in runs]})
+    else:
+        if not runs:
+            print("No submitted target runs.")
+        for run in runs:
+            label = run.name or run.recipe_name
+            print(f"{run.run_uid}  {run.status:<12} {run.phase:<22} {label}")
+    return 0
+
+
+def _target_show(args: argparse.Namespace) -> int:
+    from euboulia.server import ControlApplication
+
+    manager = TaskManager(args.runtime_config)
+    try:
+        detail = ControlApplication(manager).run_detail(args.run_uid)
+    except KeyError as exc:
+        raise ControlError(f"unknown run: {args.run_uid}") from exc
+    if args.json:
+        _print_json(detail)
+    else:
+        run = detail["run"]
+        if not isinstance(run, dict):  # pragma: no cover - application contract
+            raise ControlError("invalid control-plane run record")
+        print(f"Run UID: {run['run_uid']}")
+        print(f"Name: {run['name'] or run['recipe_name']}")
+        print(f"Status: {run['status']} / {run['phase']}")
+        print(f"Infrastructure: {run['infrastructure_state']}")
+        print(f"Artifacts: {run['artifact_state']}")
+        if run.get("detail"):
+            print(f"Detail: {run['detail']}")
+    return 0
+
+
+def _target_cancel(args: argparse.Namespace) -> int:
+    manager = TaskManager(args.runtime_config)
+    run = manager.cancel(args.run_uid)
+    if args.json:
+        _print_json(run.to_dict())
+    else:
+        print(f"Run UID: {run.run_uid}")
+        print(f"Status: {run.status}")
+        print(run.detail or "Cancellation requested.")
+    return 0
 
 
 def _target_artifacts_pull(args: argparse.Namespace) -> int:
@@ -708,6 +865,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return handler(args)
     except (
         AdapterError,
+        ControlError,
         RecipeSafetyError,
         RemoteExecutionError,
         ConfigError,

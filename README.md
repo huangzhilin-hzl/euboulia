@@ -81,20 +81,26 @@ uv run euboulia target resolve \
 ```
 
 Configure an executor in `~/.config/euboulia/config.yaml`, with its real Pod template
-kept outside Git. Then run the locked experiment on the selected Kubernetes node name
-or InternalIP:
+kept outside Git. Start the local experiment console:
 
 ```console
-uv run euboulia target run \
+uv run euboulia serve --open
+```
+
+Submit the lock from the console, or from another terminal:
+
+```console
+uv run euboulia target submit \
   --recipe "$EXPERIMENT_DIR/recipe.lock.yaml" \
   --executor gpu-worker \
   --node NODE_NAME_OR_INTERNAL_IP \
   --name baseline
 ```
 
-The generated `run_uid` identifies this execution. Canonical records are written under
-`<storage.root>/runs/<run-uid>` and reusable experiment memory remains under
-`<storage.root>/memory.sqlite3`.
+The loopback-only console shows the task, current execution phase, owned Pod state,
+result synchronization, logs, and historical artifacts. Its queue is durable, and
+running controllers continue independently if the page or server is closed. Canonical
+records remain under `<storage.root>`.
 
 ## Documentation
 
