@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
 import copy
 import hashlib
 import json
@@ -10,7 +12,8 @@ import shutil
 import subprocess
 import tarfile
 import threading
-from collections.abc import Mapping
+import time
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import IO, cast
@@ -33,6 +36,47 @@ _RUN_LABEL = "euboulia.io/run"
 _RUN_UID_ANNOTATION = "euboulia.io/run-uid"
 _EXECUTOR_ANNOTATION = "euboulia.io/executor"
 _KUBECTL_ENV_ALLOWLIST = DEFAULT_ENV_ALLOWLIST | frozenset({"KUBECONFIG"})
+_LIVE_LOG_CHUNK_BYTES = 128 * 1024
+
+_REMOTE_SERVICE_LOG_READER = r"""
+import base64
+import json
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1])
+limit = int(sys.argv[2])
+requests = {
+    "stdout": {"file": sys.argv[3], "offset": int(sys.argv[4])},
+    "stderr": {"file": sys.argv[5], "offset": int(sys.argv[6])},
+}
+
+def read_stream(name, suffix):
+    matches = sorted(root.glob(f"*{suffix}")) if root.is_dir() else []
+    if not matches:
+        return {"file": None, "offset": 0, "next_offset": 0, "reset": False, "data": ""}
+    path = matches[-1]
+    requested = requests[name]
+    offset = requested["offset"]
+    reset = requested["file"] != path.name or offset > path.stat().st_size
+    if reset:
+        offset = 0
+    with path.open("rb") as handle:
+        handle.seek(offset)
+        data = handle.read(limit)
+    return {
+        "file": path.name,
+        "offset": offset,
+        "next_offset": offset + len(data),
+        "reset": reset,
+        "data": base64.b64encode(data).decode("ascii"),
+    }
+
+print(json.dumps({
+    "stdout": read_stream("stdout", ".stdout.log"),
+    "stderr": read_stream("stderr", ".stderr.log"),
+}, separators=(",", ":")))
+""".strip()
 
 
 class RemoteConfigError(ValueError):
@@ -273,6 +317,7 @@ class KubernetesTargetSupervisor:
         self.executor = executor
         self.storage = storage
         self._pod: OwnedPod | None = None
+        self._live_log_positions: dict[str, tuple[str, int]] = {}
 
     def run(
         self,
@@ -321,6 +366,7 @@ class KubernetesTargetSupervisor:
             "started_at": started_at,
             "status": "running",
             "phase": "submitted",
+            "detail": "target run submitted",
             "infrastructure_state": "not_created",
             "artifact_state": "pending",
             "cleanup": "not_created",
@@ -331,16 +377,32 @@ class KubernetesTargetSupervisor:
             *,
             infrastructure_state: str | None = None,
             artifact_state: str | None = None,
+            detail: str | None = None,
         ) -> None:
             base_record["phase"] = phase
             if infrastructure_state is not None:
                 base_record["infrastructure_state"] = infrastructure_state
             if artifact_state is not None:
                 base_record["artifact_state"] = artifact_state
+            if detail is not None:
+                base_record["detail"] = detail
             base_record["updated_at"] = utc_now()
             _write_json(local_run_dir / "run.json", base_record)
+            self._append_controller_signal(run_uid, phase, detail or phase.replace("_", " "))
+
+        def record_pod_observation(detail: str) -> None:
+            record_phase(
+                "allocating",
+                infrastructure_state="pod_pending",
+                detail=detail,
+            )
+            _append_private_bytes(
+                local_run_dir / "live" / "kubernetes.log",
+                f"{utc_now()}  {detail}\n".encode("utf-8", errors="replace"),
+            )
 
         _write_json(local_run_dir / "run.json", base_record)
+        self._append_controller_signal(run_uid, "submitted", "target run submitted")
         ledger.append(
             OptimizationEvent.create(
                 EventType.RUN_STARTED,
@@ -362,7 +424,11 @@ class KubernetesTargetSupervisor:
         error: str | None = None
         cancelled = False
         try:
-            record_phase("allocating", infrastructure_state="pod_pending")
+            record_phase(
+                "allocating",
+                infrastructure_state="pod_pending",
+                detail="creating the run-owned Pod",
+            )
             self._pod = self._create_pod(config, run_uid=run_uid, node=requested_node)
             base_record.update(
                 {
@@ -372,10 +438,21 @@ class KubernetesTargetSupervisor:
                     "cleanup": "retained",
                 }
             )
-            record_phase("allocating", infrastructure_state="pod_pending")
-            self._wait_pod_ready(self._pod)
-            record_phase("pod_ready", infrastructure_state="pod_running")
-            record_phase("staging")
+            record_phase(
+                "allocating",
+                infrastructure_state="pod_pending",
+                detail=f"Pod {self._pod.name} created; waiting for readiness",
+            )
+            self._wait_pod_ready(
+                self._pod,
+                on_observation=record_pod_observation,
+            )
+            record_phase(
+                "pod_ready",
+                infrastructure_state="pod_running",
+                detail="run-owned Pod is Ready",
+            )
+            record_phase("staging", detail="staging the controller checkout and recipe")
             self._stage_project(local_run_dir)
             self._stage_recipe(
                 remote_run_dir,
@@ -384,7 +461,7 @@ class KubernetesTargetSupervisor:
                 worker_recipe_sha256,
                 local_run_dir,
             )
-            record_phase("preparing_sources")
+            record_phase("preparing_sources", detail="remote worker started")
             worker = self._run_worker(
                 remote_recipe,
                 name=selected_name,
@@ -412,7 +489,11 @@ class KubernetesTargetSupervisor:
         finally:
             if self._pod is not None:
                 try:
-                    record_phase("syncing", artifact_state="syncing")
+                    record_phase(
+                        "syncing",
+                        artifact_state="syncing",
+                        detail="synchronizing run evidence to local storage",
+                    )
                     sync = self._pull_artifacts(
                         remote_run_dir,
                         local_run_dir / "artifacts",
@@ -487,6 +568,8 @@ class KubernetesTargetSupervisor:
             **base_record,
             "status": status,
             "phase": phase,
+            "detail": error
+            or ("target validation completed" if completed else "target validation stopped"),
             "infrastructure_state": infrastructure_state,
             "artifact_state": artifact_state,
             "passed": passed,
@@ -499,6 +582,11 @@ class KubernetesTargetSupervisor:
         }
         _write_json(summary_path, summary)
         _write_json(local_run_dir / "run.json", summary)
+        self._append_controller_signal(
+            run_uid,
+            phase,
+            cast(str, summary["detail"]),
+        )
         ledger.append(
             OptimizationEvent.create(
                 (
@@ -564,6 +652,13 @@ class KubernetesTargetSupervisor:
         record["updated_at"] = cleanup_at
         _write_json(record_path, cast(Mapping[str, JSONValue], record))
         return pod
+
+    def _append_controller_signal(self, run_uid: str, phase: str, detail: str) -> None:
+        line = f"{utc_now()}  {phase.upper():<20} {detail}\n".encode("utf-8", errors="replace")
+        _append_private_bytes(
+            self.storage.root / "controller-logs" / f"{normalize_run_uid(run_uid)}.log",
+            line,
+        )
 
     def _create_pod(
         self,
@@ -728,28 +823,36 @@ class KubernetesTargetSupervisor:
             raise RemoteExecutionError(f"Kubernetes node or address {selected!r} is {detail}")
         return next(iter(matches))
 
-    def _wait_pod_ready(self, pod: OwnedPod) -> None:
-        self._assert_owned_pod(pod)
-        argv = [
-            *self._kubectl_prefix(),
-            "wait",
-            "--for=condition=Ready",
-            f"pod/{pod.name}",
-            f"--timeout={self.executor.startup_timeout_seconds}s",
-        ]
-        try:
-            completed = subprocess.run(
-                argv,
-                capture_output=True,
-                timeout=self.executor.startup_timeout_seconds + 30,
-                check=False,
-                shell=False,
-            )
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            raise RemoteExecutionError(f"cannot wait for owned Pod {pod.name}: {exc}") from exc
-        if completed.returncode != 0:
-            detail = completed.stderr.decode("utf-8", errors="replace").strip()
-            raise RemoteExecutionError(f"owned Pod {pod.name} did not become Ready: {detail}")
+    def _wait_pod_ready(
+        self,
+        pod: OwnedPod,
+        *,
+        on_observation: Callable[[str], None] | None = None,
+    ) -> None:
+        """Observe readiness and fail immediately when Kubernetes marks the Pod terminal."""
+
+        deadline = time.monotonic() + self.executor.startup_timeout_seconds
+        previous: str | None = None
+        while True:
+            payload = self._inspect_owned_pod(pod)
+            ready, terminal, observation = _pod_readiness(payload)
+            if observation != previous:
+                previous = observation
+                if on_observation is not None:
+                    on_observation(observation)
+            if ready:
+                return
+            if terminal:
+                raise RemoteExecutionError(
+                    f"owned Pod {pod.name} reached a terminal state: {observation}"
+                )
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise RemoteExecutionError(
+                    f"owned Pod {pod.name} did not become Ready within "
+                    f"{self.executor.startup_timeout_seconds}s: {observation}"
+                )
+            time.sleep(min(2.0, remaining))
 
     def _stage_project(self, local_run_dir: Path) -> None:
         project = self.executor.local_project_dir or _discover_project_root(Path(__file__))
@@ -854,6 +957,9 @@ if any(destination.iterdir()):
         return pod
 
     def _assert_owned_pod(self, pod: OwnedPod) -> None:
+        self._inspect_owned_pod(pod)
+
+    def _inspect_owned_pod(self, pod: OwnedPod) -> Mapping[str, object]:
         argv = [*self._kubectl_prefix(), "get", "pod", pod.name, "--output=json"]
         try:
             completed = subprocess.run(
@@ -877,6 +983,7 @@ if any(destination.iterdir()):
             raise RemoteExecutionError(
                 f"refusing to operate on Pod {pod.name}: immutable Pod identity changed"
             )
+        return _mapping(payload, "Pod")
 
     def _owned_pod_from_payload(
         self,
@@ -1134,9 +1241,12 @@ print(hashlib.sha256(data).hexdigest())
         worker_thread.start()
         remote_progress = remote_runs_root / run_uid / "progress.json"
         local_progress = local_run_dir / "worker-progress.json"
+        remote_service_dir = remote_runs_root / run_uid / "target-validation" / "service"
         while not finished.wait(2.0):
             self._mirror_worker_progress(remote_progress, local_progress, run_uid)
+            self._mirror_service_logs(remote_service_dir, local_run_dir / "live")
         self._mirror_worker_progress(remote_progress, local_progress, run_uid)
+        self._mirror_service_logs(remote_service_dir, local_run_dir / "live")
         worker_thread.join()
         if failures:
             raise failures[0]
@@ -1173,11 +1283,86 @@ print(hashlib.sha256(data).hexdigest())
             return
         if loaded.get("schema_version") != 1:
             return
-        if not isinstance(loaded.get("status"), str) or not isinstance(
-            loaded.get("phase"), str
-        ):
+        if not isinstance(loaded.get("status"), str) or not isinstance(loaded.get("phase"), str):
             return
         _write_json(local_progress, cast(Mapping[str, JSONValue], loaded))
+
+    def _mirror_service_logs(
+        self,
+        remote_service_dir: PurePosixPath,
+        local_live_dir: Path,
+    ) -> None:
+        """Append bounded SGLang stdout/stderr chunks from the owned worker Pod."""
+
+        stdout_file, stdout_offset = self._live_log_positions.get("stdout", ("", 0))
+        stderr_file, stderr_offset = self._live_log_positions.get("stderr", ("", 0))
+        argv = [
+            *self._kubectl_exec_prefix(),
+            self.executor.python,
+            "-c",
+            _REMOTE_SERVICE_LOG_READER,
+            str(remote_service_dir),
+            str(_LIVE_LOG_CHUNK_BYTES),
+            stdout_file,
+            str(stdout_offset),
+            stderr_file,
+            str(stderr_offset),
+        ]
+        try:
+            completed = subprocess.run(
+                argv,
+                capture_output=True,
+                timeout=15,
+                check=False,
+                shell=False,
+            )
+        except (OSError, subprocess.TimeoutExpired, RemoteExecutionError):
+            return
+        if completed.returncode != 0 or len(completed.stdout) > _LIVE_LOG_CHUNK_BYTES * 3:
+            return
+        try:
+            payload: object = json.loads(completed.stdout)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return
+        if not isinstance(payload, dict):
+            return
+        for stream in ("stdout", "stderr"):
+            raw = payload.get(stream)
+            if not isinstance(raw, dict):
+                continue
+            file_name = raw.get("file")
+            offset = raw.get("offset")
+            next_offset = raw.get("next_offset")
+            reset = raw.get("reset")
+            encoded = raw.get("data")
+            if file_name is None:
+                continue
+            if (
+                not isinstance(file_name, str)
+                or not file_name
+                or Path(file_name).name != file_name
+                or not isinstance(offset, int)
+                or isinstance(offset, bool)
+                or offset < 0
+                or not isinstance(next_offset, int)
+                or isinstance(next_offset, bool)
+                or next_offset < offset
+                or not isinstance(reset, bool)
+                or not isinstance(encoded, str)
+            ):
+                continue
+            try:
+                chunk = base64.b64decode(encoded, validate=True)
+            except (binascii.Error, ValueError):
+                continue
+            if len(chunk) > _LIVE_LOG_CHUNK_BYTES or next_offset - offset != len(chunk):
+                continue
+            local_path = local_live_dir / f"sglang.{stream}.log"
+            if reset:
+                local_path.unlink(missing_ok=True)
+            if chunk:
+                _append_private_bytes(local_path, chunk)
+            self._live_log_positions[stream] = (file_name, next_offset)
 
     def _pull_artifacts(
         self,
@@ -1556,12 +1741,77 @@ def _write_private_bytes(path: Path, value: bytes) -> None:
         raise
 
 
+def _append_private_bytes(path: Path, value: bytes) -> None:
+    parent_existed = path.parent.exists()
+    path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+    if not parent_existed:
+        path.parent.chmod(0o700)
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    with os.fdopen(descriptor, "ab") as handle:
+        handle.write(value)
+        handle.flush()
+
+
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _pod_readiness(payload: Mapping[str, object]) -> tuple[bool, bool, str]:
+    status = payload.get("status")
+    raw_status = status if isinstance(status, dict) else {}
+    phase = raw_status.get("phase")
+    selected_phase = phase if isinstance(phase, str) and phase else "Unknown"
+    conditions = raw_status.get("conditions")
+    ready = False
+    diagnostics: list[str] = []
+    reason = raw_status.get("reason")
+    message = raw_status.get("message")
+    if isinstance(reason, str) and reason:
+        diagnostics.append(reason)
+    if isinstance(message, str) and message:
+        diagnostics.append(message)
+    if isinstance(conditions, list):
+        for condition in conditions:
+            if not isinstance(condition, dict):
+                continue
+            condition_type = condition.get("type")
+            condition_status = condition.get("status")
+            if condition_type == "Ready" and condition_status == "True":
+                ready = True
+            if condition_status == "False":
+                condition_reason = condition.get("reason")
+                condition_message = condition.get("message")
+                if isinstance(condition_reason, str) and condition_reason:
+                    diagnostics.append(condition_reason)
+                if isinstance(condition_message, str) and condition_message:
+                    diagnostics.append(condition_message)
+    container_statuses = raw_status.get("containerStatuses")
+    if isinstance(container_statuses, list):
+        for container_status in container_statuses:
+            if not isinstance(container_status, dict):
+                continue
+            state = container_status.get("state")
+            if not isinstance(state, dict):
+                continue
+            for state_name in ("waiting", "terminated"):
+                selected = state.get(state_name)
+                if not isinstance(selected, dict):
+                    continue
+                state_reason = selected.get("reason")
+                state_message = selected.get("message")
+                if isinstance(state_reason, str) and state_reason:
+                    diagnostics.append(state_reason)
+                if isinstance(state_message, str) and state_message:
+                    diagnostics.append(state_message)
+    unique = list(dict.fromkeys(" ".join(item.split()) for item in diagnostics if item.strip()))
+    detail = f"Pod phase={selected_phase}"
+    if unique:
+        detail += ": " + "; ".join(unique)
+    return ready, selected_phase in {"Failed", "Succeeded"}, detail[:2048]
 
 
 def _is_raw_profile_path(path: str) -> bool:

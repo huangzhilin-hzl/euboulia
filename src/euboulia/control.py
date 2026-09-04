@@ -452,8 +452,7 @@ class ControlStore:
             raise ValueError("limit must be an integer from 1 to 5000")
         with self._connect() as connection:
             rows = connection.execute(
-                "SELECT * FROM control_events WHERE run_uid = ? "
-                "ORDER BY sequence DESC LIMIT ?",
+                "SELECT * FROM control_events WHERE run_uid = ? ORDER BY sequence DESC LIMIT ?",
                 (selected_uid, limit),
             ).fetchall()
         return tuple(
@@ -754,12 +753,16 @@ class TaskManager:
             )
         if record is not None:
             phase = record.get("phase")
-            if (
+            prefer_record = (
                 isinstance(phase, str)
                 and phase in RUN_PHASES
                 and (progress is None or phase in {"syncing", "completed", "failed", "cancelled"})
-            ):
+            )
+            if prefer_record:
                 changes["phase"] = phase
+            detail = record.get("detail")
+            if isinstance(detail, str) and (progress is None or prefer_record):
+                changes["detail"] = detail
             infrastructure = _infrastructure_state(record)
             if infrastructure is not None:
                 changes["infrastructure_state"] = infrastructure
@@ -775,14 +778,10 @@ class TaskManager:
                         "phase": status,
                         "finished_at": finished_at,
                         "passed": (
-                            record.get("passed")
-                            if isinstance(record.get("passed"), bool)
-                            else None
+                            record.get("passed") if isinstance(record.get("passed"), bool) else None
                         ),
                         "error": (
-                            record.get("error")
-                            if isinstance(record.get("error"), str)
-                            else None
+                            record.get("error") if isinstance(record.get("error"), str) else None
                         ),
                     }
                 )

@@ -109,6 +109,39 @@ def test_control_store_reopens_persisted_history(tmp_path: Path) -> None:
     assert reopened.list() == (run,)
 
 
+def test_reconcile_exposes_live_supervisor_detail(tmp_path: Path) -> None:
+    runtime = _runtime(tmp_path)
+    source_lock, _ = _lock(tmp_path)
+    manager = TaskManager(runtime)
+    submitted = manager.submit(recipe=source_lock, executor="gpu", node="worker-8")
+    running = manager.store.claim_next()
+    assert running is not None and running.run_uid == submitted.run_uid
+    run_dir = tmp_path / "local-state" / "runs" / running.run_uid
+    run_dir.mkdir(parents=True)
+    (run_dir / "run.json").write_text(
+        json.dumps(
+            {
+                "run_uid": running.run_uid,
+                "status": "running",
+                "phase": "allocating",
+                "detail": "Pod phase=Pending: Unschedulable",
+                "infrastructure_state": "pod_pending",
+                "artifact_state": "pending",
+            }
+        ),
+        encoding="utf-8",
+    )
+    manager._child_exit_code = lambda run_uid, pid: None  # type: ignore[method-assign]
+
+    manager.reconcile()
+
+    observed = manager.store.get(running.run_uid)
+    assert observed is not None
+    assert observed.status == "running"
+    assert observed.detail == "Pod phase=Pending: Unschedulable"
+    assert observed.infrastructure_state == "pod_pending"
+
+
 def test_control_database_schema_is_replaced_directly(tmp_path: Path) -> None:
     store = ControlStore(tmp_path / "state")
     with store._connect() as connection:

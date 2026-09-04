@@ -1,3 +1,4 @@
+import base64
 import hashlib
 import io
 import json
@@ -182,6 +183,75 @@ def test_delete_uses_exact_owned_pod_uid_as_api_precondition(
     ]
     delete_options = json.loads(observed["input"])
     assert delete_options["preconditions"] == {"uid": pod.uid}
+
+
+def test_pod_readiness_fails_immediately_on_a_terminal_admission_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    supervisor = remote.KubernetesTargetSupervisor(
+        _executor(tmp_path),
+        remote.LocalStorageConfig(root=tmp_path / "results"),
+    )
+    pod = remote.OwnedPod(
+        name="euboulia-run-01hf7yat000000000000000000",
+        uid="pod-uid",
+        run_uid="run-01HF7YAT000000000000000000",
+        node_name="worker-8",
+    )
+    monkeypatch.setattr(
+        supervisor,
+        "_inspect_owned_pod",
+        lambda candidate: {
+            "status": {
+                "phase": "Failed",
+                "reason": "UnexpectedAdmissionError",
+                "message": "requested devices unavailable",
+            }
+        },
+    )
+    observations: list[str] = []
+
+    with pytest.raises(remote.RemoteExecutionError, match="UnexpectedAdmissionError"):
+        supervisor._wait_pod_ready(pod, on_observation=observations.append)
+
+    assert observations == [
+        "Pod phase=Failed: UnexpectedAdmissionError; requested devices unavailable"
+    ]
+
+
+def test_pod_readiness_reports_observations_until_ready(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    supervisor = remote.KubernetesTargetSupervisor(
+        _executor(tmp_path),
+        remote.LocalStorageConfig(root=tmp_path / "results"),
+    )
+    pod = remote.OwnedPod(
+        name="euboulia-run-01hf7yat000000000000000000",
+        uid="pod-uid",
+        run_uid="run-01HF7YAT000000000000000000",
+        node_name="worker-8",
+    )
+    payloads = iter(
+        [
+            {"status": {"phase": "Pending"}},
+            {
+                "status": {
+                    "phase": "Running",
+                    "conditions": [{"type": "Ready", "status": "True"}],
+                }
+            },
+        ]
+    )
+    monkeypatch.setattr(supervisor, "_inspect_owned_pod", lambda candidate: next(payloads))
+    monkeypatch.setattr(remote.time, "sleep", lambda seconds: None)
+    observations: list[str] = []
+
+    supervisor._wait_pod_ready(pod, on_observation=observations.append)
+
+    assert observations == ["Pod phase=Pending", "Pod phase=Running"]
 
 
 def test_cleanup_records_the_deleted_pod_state(
@@ -499,7 +569,7 @@ def test_remote_supervisor_keeps_completed_results_locally(
         "_create_pod",
         lambda config, run_uid, node: owned_pod,
     )
-    monkeypatch.setattr(supervisor, "_wait_pod_ready", lambda pod: None)
+    monkeypatch.setattr(supervisor, "_wait_pod_ready", lambda pod, **kwargs: None)
     monkeypatch.setattr(supervisor, "_stage_project", lambda local_run_dir: None)
     deleted: list[remote.OwnedPod] = []
     monkeypatch.setattr(supervisor, "_delete_owned_pod", deleted.append)
@@ -679,6 +749,7 @@ def test_remote_worker_keeps_the_selected_kubeconfig_environment(
 
     monkeypatch.setattr(remote, "CommandExecutor", FakeExecutor)
     monkeypatch.setattr(supervisor, "_mirror_worker_progress", lambda *args: None)
+    monkeypatch.setattr(supervisor, "_mirror_service_logs", lambda *args: None)
 
     result = supervisor._run_worker(
         PurePosixPath("/scratch/runs/run-01HF7YAT000000000000000000/recipe.lock.yaml"),
@@ -693,6 +764,61 @@ def test_remote_worker_keeps_the_selected_kubeconfig_environment(
     allowlist = observed["env_allowlist"]
     assert isinstance(allowlist, frozenset)
     assert "KUBECONFIG" in allowlist
+
+
+def test_live_service_logs_are_mirrored_incrementally(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    supervisor = remote.KubernetesTargetSupervisor(
+        _executor(tmp_path),
+        remote.LocalStorageConfig(root=tmp_path / "results"),
+    )
+    supervisor._pod = remote.OwnedPod(
+        name="euboulia-run-01hf7yat000000000000000000",
+        uid="pod-uid",
+        run_uid="run-01HF7YAT000000000000000000",
+        node_name="worker-8",
+    )
+    monkeypatch.setattr(supervisor, "_assert_owned_pod", lambda pod: None)
+    chunks = iter((b"server boot\n", b"model ready\n"))
+    observed_offsets: list[str] = []
+
+    def fake_run(argv: list[str], **kwargs: object) -> object:
+        observed_offsets.append(argv[-3])
+        chunk = next(chunks)
+        offset = 0 if len(observed_offsets) == 1 else len(b"server boot\n")
+        payload = {
+            "stdout": {
+                "file": "service-run.stdout.log",
+                "offset": offset,
+                "next_offset": offset + len(chunk),
+                "reset": len(observed_offsets) == 1,
+                "data": base64.b64encode(chunk).decode("ascii"),
+            },
+            "stderr": {
+                "file": None,
+                "offset": 0,
+                "next_offset": 0,
+                "reset": False,
+                "data": "",
+            },
+        }
+        return remote.subprocess.CompletedProcess(
+            argv,
+            0,
+            stdout=json.dumps(payload).encode(),
+            stderr=b"",
+        )
+
+    monkeypatch.setattr(remote.subprocess, "run", fake_run)
+    local = tmp_path / "live"
+
+    supervisor._mirror_service_logs(PurePosixPath("/scratch/service"), local)
+    supervisor._mirror_service_logs(PurePosixPath("/scratch/service"), local)
+
+    assert observed_offsets == ["0", str(len(b"server boot\n"))]
+    assert (local / "sglang.stdout.log").read_bytes() == b"server boot\nmodel ready\n"
 
 
 def test_artifact_manifest_rejects_a_corrupted_snapshot(tmp_path: Path) -> None:
