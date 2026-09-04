@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import math
+import os
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -23,15 +25,12 @@ _SHA256 = re.compile(r"[0-9a-fA-F]{64}")
 _GIT_COMMIT = re.compile(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})")
 _CONTAINER_DIGEST = re.compile(r"[^\s@]+@sha256:[0-9a-fA-F]{64}")
 _INPUT_REFERENCE = re.compile(r"\$\{([A-Za-z0-9][A-Za-z0-9._-]*)\}")
+_SOURCE_WORKTREE_REFERENCE = re.compile(r"\{source\.([A-Za-z0-9][A-Za-z0-9._-]*)\}")
 _LONG_OPTION = re.compile(r"--[A-Za-z0-9][A-Za-z0-9_-]*")
 _COMMAND_KV_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_-]*")
 _PYTHON_EXECUTABLE = re.compile(r"(?:python|python\d+(?:\.\d+)*)")
-_SGLANG_MODULES = frozenset(
-    {"sglang.launch_server", "sglang.srt.entrypoints.http_server"}
-)
-_MANAGED_LAUNCH_OPTIONS = frozenset(
-    {"--host", "--model-path", "--port", "--served-model-name"}
-)
+_SGLANG_MODULES = frozenset({"sglang.launch_server", "sglang.srt.entrypoints.http_server"})
+_MANAGED_LAUNCH_OPTIONS = frozenset({"--host", "--model-path", "--port", "--served-model-name"})
 
 
 class OptimizationConfigError(ValueError):
@@ -106,6 +105,16 @@ class ModelsConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class SourceConfig:
+    """One independently versioned Git source used by a managed target."""
+
+    repository: str
+    ref: str
+    revision: str
+    submodules: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class WorkloadPointConfig:
     name: str
     input_tokens: int
@@ -114,12 +123,14 @@ class WorkloadPointConfig:
     num_prompts: int
     request_rate: str | float | None = None
 
+
 @dataclass(frozen=True, slots=True)
 class WorkloadSuiteConfig:
     name: str
     dataset: str
     request_rate: str | float
     points: tuple[WorkloadPointConfig, ...]
+
 
 @dataclass(frozen=True, slots=True)
 class RuntimeContainerConfig:
@@ -133,6 +144,7 @@ class RuntimeComponentConfig:
     revision: str | None = None
     digest: str | None = None
     path: Path | None = None
+    source: str | None = None
     dirty: bool | None = None
     metadata: Mapping[str, JSONValue] = field(default_factory=dict)
 
@@ -170,6 +182,7 @@ class BaselineConfig:
     source_revision: str
     target_parameters: Mapping[str, JSONValue] = field(default_factory=dict)
     metric_values: Mapping[str, float] = field(default_factory=dict)
+
 
 @dataclass(frozen=True, slots=True)
 class SGLangProfilingConfig:
@@ -362,7 +375,8 @@ class TieredEvaluationConfig:
 
 @dataclass(frozen=True, slots=True)
 class WorkspaceConfig:
-    repository: Path
+    repository: Path | None
+    source: str | None
     root_dir: Path
     timeout_seconds: float = 120.0
     max_patch_bytes: int = 256 * 1024
@@ -402,6 +416,7 @@ class OptimizationConfig:
     schema_version: int
     name: str
     framework: Framework
+    sources: Mapping[str, SourceConfig]
     models: ModelsConfig
     workload_suite: WorkloadSuiteConfig
     endpoint: str
@@ -518,9 +533,7 @@ def _string_tuple(value: object, path: str, *, allow_empty: bool = True) -> tupl
     return result
 
 
-def _argv_tuple(
-    value: object, path: str, *, allow_empty: bool = False
-) -> tuple[str, ...]:
+def _argv_tuple(value: object, path: str, *, allow_empty: bool = False) -> tuple[str, ...]:
     argv = _string_tuple(value, path, allow_empty=allow_empty)
     for index, token in enumerate(argv):
         if "\x00" in token:
@@ -722,6 +735,51 @@ def _parse_models(value: object) -> ModelsConfig:
     return ModelsConfig(target=target, drafts=drafts)
 
 
+def _parse_sources(value: object) -> Mapping[str, SourceConfig]:
+    path = "sources"
+    if value is None:
+        return {}
+    raw = _mapping(value, path)
+    sources: dict[str, SourceConfig] = {}
+    for raw_name, raw_source in raw.items():
+        name = _safe_id(raw_name, f"{path} key {raw_name!r}")
+        source_path = f"{path}.{name}"
+        source = _mapping(raw_source, source_path)
+        _reject_unknown(source, {"repository", "ref", "revision", "submodules"}, source_path)
+        repository = _string(source.get("repository"), f"{source_path}.repository")
+        if "\x00" in repository or "\n" in repository or "\r" in repository:
+            raise OptimizationConfigError(
+                f"{source_path}.repository must be one argv-safe Git locator"
+            )
+        parsed_repository = urlsplit(repository)
+        if parsed_repository.scheme in {"http", "https"} and "@" in parsed_repository.netloc:
+            raise OptimizationConfigError(
+                f"{source_path}.repository must not embed credentials; use the Git "
+                "credential helper or an executor secret"
+            )
+        ref = _string(source.get("ref"), f"{source_path}.ref")
+        if not ref.startswith(("refs/heads/", "refs/tags/")):
+            raise OptimizationConfigError(
+                f"{source_path}.ref must be a full refs/heads/... or refs/tags/... name"
+            )
+        if any(character.isspace() for character in ref) or any(
+            marker in ref for marker in ("\x00", "..", "@{", "\\")
+        ):
+            raise OptimizationConfigError(f"{source_path}.ref is not a safe Git ref")
+        revision = _string(source.get("revision"), f"{source_path}.revision").casefold()
+        if _GIT_COMMIT.fullmatch(revision) is None or set(revision) == {"0"}:
+            raise OptimizationConfigError(
+                f"{source_path}.revision must be a non-zero full Git commit"
+            )
+        sources[name] = SourceConfig(
+            repository=repository,
+            ref=ref,
+            revision=revision,
+            submodules=_boolean(source.get("submodules", False), f"{source_path}.submodules"),
+        )
+    return dict(sorted(sources.items()))
+
+
 def _parse_workload_suite(value: object) -> WorkloadSuiteConfig:
     path = "workload_suite"
     raw = _mapping(value, path)
@@ -749,18 +807,10 @@ def _parse_workload_suite(value: object) -> WorkloadSuiteConfig:
             },
             item_path,
         )
-        input_tokens = _integer(
-            item.get("input_tokens"), f"{item_path}.input_tokens", minimum=1
-        )
-        output_tokens = _integer(
-            item.get("output_tokens"), f"{item_path}.output_tokens", minimum=1
-        )
-        concurrency = _integer(
-            item.get("concurrency"), f"{item_path}.concurrency", minimum=1
-        )
-        num_prompts = _integer(
-            item.get("num_prompts"), f"{item_path}.num_prompts", minimum=1
-        )
+        input_tokens = _integer(item.get("input_tokens"), f"{item_path}.input_tokens", minimum=1)
+        output_tokens = _integer(item.get("output_tokens"), f"{item_path}.output_tokens", minimum=1)
+        concurrency = _integer(item.get("concurrency"), f"{item_path}.concurrency", minimum=1)
+        num_prompts = _integer(item.get("num_prompts"), f"{item_path}.num_prompts", minimum=1)
         point_request_rate = (
             None
             if item.get("request_rate") is None
@@ -874,9 +924,7 @@ def _parse_baseline(value: object) -> BaselineConfig:
     raw_values = _mapping(raw.get("metric_values", {}), "baseline.metric_values")
     metric_values: dict[str, float] = {}
     for point_name, metric_value in raw_values.items():
-        normalized_name = _safe_id(
-            point_name, f"baseline.metric_values key {point_name!r}"
-        )
+        normalized_name = _safe_id(point_name, f"baseline.metric_values key {point_name!r}")
         metric_values[normalized_name] = _number(
             metric_value, f"baseline.metric_values.{normalized_name}"
         )
@@ -926,9 +974,7 @@ def _parse_profiling(
         raise OptimizationConfigError(
             "optimization.profiling.provider must be 'sglang_torch'"
         ) from exc
-    workload_point = _safe_id(
-        raw.get("workload_point", point_names[0]), f"{path}.workload_point"
-    )
+    workload_point = _safe_id(raw.get("workload_point", point_names[0]), f"{path}.workload_point")
     if workload_point not in point_names:
         raise OptimizationConfigError(
             f"{path}.workload_point references unknown workload point: {workload_point}"
@@ -941,9 +987,7 @@ def _parse_profiling(
     )
     invalid_activities = sorted(set(activities) - {"CPU", "GPU"})
     if invalid_activities:
-        raise OptimizationConfigError(
-            f"{path}.activities supports only CPU and GPU"
-        )
+        raise OptimizationConfigError(f"{path}.activities supports only CPU and GPU")
     if len(set(activities)) != len(activities):
         raise OptimizationConfigError(f"{path}.activities must not contain duplicates")
     required_pattern = raw.get("required_kernel_pattern")
@@ -956,9 +1000,7 @@ def _parse_profiling(
                 f"{path}.required_kernel_pattern is not a valid regular expression: {exc}"
             ) from exc
     expected_rank_traces = raw.get("expected_rank_traces")
-    merge_profiles = _boolean(
-        raw.get("merge_profiles", False), f"{path}.merge_profiles"
-    )
+    merge_profiles = _boolean(raw.get("merge_profiles", False), f"{path}.merge_profiles")
     if merge_profiles and expected_rank_traces not in {None, 1}:
         raise OptimizationConfigError(
             f"{path}.expected_rank_traces must be 1 when merge_profiles is true"
@@ -974,9 +1016,7 @@ def _parse_profiling(
         minimum=1,
     )
     if min_free_disk_bytes < max_raw_bytes:
-        raise OptimizationConfigError(
-            f"{path}.min_free_disk_bytes must be >= max_raw_bytes"
-        )
+        raise OptimizationConfigError(f"{path}.min_free_disk_bytes must be >= max_raw_bytes")
     return SGLangProfilingConfig(
         provider=provider,
         workload_point=workload_point,
@@ -986,9 +1026,7 @@ def _parse_profiling(
         activities=activities,
         merge_profiles=merge_profiles,
         with_stack=_boolean(raw.get("with_stack", False), f"{path}.with_stack"),
-        record_shapes=_boolean(
-            raw.get("record_shapes", False), f"{path}.record_shapes"
-        ),
+        record_shapes=_boolean(raw.get("record_shapes", False), f"{path}.record_shapes"),
         timeout_seconds=_number(
             raw.get("timeout_seconds", 1800), f"{path}.timeout_seconds", minimum=0.001
         ),
@@ -1140,9 +1178,7 @@ def _compile_command_argv(raw: Mapping[str, object], path: str) -> tuple[str, ..
             argv.append(_compile_key_value_option(value, f"{path}.options.{option}"))
         else:
             argv.append(_command_option_scalar(value, f"{path}.options.{option}"))
-    argv.extend(
-        _argv_tuple(raw.get("extra_argv", []), f"{path}.extra_argv", allow_empty=True)
-    )
+    argv.extend(_argv_tuple(raw.get("extra_argv", []), f"{path}.extra_argv", allow_empty=True))
     return tuple(argv)
 
 
@@ -1155,12 +1191,8 @@ def _compile_key_value_option(value: Mapping[object, object], path: str) -> str:
             raise OptimizationConfigError(f"{path} contains invalid key {raw_name!r}")
         raw_value = value[raw_name]
         if raw_value is None or isinstance(raw_value, Mapping | list):
-            raise OptimizationConfigError(
-                f"{path}.{raw_name} must be a string, number, or boolean"
-            )
-        items.append(
-            f"{raw_name}={_command_option_scalar(raw_value, f'{path}.{raw_name}')}"
-        )
+            raise OptimizationConfigError(f"{path}.{raw_name} must be a string, number, or boolean")
+        items.append(f"{raw_name}={_command_option_scalar(raw_value, f'{path}.{raw_name}')}")
     return ",".join(items)
 
 
@@ -1234,22 +1266,14 @@ def _parse_target_launch(value: object) -> TargetLaunchConfig:
         raise OptimizationConfigError(f"{path}.python must name a Python executable")
     if module not in _SGLANG_MODULES:
         raise OptimizationConfigError(f"{path}.module must name an approved SGLang server")
-    python_options = _launch_tokens(
-        raw.get("python_options", []), f"{path}.python_options"
-    )
+    python_options = _launch_tokens(raw.get("python_options", []), f"{path}.python_options")
     if python_options not in {(), ("-u",)}:
         raise OptimizationConfigError(f"{path}.python_options must be [] or [-u]")
     bind_host = (
-        None
-        if raw.get("bind_host") is None
-        else _string(raw.get("bind_host"), f"{path}.bind_host")
+        None if raw.get("bind_host") is None else _string(raw.get("bind_host"), f"{path}.bind_host")
     )
-    if bind_host is not None and (
-        "\x00" in bind_host or any(char.isspace() for char in bind_host)
-    ):
-        raise OptimizationConfigError(
-            f"{path}.bind_host must not contain whitespace or NUL bytes"
-        )
+    if bind_host is not None and ("\x00" in bind_host or any(char.isspace() for char in bind_host)):
+        raise OptimizationConfigError(f"{path}.bind_host must not contain whitespace or NUL bytes")
     options = _launch_options(raw.get("options", {}), f"{path}.options")
     extra_argv = _launch_tokens(raw.get("extra_argv", []), f"{path}.extra_argv")
     extra_options: set[str] = set()
@@ -1266,8 +1290,7 @@ def _parse_target_launch(value: object) -> TargetLaunchConfig:
     duplicated_options = sorted(set(options).intersection(extra_options))
     if duplicated_options:
         raise OptimizationConfigError(
-            f"{path}.options and {path}.extra_argv both declare: "
-            + ", ".join(duplicated_options)
+            f"{path}.options and {path}.extra_argv both declare: " + ", ".join(duplicated_options)
         )
     return TargetLaunchConfig(
         python=python,
@@ -1342,7 +1365,11 @@ def _parse_runtime_component(
     source: Path,
 ) -> RuntimeComponentConfig:
     raw = _mapping(value, path)
-    _reject_unknown(raw, {"version", "revision", "digest", "path", "dirty", "metadata"}, path)
+    _reject_unknown(
+        raw,
+        {"version", "revision", "digest", "path", "source", "dirty", "metadata"},
+        path,
+    )
     return RuntimeComponentConfig(
         version=(
             None if raw.get("version") is None else _string(raw.get("version"), f"{path}.version")
@@ -1357,6 +1384,9 @@ def _parse_runtime_component(
             None
             if raw.get("path") is None
             else _resolve_path(raw.get("path"), f"{path}.path", source)
+        ),
+        source=(
+            None if raw.get("source") is None else _safe_id(raw.get("source"), f"{path}.source")
         ),
         dirty=(None if raw.get("dirty") is None else _boolean(raw.get("dirty"), f"{path}.dirty")),
         metadata=_parse_json_mapping(raw.get("metadata", {}), f"{path}.metadata"),
@@ -1517,13 +1547,8 @@ def _parse_evaluation_tiers(
         raise OptimizationConfigError(
             f"{path} must be ordered smoke, correctness, performance, accuracy"
         )
-    if (
-        EvaluationTierKind.CORRECTNESS not in kinds
-        or EvaluationTierKind.PERFORMANCE not in kinds
-    ):
-        raise OptimizationConfigError(
-            f"{path} must include correctness and performance"
-        )
+    if EvaluationTierKind.CORRECTNESS not in kinds or EvaluationTierKind.PERFORMANCE not in kinds:
+        raise OptimizationConfigError(f"{path} must include correctness and performance")
     if schema_version == 3 and EvaluationTierKind.ACCURACY in kinds:
         raise OptimizationConfigError(
             "optimization.evaluation accuracy must use the external accuracy contract, "
@@ -1569,9 +1594,7 @@ def _parse_stability(value: object, path: str) -> StabilityConfig:
     )
 
 
-def _parse_lane_points(
-    value: object, path: str, point_names: tuple[str, ...]
-) -> tuple[str, ...]:
+def _parse_lane_points(value: object, path: str, point_names: tuple[str, ...]) -> tuple[str, ...]:
     if value == "all":
         return point_names
     points = tuple(
@@ -1588,9 +1611,7 @@ def _parse_lane_points(
     return points
 
 
-def _parse_lane(
-    value: object, path: str, point_names: tuple[str, ...]
-) -> EvaluationLaneConfig:
+def _parse_lane(value: object, path: str, point_names: tuple[str, ...]) -> EvaluationLaneConfig:
     raw = _mapping(value, path)
     _reject_unknown(raw, {"points", "stability"}, path)
     return EvaluationLaneConfig(
@@ -1618,9 +1639,7 @@ def _parse_lanes(value: object, point_names: tuple[str, ...]) -> EvaluationLanes
     raw = _mapping(value, path)
     _reject_unknown(raw, {"fast", "qualification"}, path)
     fast = _parse_lane(raw.get("fast"), f"{path}.fast", point_names)
-    qualification = _parse_lane(
-        raw.get("qualification"), f"{path}.qualification", point_names
-    )
+    qualification = _parse_lane(raw.get("qualification"), f"{path}.qualification", point_names)
     if qualification.points != point_names:
         raise OptimizationConfigError(
             f"{path}.qualification.points must be 'all' so release qualification "
@@ -1841,6 +1860,7 @@ def _parse_workspace(value: object, source: Path) -> WorkspaceConfig:
         raw,
         {
             "repository",
+            "source",
             "root_dir",
             "timeout_seconds",
             "max_patch_bytes",
@@ -1849,8 +1869,19 @@ def _parse_workspace(value: object, source: Path) -> WorkspaceConfig:
         },
         path,
     )
+    repository = (
+        None
+        if raw.get("repository") is None
+        else _resolve_path(raw.get("repository"), f"{path}.repository", source)
+    )
+    source_name = (
+        None if raw.get("source") is None else _safe_id(raw.get("source"), f"{path}.source")
+    )
+    if (repository is None) == (source_name is None):
+        raise OptimizationConfigError(f"{path} must declare exactly one of repository or source")
     return WorkspaceConfig(
-        repository=_resolve_path(raw.get("repository"), f"{path}.repository", source),
+        repository=repository,
+        source=source_name,
         root_dir=(
             (Path.cwd() / ".euboulia" / "worktrees").resolve()
             if raw.get("root_dir") is None
@@ -1953,6 +1984,7 @@ def _parse_optimization_document(
         "schema_version",
         "name",
         "framework",
+        "sources",
         "benchmark",
         "baseline",
         "optimization",
@@ -1967,6 +1999,7 @@ def _parse_optimization_document(
     if framework_value not in {Framework.SGLANG.value, Framework.VLLM.value}:
         raise OptimizationConfigError("framework must be 'sglang' or 'vllm'")
     framework = Framework(framework_value)
+    sources = _parse_sources(document.get("sources"))
     if schema_version == 2:
         workload = _parse_workload(document.get("workload"))
         models, workload_suite = _legacy_models_and_suite(workload, document.get("target"))
@@ -2008,21 +2041,66 @@ def _parse_optimization_document(
                 "baseline.metric_values contains unknown workload point(s): "
                 + ", ".join(unknown_values)
             )
+    optimization = _parse_optimization(
+        document.get("optimization"),
+        source,
+        point_names=point_names,
+        schema_version=schema_version,
+    )
+    if optimization.workspace is not None and optimization.workspace.source is not None:
+        source_name = optimization.workspace.source
+        if source_name not in sources:
+            raise OptimizationConfigError(
+                f"optimization.workspace.source references unknown source {source_name!r}"
+            )
+    if target is not None and target.runtime is not None:
+        for component_name, component in target.runtime.expected.components.items():
+            if component.path is not None and component.source is not None:
+                raise OptimizationConfigError(
+                    f"target.runtime.expected.components.{component_name} must not declare "
+                    "both path and source"
+                )
+            if component.source is None:
+                continue
+            declared_source = sources.get(component.source)
+            if declared_source is None:
+                raise OptimizationConfigError(
+                    f"target.runtime.expected.components.{component_name}.source references "
+                    f"unknown source {component.source!r}"
+                )
+            if (
+                component.revision is not None
+                and component.revision.casefold() != declared_source.revision
+            ):
+                raise OptimizationConfigError(
+                    f"target.runtime.expected.components.{component_name}.revision must match "
+                    f"sources.{component.source}.revision"
+                )
+    if target is not None and target.build is not None:
+        for command in target.build.commands:
+            values = (
+                *command.argv,
+                *(value for value in command.env.values() if value is not None),
+            )
+            for value in values:
+                for match in _SOURCE_WORKTREE_REFERENCE.finditer(value):
+                    source_name = match.group(1)
+                    if source_name not in sources:
+                        raise OptimizationConfigError(
+                            f"target.build command {command.name!r} references unknown "
+                            f"source {source_name!r}"
+                        )
     return OptimizationConfig(
         schema_version=schema_version,
         name=_string(document.get("name"), "name"),
         framework=framework,
+        sources=sources,
         models=models,
         workload_suite=workload_suite,
         endpoint=endpoint,
         benchmark=_parse_benchmark(document.get("benchmark")),
         baseline=baseline,
-        optimization=_parse_optimization(
-            document.get("optimization"),
-            source,
-            point_names=point_names,
-            schema_version=schema_version,
-        ),
+        optimization=optimization,
         execution=_parse_execution(document.get("execution"), source),
         source=source,
         target=target,
@@ -2064,9 +2142,7 @@ def _parse_recipe_inputs(value: object) -> Mapping[str, RecipeInputConfig]:
         result[name] = RecipeInputConfig(
             name=name,
             type=input_type,
-            required=_boolean(
-                definition.get("required", True), f"{definition_path}.required"
-            ),
+            required=_boolean(definition.get("required", True), f"{definition_path}.required"),
         )
     return dict(sorted(result.items()))
 
@@ -2165,9 +2241,7 @@ def resolve_optimization_config(
     inputs = _parse_recipe_inputs(template.pop("inputs", None))
     values_source = None if values is None else Path(values).expanduser().resolve()
     supplied = (
-        {}
-        if values_source is None
-        else dict(_read_yaml_mapping(values_source, "values document"))
+        {} if values_source is None else dict(_read_yaml_mapping(values_source, "values document"))
     )
     unknown_values = sorted(set(supplied) - set(inputs))
     if unknown_values:
@@ -2193,9 +2267,7 @@ def resolve_optimization_config(
     missing: list[str] = []
     for name, definition in inputs.items():
         if name in supplied:
-            bindings[name] = _normalize_input_value(
-                definition, supplied[name], f"values.{name}"
-            )
+            bindings[name] = _normalize_input_value(definition, supplied[name], f"values.{name}")
         elif definition.required:
             missing.append(name)
         else:
@@ -2256,6 +2328,15 @@ def optimization_execution_lock_issues(config: OptimizationConfig) -> tuple[str,
     if _GIT_COMMIT.fullmatch(source_revision) is None or set(source_revision) == {"0"}:
         issues.append("baseline.source_revision must be a full Git commit")
 
+    workspace = config.optimization.workspace
+    if workspace is not None and workspace.source is not None:
+        declared_source = config.sources[workspace.source]
+        if declared_source.revision != source_revision:
+            issues.append(
+                f"optimization.workspace source {workspace.source!r} revision must equal "
+                "baseline.source_revision"
+            )
+
     if config.schema_version < 3:
         return tuple(issues)
     runtime = target.runtime
@@ -2269,9 +2350,7 @@ def optimization_execution_lock_issues(config: OptimizationConfig) -> tuple[str,
         embedded_digest: str | None = None
         if "@sha256:" in container.image:
             _, raw_embedded_digest = container.image.rsplit("@", 1)
-            embedded_digest = _runtime_digest(
-                raw_embedded_digest, "container image digest"
-            )
+            embedded_digest = _runtime_digest(raw_embedded_digest, "container image digest")
             if embedded_digest is None:  # pragma: no cover - value is not None
                 raise AssertionError("embedded container digest did not normalize")
             if embedded_digest.removeprefix("sha256:") == "0" * 64:
@@ -2297,37 +2376,30 @@ def optimization_execution_lock_issues(config: OptimizationConfig) -> tuple[str,
 
     for name, component in sorted(runtime.expected.components.items()):
         if component.revision is not None and (
-            _GIT_COMMIT.fullmatch(component.revision) is None
-            or set(component.revision) == {"0"}
+            _GIT_COMMIT.fullmatch(component.revision) is None or set(component.revision) == {"0"}
         ):
             issues.append(
                 f"target.runtime.expected.components.{name}.revision must be a full Git commit"
             )
-        if (
-            component.path is not None
-            and component.revision is None
-            and component.digest is None
-        ):
+        if component.path is not None and component.revision is None and component.digest is None:
             issues.append(
                 f"target.runtime.expected.components.{name} has a source path but no "
                 "revision or digest"
             )
-        if (component.path is not None or name == "sglang") and component.dirty is not False:
-            issues.append(
-                f"target.runtime.expected.components.{name}.dirty must be false"
-            )
+        if (
+            component.path is not None or component.source is not None or name == "sglang"
+        ) and component.dirty is not False:
+            issues.append(f"target.runtime.expected.components.{name}.dirty must be false")
     for model in (config.models.target, *config.models.drafts):
         if model.weights_manifest_sha256 == "0" * 64:
             issues.append(
                 f"models.{model.name}.weights_manifest_sha256 must not be an all-zero placeholder"
             )
-        revision_is_commit = (
-            _GIT_COMMIT.fullmatch(model.revision) is not None
-            and set(model.revision) != {"0"}
-        )
+        revision_is_commit = _GIT_COMMIT.fullmatch(model.revision) is not None and set(
+            model.revision
+        ) != {"0"}
         manifest_is_pinned = (
-            model.weights_manifest_sha256 is not None
-            and model.weights_manifest_sha256 != "0" * 64
+            model.weights_manifest_sha256 is not None and model.weights_manifest_sha256 != "0" * 64
         )
         if not revision_is_commit and not manifest_is_pinned:
             issues.append(
@@ -2344,14 +2416,72 @@ def require_optimization_execution_lock(config: OptimizationConfig) -> None:
         raise OptimizationConfigError("execution recipe is not locked: " + "; ".join(issues))
 
 
-def dump_resolved_optimization_config(config: OptimizationConfig) -> str:
-    """Serialize the exact bound recipe used for identity and execution."""
+def dump_resolved_optimization_config(
+    config: OptimizationConfig,
+    *,
+    destination: str | Path | None = None,
+) -> str:
+    """Serialize the bound recipe without changing source-relative path meaning."""
+
+    document = copy.deepcopy(dict(config.resolved_document))
+    if destination is not None:
+        _rebase_resolved_document_paths(
+            document,
+            config,
+            Path(destination).expanduser().resolve(),
+        )
 
     return yaml.safe_dump(
-        dict(config.resolved_document),
+        document,
         allow_unicode=True,
         sort_keys=False,
     )
+
+
+def _rebase_resolved_document_paths(
+    document: dict[str, JSONValue],
+    config: OptimizationConfig,
+    destination: Path,
+) -> None:
+    """Rebase only fields whose schema semantics are relative to the recipe file."""
+
+    def rebase(keys: tuple[str, ...], resolved: Path) -> None:
+        current: object = document
+        for key in keys[:-1]:
+            if not isinstance(current, dict):
+                return
+            current = current.get(key)
+        if not isinstance(current, dict):
+            return
+        raw = current.get(keys[-1])
+        if not isinstance(raw, str) or Path(raw).expanduser().is_absolute():
+            return
+        relative = os.path.relpath(resolved, destination.parent)
+        current[keys[-1]] = Path(relative).as_posix()
+
+    rebase(
+        ("optimization", "planner", "patch_catalog"),
+        config.optimization.planner.patch_catalog,
+    )
+    workspace = config.optimization.workspace
+    if workspace is not None:
+        if workspace.repository is not None:
+            rebase(("optimization", "workspace", "repository"), workspace.repository)
+        rebase(("optimization", "workspace", "root_dir"), workspace.root_dir)
+    if config.target is not None and config.target.runtime is not None:
+        for name, component in config.target.runtime.expected.components.items():
+            if component.path is not None:
+                rebase(
+                    ("target", "runtime", "expected", "components", name, "path"),
+                    component.path,
+                )
+    for field_name, resolved in (
+        ("artifacts_dir", config.execution.artifacts_dir),
+        ("ledger", config.execution.experiment_ledger),
+        ("events", config.execution.event_ledger),
+        ("memory", config.execution.memory),
+    ):
+        rebase(("execution", field_name), resolved)
 
 
 __all__ = [
@@ -2386,6 +2516,7 @@ __all__ = [
     "RuntimeExpectedConfig",
     "RuntimeProvenanceConfig",
     "SGLangProfilingConfig",
+    "SourceConfig",
     "StabilityConfig",
     "TargetBuildConfig",
     "TargetLaunchConfig",

@@ -7,11 +7,14 @@ from pathlib import Path
 
 import pytest
 
+from euboulia.optimization.config import SourceConfig
 from euboulia.optimization.workspace import (
     GitWorktreeWorkspace,
     PatchLimits,
     PatchRejected,
     WorkspaceAuthorizationError,
+    create_source_worktree,
+    prepare_git_source,
 )
 
 pytestmark = pytest.mark.skipif(shutil.which("git") is None, reason="git is required")
@@ -65,6 +68,36 @@ def test_create_uses_detached_worktree_and_preserves_manifest(repository: Path) 
     assert _git(workspace.path, "rev-parse", "HEAD").stdout.strip() == workspace.base_commit
     assert (workspace.evidence_dir / "workspace-manifest.json").is_file()
     assert workspace.path.exists()
+
+
+def test_declared_source_is_fetched_and_materialized_at_locked_revision(
+    repository: Path,
+) -> None:
+    revision = _git(repository, "rev-parse", "HEAD").stdout.strip()
+    ref = _git(repository, "symbolic-ref", "HEAD").stdout.strip()
+    source = SourceConfig(
+        repository=str(repository),
+        ref=ref,
+        revision=revision,
+    )
+
+    prepared = prepare_git_source(
+        "sglang",
+        source,
+        repository.parent / "source-cache",
+        repository.parent / "source-evidence",
+    )
+    workspace = create_source_worktree(
+        prepared,
+        source,
+        repository.parent / "source-worktree",
+    )
+
+    assert prepared.revision == revision
+    assert prepared.observed_ref_revision == revision
+    assert _git(workspace.path, "rev-parse", "HEAD").stdout.strip() == revision
+    assert (workspace.path / "value.txt").read_text(encoding="utf-8") == "old\n"
+    assert (prepared.evidence_dir / "source-sglang.json").is_file()
 
 
 def test_prepare_is_read_only_and_apply_requires_explicit_authorization(

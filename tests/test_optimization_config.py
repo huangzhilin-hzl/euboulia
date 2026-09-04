@@ -349,16 +349,18 @@ def test_loads_exact_dsv4_megamoe_target_validation_scenario(tmp_path: Path) -> 
             {
                 "container_image": "registry.example/dsv4@sha256:" + "a" * 64,
                 "deepgemm_revision": "c" * 40,
+                "deepgemm_repository": "https://example.invalid/deepgemm.git",
+                "deepgemm_ref": "refs/heads/deepgemm-test",
                 "lm_eval_version": "0.4.9.2",
                 "model_revision": "d" * 40,
                 "sglang_revision": "b" * 40,
+                "sglang_repository": "https://example.invalid/sglang.git",
+                "sglang_ref": "refs/heads/sglang-test",
             }
         ),
         encoding="utf-8",
     )
-    config = load_optimization_config(
-        repository / "examples/scenarios/dsv4-megamoe.yaml", values
-    )
+    config = load_optimization_config(repository / "examples/scenarios/dsv4-megamoe.yaml", values)
 
     assert config.name == "ds-v4-flash-dspark-cp8-tp8-ep8-megamoe"
     assert config.workload_suite.dataset == "random"
@@ -407,6 +409,17 @@ def test_loads_exact_dsv4_megamoe_target_validation_scenario(tmp_path: Path) -> 
     }
     assert config.target.launch.bind_host == "0.0.0.0"
     assert config.baseline.source_revision == "b" * 40
+    assert config.sources["sglang"].repository == "https://example.invalid/sglang.git"
+    assert config.sources["sglang"].ref == "refs/heads/sglang-test"
+    assert config.sources["deepgemm"].revision == "c" * 40
+    assert config.optimization.workspace is not None
+    assert config.optimization.workspace.source == "sglang"
+    assert config.optimization.workspace.repository is None
+    assert config.target.build is not None
+    assert "{source.deepgemm}" in config.target.build.commands[-1].argv
+    assert config.target.runtime.expected.components["sglang"].source == "sglang"
+    assert config.target.runtime.expected.components["sglang"].path is None
+    assert config.target.runtime.expected.components["deepgemm"].source == "deepgemm"
     assert config.target.runtime is not None
     assert config.target.runtime.expected.components["sglang"].revision == "b" * 40
     assert optimization_execution_lock_issues(config) == ()
@@ -544,6 +557,44 @@ def test_recipe_values_produce_normalized_executable_configuration(tmp_path: Pat
     assert "inputs:" not in resolved_yaml
     assert optimization_execution_lock_issues(config) == ()
     require_optimization_execution_lock(config)
+
+
+def test_resolved_recipe_can_move_without_changing_source_relative_paths(
+    tmp_path: Path,
+) -> None:
+    template, values = write_input_template(tmp_path)
+    document = yaml.safe_load(template.read_text(encoding="utf-8"))
+    document["optimization"]["workspace"] = {
+        "repository": "source/sglang",
+        "root_dir": "state/worktrees",
+    }
+    document["target"]["runtime"]["expected"]["components"]["sglang"]["path"] = "source/sglang"
+    document["execution"] = {
+        "artifacts_dir": "state/artifacts",
+        "ledger": "state/artifacts/experiments.jsonl",
+        "events": "state/artifacts/events.jsonl",
+        "memory": "state/artifacts/memory.sqlite3",
+    }
+    template.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+    expected = load_optimization_config(template, values)
+    destination = tmp_path / "private" / "baseline" / "recipe.lock.yaml"
+
+    destination.parent.mkdir(parents=True)
+    destination.write_text(
+        dump_resolved_optimization_config(expected, destination=destination),
+        encoding="utf-8",
+    )
+    actual = load_optimization_config(destination)
+
+    assert actual.optimization.planner.patch_catalog == (
+        expected.optimization.planner.patch_catalog
+    )
+    assert actual.optimization.workspace == expected.optimization.workspace
+    assert actual.target is not None and actual.target.runtime is not None
+    assert actual.target.runtime.expected.components["sglang"].path == (
+        expected.target.runtime.expected.components["sglang"].path
+    )
+    assert actual.execution == expected.execution
 
 
 def test_execution_lock_rejects_floating_managed_identity(tmp_path: Path) -> None:
@@ -684,9 +735,7 @@ def test_v3_aliases_are_optional_and_do_not_change_semantic_identity(tmp_path: P
     changed_source = tmp_path / "changed.yaml"
     changed_source.write_text(yaml.safe_dump(changed, sort_keys=False), encoding="utf-8")
 
-    changed_identity = scenario_identity(
-        load_optimization_config(changed_source), "same-hardware"
-    )
+    changed_identity = scenario_identity(load_optimization_config(changed_source), "same-hardware")
     assert changed_identity.spec_digest != named_identity.spec_digest
     assert changed_identity.compatibility_digest == named_identity.compatibility_digest
 
@@ -710,9 +759,10 @@ def test_launch_option_order_does_not_change_compiled_argv_or_identity(tmp_path:
     second_config = load_optimization_config(second_source)
 
     assert first_config.target_launch_argv == second_config.target_launch_argv
-    assert scenario_identity(first_config, "same-hardware").spec_digest == scenario_identity(
-        second_config, "same-hardware"
-    ).spec_digest
+    assert (
+        scenario_identity(first_config, "same-hardware").spec_digest
+        == scenario_identity(second_config, "same-hardware").spec_digest
+    )
 
 
 def test_launch_facets_follow_backend_and_speculative_option_families() -> None:
@@ -749,9 +799,7 @@ def test_unclassified_launch_option_changes_spec_but_not_compatibility_digest(
     baseline_identity = scenario_identity(
         load_optimization_config(baseline_source), "same-hardware"
     )
-    changed_identity = scenario_identity(
-        load_optimization_config(changed_source), "same-hardware"
-    )
+    changed_identity = scenario_identity(load_optimization_config(changed_source), "same-hardware")
 
     assert changed_identity.spec_digest != baseline_identity.spec_digest
     assert changed_identity.compatibility_digest == baseline_identity.compatibility_digest

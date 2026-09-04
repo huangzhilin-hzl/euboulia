@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shlex
 import sys
 from collections.abc import Callable, Sequence
@@ -199,17 +200,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Kubernetes executor name from the local runtime config",
     )
     target_run_parser.add_argument(
+        "--node",
+        help="Kubernetes node name or InternalIP (required with --executor)",
+    )
+    target_run_parser.add_argument(
         "--runtime-config",
         type=Path,
         help="local runtime config (default: ~/.config/euboulia/config.yaml)",
     )
     target_run_parser.add_argument("--internal-run-uid", help=argparse.SUPPRESS)
-    target_run_parser.add_argument(
-        "--internal-artifacts-root", type=Path, help=argparse.SUPPRESS
-    )
-    target_run_parser.add_argument(
-        "--internal-workspace-root", type=Path, help=argparse.SUPPRESS
-    )
+    target_run_parser.add_argument("--internal-artifacts-root", type=Path, help=argparse.SUPPRESS)
+    target_run_parser.add_argument("--internal-workspace-root", type=Path, help=argparse.SUPPRESS)
     target_run_parser.add_argument("--json", action="store_true")
     target_run_parser.set_defaults(handler=_target_run)
 
@@ -228,6 +229,15 @@ def build_parser() -> argparse.ArgumentParser:
     target_artifacts_pull_parser.add_argument("--destination", required=True, type=Path)
     target_artifacts_pull_parser.add_argument("--json", action="store_true")
     target_artifacts_pull_parser.set_defaults(handler=_target_artifacts_pull)
+
+    target_cleanup_parser = target_commands.add_parser(
+        "cleanup", help="delete one retained Pod after verifying its local ownership record"
+    )
+    target_cleanup_parser.add_argument("--run-uid", required=True)
+    target_cleanup_parser.add_argument("--executor", required=True)
+    target_cleanup_parser.add_argument("--runtime-config", type=Path)
+    target_cleanup_parser.add_argument("--json", action="store_true")
+    target_cleanup_parser.set_defaults(handler=_target_cleanup)
     return parser
 
 
@@ -331,9 +341,7 @@ def _history(args: argparse.Namespace) -> int:
 
 
 def _optimize_plan(args: argparse.Namespace) -> int:
-    resolution = resolve_optimization_config(
-        args.recipe, args.values, allow_unresolved=True
-    )
+    resolution = resolve_optimization_config(args.recipe, args.values, allow_unresolved=True)
     if resolution.config is None:
         _print_unresolved_resolution(resolution, as_json=args.json)
         return 0
@@ -433,14 +441,12 @@ def _target_resolve(args: argparse.Namespace) -> int:
         raise OptimizationRuntimeError("target configuration is required for target resolve")
     require_optimization_execution_lock(config)
     output = args.output.expanduser().resolve()
-    if output.parent != resolution.source.parent:
-        raise OptimizationConfigError(
-            "target resolve output must be in the recipe directory so relative paths "
-            "retain their meaning"
-        )
     if output.exists() or output.is_symlink():
         raise FileExistsError(f"resolved recipe already exists: {output}")
-    output.write_text(dump_resolved_optimization_config(config), encoding="utf-8")
+    _write_private_text(
+        output,
+        dump_resolved_optimization_config(config, destination=output),
+    )
     payload = {
         "recipe": resolution.name,
         "resolved": True,
@@ -457,9 +463,7 @@ def _target_resolve(args: argparse.Namespace) -> int:
 
 
 def _target_plan(args: argparse.Namespace) -> int:
-    resolution = resolve_optimization_config(
-        args.recipe, args.values, allow_unresolved=True
-    )
+    resolution = resolve_optimization_config(args.recipe, args.values, allow_unresolved=True)
     if resolution.config is None:
         _print_unresolved_resolution(resolution, as_json=args.json)
         return 0
@@ -469,6 +473,15 @@ def _target_plan(args: argparse.Namespace) -> int:
     payload = {
         "recipe": config.name,
         "source_revision": config.baseline.source_revision,
+        "sources": {
+            name: {
+                "repository": source.repository,
+                "ref": source.ref,
+                "revision": source.revision,
+                "submodules": source.submodules,
+            }
+            for name, source in sorted(config.sources.items())
+        },
         "endpoint": config.endpoint,
         "workload_points": len(config.workload_suite.points),
         "profile_plan": dict(profile_plan),
@@ -483,6 +496,8 @@ def _target_plan(args: argparse.Namespace) -> int:
     else:
         print(f"Target validation: {config.name}")
         print(f"Revision: {config.baseline.source_revision}")
+        for source_name, source in sorted(config.sources.items()):
+            print(f"Source {source_name}: {source.repository} {source.ref} @ {source.revision}")
         print(f"Endpoint: {config.endpoint}")
         print(f"Workload points: {len(config.workload_suite.points)}")
         print(
@@ -510,6 +525,10 @@ def _target_run(args: argparse.Namespace) -> int:
         raise RemoteConfigError("internal worker storage arguments must be supplied together")
     if args.executor is not None and any(value is not None for value in internal_values):
         raise RemoteConfigError("--executor cannot be combined with internal worker arguments")
+    if args.executor is not None and args.node is None:
+        raise RemoteConfigError("--node is required with --executor")
+    if args.executor is None and args.node is not None:
+        raise RemoteConfigError("--node requires --executor")
     if args.executor is not None:
         require_optimization_execution_lock(config)
         runtime = load_host_runtime_config(args.runtime_config)
@@ -517,9 +536,9 @@ def _target_run(args: argparse.Namespace) -> int:
             runtime.executor(args.executor),
             runtime.storage,
         ).run(
-            args.recipe,
-            values=args.values,
+            config,
             name=args.name,
+            node=args.node,
         )
         if args.json:
             _print_json(remote.to_dict())
@@ -528,6 +547,9 @@ def _target_run(args: argparse.Namespace) -> int:
                 print(f"Name: {remote.name}")
             print(f"Run UID: {remote.run_uid}")
             print(f"Status: {remote.status}")
+            print(
+                f"Pod: {remote.namespace}/{remote.pod} node={remote.node} cleanup={remote.cleanup}"
+            )
             print(f"Local records: {remote.local_run_dir}")
             print(f"Remote artifacts: {remote.remote_run_dir}")
             if remote.sync is not None:
@@ -586,6 +608,26 @@ def _target_artifacts_pull(args: argparse.Namespace) -> int:
     return 0
 
 
+def _target_cleanup(args: argparse.Namespace) -> int:
+    runtime = load_host_runtime_config(args.runtime_config)
+    pod = KubernetesTargetSupervisor(
+        runtime.executor(args.executor),
+        runtime.storage,
+    ).cleanup(args.run_uid)
+    payload = {
+        "run_uid": pod.run_uid,
+        "namespace": runtime.executor(args.executor).namespace,
+        "pod": pod.name,
+        "pod_uid": pod.uid,
+        "deleted": True,
+    }
+    if args.json:
+        _print_json(payload)
+    else:
+        print(f"Deleted owned Pod: {payload['namespace']}/{pod.name} uid={pod.uid}")
+    return 0
+
+
 def _print_unresolved_resolution(
     resolution: OptimizationRecipeResolution,
     *,
@@ -602,6 +644,24 @@ def _print_unresolved_resolution(
     print(f"Recipe template: {resolution.name}")
     print("Missing required inputs: " + ", ".join(resolution.missing_inputs))
     print("Provide --values or run 'euboulia target resolve' before execution.")
+
+
+def _write_private_text(path: Path, value: str) -> None:
+    """Create a local-only experiment input without group or world access."""
+
+    parent_existed = path.parent.exists()
+    path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+    if not parent_existed:
+        path.parent.chmod(0o700)
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(value)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except BaseException:
+        path.unlink(missing_ok=True)
+        raise
 
 
 def _print_plan(name: str, plans: Sequence[Any]) -> None:

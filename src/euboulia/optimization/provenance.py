@@ -62,10 +62,11 @@ def capture_runtime_provenance(
     config: RuntimeProvenanceConfig,
     *,
     repository: Path,
+    source_paths: Mapping[str, Path] | None = None,
 ) -> RuntimeProvenanceRecord:
     """Collect only declared component identities and compare exact known fields."""
 
-    expected = _expected_payload(config)
+    expected = _expected_payload(config, source_paths=source_paths)
     if not config.capture.collect_observed:
         return RuntimeProvenanceRecord(
             expected=expected,
@@ -90,7 +91,12 @@ def capture_runtime_provenance(
     assert isinstance(observed_components, dict)
 
     for name, component in config.expected.components.items():
-        component_observed = _observe_component(name, component, repository)
+        component_observed = _observe_component(
+            name,
+            component,
+            repository,
+            source_paths=source_paths,
+        )
         observed_components[name] = component_observed
         for field_name in ("version", "revision", "digest", "dirty"):
             expected_value = getattr(component, field_name)
@@ -150,31 +156,23 @@ def validate_declared_hardware(
     accelerator_count = declared.get("accelerator_count")
     if accelerator_count is not None and accelerator_count != len(gpus):
         mismatches.append(
-            "hardware.accelerator_count: "
-            f"expected {accelerator_count!r}, observed {len(gpus)}"
+            f"hardware.accelerator_count: expected {accelerator_count!r}, observed {len(gpus)}"
         )
 
     accelerator = declared.get("accelerator")
     if accelerator is not None:
         expected_name = _canonical_hardware_name(accelerator)
-        observed_names = [
-            item.get("name") for item in gpus if isinstance(item, dict)
-        ]
+        observed_names = [item.get("name") for item in gpus if isinstance(item, dict)]
         invalid_names = [
-            name
-            for name in observed_names
-            if _canonical_hardware_name(name) != expected_name
+            name for name in observed_names if _canonical_hardware_name(name) != expected_name
         ]
         if not observed_names or invalid_names:
             mismatches.append(
-                "hardware.accelerator: "
-                f"expected {accelerator!r}, observed {observed_names!r}"
+                f"hardware.accelerator: expected {accelerator!r}, observed {observed_names!r}"
             )
 
     if mismatches:
-        raise RuntimeProvenanceError(
-            "declared hardware mismatch: " + "; ".join(mismatches)
-        )
+        raise RuntimeProvenanceError("declared hardware mismatch: " + "; ".join(mismatches))
 
 
 def _canonical_hardware_name(value: object) -> str:
@@ -204,7 +202,11 @@ def hardware_identity(record: RuntimeProvenanceRecord | None, gpu_ids: tuple[str
     return f"host-{hashlib.sha256(encoded).hexdigest()[:20]}"
 
 
-def _expected_payload(config: RuntimeProvenanceConfig) -> dict[str, JSONValue]:
+def _expected_payload(
+    config: RuntimeProvenanceConfig,
+    *,
+    source_paths: Mapping[str, Path] | None = None,
+) -> dict[str, JSONValue]:
     container: JSONValue = None
     if config.expected.container is not None:
         container = {
@@ -213,11 +215,15 @@ def _expected_payload(config: RuntimeProvenanceConfig) -> dict[str, JSONValue]:
         }
     components: dict[str, JSONValue] = {}
     for name, component in config.expected.components.items():
+        resolved_path = component.path
+        if component.source is not None and source_paths is not None:
+            resolved_path = source_paths.get(component.source)
         components[name] = {
             "version": component.version,
             "revision": component.revision,
             "digest": component.digest,
-            "path": None if component.path is None else str(component.path),
+            "path": None if resolved_path is None else str(resolved_path),
+            "source": component.source,
             "dirty": component.dirty,
             "metadata": dict(component.metadata),
         }
@@ -228,6 +234,8 @@ def _observe_component(
     name: str,
     component: RuntimeComponentConfig,
     repository: Path,
+    *,
+    source_paths: Mapping[str, Path] | None = None,
 ) -> dict[str, JSONValue]:
     observed: dict[str, JSONValue] = {}
     normalized = name.casefold()
@@ -238,6 +246,8 @@ def _observe_component(
         if version is not None:
             observed["version"] = version
     path = component.path
+    if component.source is not None and source_paths is not None:
+        path = source_paths.get(component.source)
     if path is None and normalized == "sglang":
         path = repository
     if path is not None:

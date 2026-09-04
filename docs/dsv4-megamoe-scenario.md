@@ -6,17 +6,17 @@ checked-in recipe is `examples/scenarios/dsv4-megamoe.yaml`.
 
 ## Preconditions
 
-Run the Euboulia controller locally and configure a worker in the declared single-node
-H20 Pod. Before execution, the Pod must provide:
+Run the Euboulia controller locally and configure a private single-node Pod template.
+The selected node and template must satisfy `target.hardware` in the resolved recipe and
+provide:
 
 - `/home/admin/model/DeepSeek-V4-Flash-0731` contains the local model;
-- `/home/admin/src/dsv4-megamoe/SGLang` is a clean clone containing the exact commit
-  selected in the values file;
-- `/home/admin/src/dsv4-megamoe/DeepGEMM` is a clean clone containing the exact commit
-  selected in the values file;
+- Git can authenticate to every private repository through a credential helper or
+  executor-mounted secret; credentials must not appear in values or the lock;
 - `lm_eval` with API extras is installed in the image at the exact version selected
   in the values file; and
-- the same Euboulia checkout is available at the executor's `project_dir`.
+- volumes, GPU resources, tolerations, image-pull secrets, and other cluster policy
+  needed by the selected node.
 
 The checked-in recipe is intentionally unresolved. Create a local values file with the
 immutable image reference and exact SGLang commit supplied by the user or deployment
@@ -24,14 +24,20 @@ platform:
 
 ```yaml
 container_image: acr.example/sglang/deepep-base@sha256:<64-hex-digest>
+deepgemm_repository: https://github.com/example/DeepGEMM.git
+deepgemm_ref: refs/heads/my-deepgemm-branch
 deepgemm_revision: <40-or-64-hex-commit>
 lm_eval_version: <installed-lm-evaluation-harness-version>
 model_revision: <40-or-64-hex-model-revision>
+sglang_repository: https://example.com/team/SGLang.git
+sglang_ref: refs/heads/my-sglang-branch
 sglang_revision: <40-or-64-hex-commit>
 ```
 
 A container cannot portably infer its own registry digest, so Euboulia never invents
-one or treats an image tag as immutable identity.
+one or treats an image tag as immutable identity. A source `repository` says where to
+fetch, `ref` records the selected branch or tag, and `revision` is the immutable commit
+that is actually executed. The two repositories and refs are independent.
 
 ## Execution boundary
 
@@ -41,17 +47,18 @@ Inspect the template and its missing bindings without side effects:
 uv run euboulia target plan --recipe examples/scenarios/dsv4-megamoe.yaml
 ```
 
-Bind and validate the execution identity, then inspect the exact launch argv, source
-revision, and 30 workload points:
+Set `EXPERIMENT_DIR` to a private directory outside the checkout. Bind and validate the
+execution identity, then inspect the exact launch argv, source revision, and 30 workload
+points:
 
 ```console
 uv run euboulia target resolve \
   --recipe examples/scenarios/dsv4-megamoe.yaml \
-  --values dsv4-values.yaml \
-  --output examples/scenarios/dsv4-megamoe.lock.yaml
+  --values "$EXPERIMENT_DIR/values.yaml" \
+  --output "$EXPERIMENT_DIR/recipe.lock.yaml"
 
 uv run euboulia target plan \
-  --recipe examples/scenarios/dsv4-megamoe.lock.yaml
+  --recipe "$EXPERIMENT_DIR/recipe.lock.yaml"
 ```
 
 The recipe does not hand-maintain model, suite, baseline, or point IDs. Euboulia
@@ -63,24 +70,30 @@ After review, execute exactly one baseline (no generated candidate):
 
 ```console
 uv run euboulia target run \
-  --recipe examples/scenarios/dsv4-megamoe.lock.yaml \
-  --executor h20-pod \
+  --recipe "$EXPERIMENT_DIR/recipe.lock.yaml" \
+  --executor gpu-worker \
+  --node NODE_NAME_OR_INTERNAL_IP \
   --name dsv4-megamoe-baseline
 ```
 
+The private experiment directory is local-only. `values.yaml` never leaves the
+controller. The remote supervisor stages the local checkout and resolved lock in a
+new run-specific Pod and records the lock's SHA-256 locally.
+
 The executor and canonical local storage are machine-specific and therefore live in
 `~/.config/euboulia/config.yaml`, not in the scenario. Start from
-`examples/runtime/kubernetes.yaml`. The configured `project_dir` must contain the
-same Euboulia checkout in the Pod; the model and SGLang paths remain Pod paths in the
-scenario.
+`examples/runtime/kubernetes.yaml` and keep the real Pod template next to that private
+config. `--node` accepts either a Kubernetes node name or its InternalIP and is required
+for every remote run; Euboulia resolves the value to `spec.nodeName`.
 
 `--name` is optional, non-unique display metadata. Euboulia generates an immutable,
 time-sortable ULID `run_uid` used by artifacts, workspaces, service manifests, and
 event correlation.
 
-The lock requires an immutable commit before the detached worktree is created. SGLang
-is installed editable from that worktree with `--no-deps`;
-DeepGEMM is installed last. Euboulia starts a new process group and can stop only
+The lock requires an immutable commit for each source. The worker fetches each ref
+into a reusable Pod-local cache, checks out the locked commits into separate per-run
+worktrees, installs SGLang editable with `--no-deps`, and installs DeepGEMM from its
+own worktree last. Euboulia starts a new process group and can stop only
 that signed, owned process. It never discovers or kills an existing server.
 
 `target run` profiles the owned baseline before its unprofiled matrix;
@@ -108,8 +121,8 @@ Execution stops on any of the following:
 
 - runtime component provenance or declared hardware model/count mismatch;
 - managed-service readiness or generic OpenAI-chat correctness failure;
-- fewer than eight H20 GPUs or fewer than eight rank traces containing
-  `fp8_mxfp4_mega_moe`;
+- accelerator identity/count does not match `target.hardware`, or fewer than eight rank
+  traces contain `fp8_mxfp4_mega_moe`;
 - an incomplete benchmark request or invalid benchmark result; or
 - an incomplete qualification matrix, a point that does not stabilize within its
   window/time budget, or a missing/invalid external accuracy result.
@@ -127,19 +140,25 @@ The automatically synchronized `artifacts/target-validation` snapshot contains
 owned service logs, per-command evidence, and these files:
 
 - `logs/server.log` and `runtime-provenance.json`;
+- `sources/source-sglang.json` and `sources/source-deepgemm.json` with fetch evidence;
 - `profile/summary.json` and `profile/manifest.json`;
 - per-point `evaluation.json` and `benchmark-windows.json`;
 - the generic `evaluation-summary.json` for the complete lane;
 - `euboulia-accuracy.json`, produced directly by external `lm_eval` during
   qualification.
 
-Detached worktrees remain in the configured Pod scratch directory. Raw profile traces
-stay in the Pod by default and remain addressable through `artifact-manifest.json`.
-Pull a complete immutable snapshot explicitly when needed:
+Required artifacts are synchronized before the ephemeral Pod is deleted. With the
+default `raw_profiles: on_demand` policy, the exact owned Pod is retained only when its
+artifact index contains an unsynchronized raw trace. A synchronization or verification
+failure also retains it for recovery:
 
 ```console
 uv run euboulia target artifacts pull \
-  --executor h20-pod \
+  --executor gpu-worker \
   --run-uid <run-uid> \
   --destination /absolute/local/path/raw-snapshot
+
+uv run euboulia target cleanup \
+  --executor gpu-worker \
+  --run-uid <run-uid>
 ```

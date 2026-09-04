@@ -186,6 +186,19 @@ inputs:
   sglang_revision:
     type: git_commit
     required: true
+  sglang_repository:
+    type: string
+    required: true
+  sglang_ref:
+    type: string
+    required: true
+
+sources:
+  sglang:
+    repository: ${sglang_repository}
+    ref: ${sglang_ref}
+    revision: ${sglang_revision}
+    submodules: true
 
 baseline:
   source_revision: ${sglang_revision}
@@ -197,7 +210,12 @@ target:
         image: ${container_image}
       components:
         sglang:
+          source: sglang
           revision: ${sglang_revision}
+
+optimization:
+  workspace:
+    source: sglang
 ```
 
 Input references must occupy an entire YAML scalar. Supported types are `string`,
@@ -206,42 +224,91 @@ Input references must occupy an entire YAML scalar. Supported types are `string`
 `container_digest` requires an immutable `repository@sha256:...` reference. All-zero
 commit and digest placeholders are rejected.
 
+Each managed Git source has an independent repository, full branch/tag ref, and
+immutable revision. The ref preserves selection intent; execution always checks out
+the revision. Build commands can address dependency worktrees with placeholders such
+as `{source.deepgemm}`. Repository credentials remain in the Git credential helper or
+executor-mounted secrets and are rejected when embedded in an HTTP URL.
+
 `target plan` and `optimize plan` may inspect an unresolved template and report its
 missing inputs. Active runs reject missing bindings before creating events, memory,
 worktrees, or artifacts. Bind values directly with `--values`, or create a lock recipe:
 
+Set `EXPERIMENT_DIR` to the private directory selected for this experiment:
+
 ```console
 uv run euboulia target resolve \
   --recipe scenario.yaml \
-  --values h20-values.yaml \
-  --output scenario.lock.yaml
+  --values "$EXPERIMENT_DIR/values.yaml" \
+  --output "$EXPERIMENT_DIR/recipe.lock.yaml"
 
 uv run euboulia target run \
-  --recipe scenario.lock.yaml \
-  --executor h20-pod
+  --recipe "$EXPERIMENT_DIR/recipe.lock.yaml" \
+  --executor gpu-worker \
+  --node NODE_NAME_OR_INTERNAL_IP
 ```
 
-The lock file must be written beside its template so relative paths keep the same
-meaning. It contains concrete values and no `inputs` section. Managed schema-v3 runs
-also require an image digest, a full baseline Git commit, and a matching pinned SGLang
-runtime revision. Each model must provide either a full revision commit or a non-zero
-weights-manifest SHA-256. Source-backed runtime components must declare `dirty: false`;
-declared accelerator model/count and local node count are checked generically against
-the captured host inventory.
+Values and lock files are private experiment inputs. Keep them under a local experiment
+directory outside the checkout, with one directory per experiment; both common filename
+forms are also ignored by Git as a second line of defense. `target resolve` creates the
+lock with mode `0600` and rebases source-relative references, so the lock no longer has
+to sit beside its template. It contains concrete values and no `inputs` section.
+
+The recommended local layout is:
+
+```text
+~/.config/euboulia/config.yaml
+<experiment-dir>/values.yaml
+<experiment-dir>/recipe.lock.yaml
+<storage.root>/runs/<run-uid>/
+<storage.root>/memory.sqlite3
+```
+
+Managed schema-v3 runs also require an image digest, a full baseline Git commit, and a
+matching pinned SGLang runtime revision. Each model must provide either a full revision
+commit or a non-zero weights-manifest SHA-256. Source-backed runtime components must
+declare `dirty: false`; declared accelerator model/count and local node count are checked
+generically against the captured host inventory.
 
 `target run` always creates a fresh detached worktree, runs declared build commands
 when present, owns the SGLang service lifecycle, captures the configured profile, and
 executes the qualification evaluation. These are fixed command semantics rather than
 separate authorization flags.
 
-For remote execution, executor coordinates and canonical storage are host policy, not
-scenario content. Put them in `~/.config/euboulia/config.yaml` (see
-`examples/runtime/kubernetes.yaml`) and select the executor with `--executor`. The
-local supervisor generates `run_uid`, records start/completion events immediately,
-runs the worker inside the Pod, and always attempts artifact retrieval on success or
-failure. It writes `run.json`, `events.jsonl`, `summary.json`, and
-`artifact-manifest.json` under `<storage.root>/runs/<run-uid>`. Raw profiles remain
-remote unless the sync policy is `always` or `target artifacts pull` is used.
+For remote execution, the namespace, Pod template, and canonical storage are host
+policy, not scenario content. Put them in `~/.config/euboulia/config.yaml` (see
+`examples/runtime/kubernetes.yaml`) and select the executor with `--executor`. Pass the
+node name or InternalIP through `--node` for each run; it is never stored in static
+configuration. Pod templates contain cluster-specific resources, mounts, tolerations,
+and secret references, so they stay next to the user's private runtime config. Reuse an
+executor for experiments with the same runtime resource profile; define another executor
+and template when the accelerator type or cluster policy changes.
+
+The local supervisor generates `run_uid`, creates a uniquely named Pod in exactly the
+configured namespace, and records the Pod UID before executing anything. It transfers
+the local checkout and fully resolved recipe, but never the values file or host runtime
+config. On success or failure it applies the configured artifact sync policy and verifies
+the resulting manifest. It writes `run.json`, `events.jsonl`, `summary.json`, and
+`artifact-manifest.json` under `<storage.root>/runs/<run-uid>`. If nothing remains
+remote-only, it deletes the Pod with a Kubernetes UID precondition. With
+`raw_profiles: on_demand`, a Pod is retained only when its artifact index actually
+contains an unsynchronized raw profile. Every Pod operation checks the exact namespace,
+name, UID, run annotation, and ownership labels. Euboulia never searches for or mutates
+unrelated Pods.
+
+If transfer or verification fails, the owned Pod is retained. A later controller can use
+the local `run_uid` record to retrieve it, then explicitly clean it up:
+
+```console
+uv run euboulia target artifacts pull \
+  --executor gpu-worker \
+  --run-uid <run-uid> \
+  --destination /absolute/local/path/recovery
+
+uv run euboulia target cleanup \
+  --executor gpu-worker \
+  --run-uid <run-uid>
+```
 
 Pre-reviewed candidate patches remain separate experiment inputs. Every active run writes
 the exact bound document to
@@ -359,7 +426,8 @@ writing to the detached candidate tree.
 
 For every iteration:
 
-1. Create a baseline worktree at `baseline.source_revision`.
+1. Fetch declared sources into the worker cache and create isolated baseline
+   worktrees at their locked revisions.
 2. Build it when `target.build.commands` is present.
 3. Start a fresh SGLang process and wait for the declared loopback readiness URL.
 4. Run correctness once and evaluate every workload point.
@@ -452,7 +520,9 @@ fixed unless one of those is the variable under test.
 
 `target.runtime.expected` can pin the image and components such as Python, SGLang,
 Torch, CUDA, NCCL, Triton, FlashInfer, DeepGEMM, DeepEP, and `sgl-kernel`. The runner
-captures observable state before launch and can fail on a mismatch.
+captures observable state before launch and can fail on a mismatch. A component with
+`source: <name>` is observed from that run's isolated source worktree rather than a
+fixed image path.
 
 Some values, such as a container digest, may be declared but unobservable from a
 local process. `capture.require_observed` decides whether that absence is fatal;

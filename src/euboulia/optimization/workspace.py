@@ -7,6 +7,7 @@ until an operator explicitly removes them outside this module.
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
@@ -19,6 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from euboulia.execution import DEFAULT_ENV_ALLOWLIST
+from euboulia.optimization.config import SourceConfig
 
 
 class WorkspaceError(RuntimeError):
@@ -31,6 +33,23 @@ class PatchRejected(WorkspaceError):
 
 class WorkspaceAuthorizationError(WorkspaceError):
     """Raised when a mutating patch application was not explicitly authorized."""
+
+
+class SourcePreparationError(WorkspaceError):
+    """Raised when an immutable declared source cannot be prepared."""
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedGitSource:
+    """A reusable Git repository cache pinned to a declared source revision."""
+
+    name: str
+    repository: Path
+    remote: str
+    ref: str
+    revision: str
+    observed_ref_revision: str | None
+    evidence_dir: Path
 
 
 @dataclass(frozen=True, slots=True)
@@ -425,7 +444,216 @@ class GitWorktreeWorkspace:
 IsolatedPatchWorkspace = GitWorktreeWorkspace
 
 
+def prepare_git_source(
+    name: str,
+    source: SourceConfig,
+    cache_root: str | os.PathLike[str],
+    evidence_dir: str | os.PathLike[str],
+    *,
+    git_executable: str = "git",
+    timeout_seconds: float = 300.0,
+) -> PreparedGitSource:
+    """Fetch a declared ref and immutable commit into a reusable local cache."""
+
+    if _SAFE_SOURCE_NAME.fullmatch(name) is None:
+        raise ValueError("source name must be a safe identifier")
+    _validate_executable(git_executable, "git_executable")
+    timeout = _positive_timeout(timeout_seconds)
+    cache_root_path = Path(cache_root).resolve()
+    evidence_path = Path(evidence_dir).resolve()
+    cache_key = hashlib.sha256(source.repository.encode("utf-8")).hexdigest()[:16]
+    repository_path = cache_root_path / f"{name}-{cache_key}"
+    cache_root_path.mkdir(parents=True, exist_ok=True)
+    evidence_path.mkdir(parents=True, exist_ok=True)
+    lock_path = cache_root_path / f".{name}-{cache_key}.lock"
+
+    commands: list[CommandEvidence] = []
+    with lock_path.open("a+b") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        if not repository_path.exists():
+            clone_ref = source.ref.split("/", maxsplit=2)[-1]
+            cloned = _run_command(
+                [
+                    git_executable,
+                    "clone",
+                    "--no-checkout",
+                    "--single-branch",
+                    "--branch",
+                    clone_ref,
+                    "--origin",
+                    "origin",
+                    "--",
+                    source.repository,
+                    str(repository_path),
+                ],
+                cwd=cache_root_path,
+                evidence_dir=evidence_path,
+                label=f"source-{name}-clone",
+                timeout_seconds=timeout,
+            )
+            commands.append(cloned)
+            if not cloned.succeeded:
+                raise SourcePreparationError(
+                    _command_failure(f"source {name!r} clone failed", cloned)
+                )
+        if repository_path.is_symlink() or not repository_path.is_dir():
+            raise SourcePreparationError(
+                f"source {name!r} cache is not a regular directory: {repository_path}"
+            )
+
+        origin = _run_command(
+            [git_executable, "-C", str(repository_path), "remote", "get-url", "origin"],
+            cwd=repository_path,
+            evidence_dir=evidence_path,
+            label=f"source-{name}-origin",
+            timeout_seconds=timeout,
+        )
+        commands.append(origin)
+        if not origin.succeeded:
+            raise SourcePreparationError(
+                _command_failure(f"source {name!r} cache validation failed", origin)
+            )
+        observed_origin = _read_single_line(origin.stdout_path, f"source {name!r} origin")
+        if observed_origin != source.repository:
+            raise SourcePreparationError(
+                f"source {name!r} cache origin mismatch: expected {source.repository!r}, "
+                f"observed {observed_origin!r}"
+            )
+
+        fetched_ref = _run_command(
+            [git_executable, "-C", str(repository_path), "fetch", "--force", "origin", source.ref],
+            cwd=repository_path,
+            evidence_dir=evidence_path,
+            label=f"source-{name}-fetch-ref",
+            timeout_seconds=timeout,
+        )
+        commands.append(fetched_ref)
+        if not fetched_ref.succeeded:
+            raise SourcePreparationError(
+                _command_failure(f"source {name!r} ref fetch failed", fetched_ref)
+            )
+        observed_ref_revision = _git_output(
+            repository_path,
+            evidence_path,
+            f"source-{name}-resolve-ref",
+            timeout,
+            git_executable,
+            "rev-parse",
+            "--verify",
+            "FETCH_HEAD^{commit}",
+            commands=commands,
+        )
+
+        resolved_revision = _git_output(
+            repository_path,
+            evidence_path,
+            f"source-{name}-resolve-revision",
+            timeout,
+            git_executable,
+            "rev-parse",
+            "--verify",
+            f"{source.revision}^{{commit}}",
+            commands=commands,
+            required=False,
+        )
+        if resolved_revision is None:
+            fetched_revision = _run_command(
+                [
+                    git_executable,
+                    "-C",
+                    str(repository_path),
+                    "fetch",
+                    "--force",
+                    "origin",
+                    source.revision,
+                ],
+                cwd=repository_path,
+                evidence_dir=evidence_path,
+                label=f"source-{name}-fetch-revision",
+                timeout_seconds=timeout,
+            )
+            commands.append(fetched_revision)
+            if not fetched_revision.succeeded:
+                raise SourcePreparationError(
+                    _command_failure(f"source {name!r} revision fetch failed", fetched_revision)
+                )
+            resolved_revision = _git_output(
+                repository_path,
+                evidence_path,
+                f"source-{name}-resolve-fetched-revision",
+                timeout,
+                git_executable,
+                "rev-parse",
+                "--verify",
+                f"{source.revision}^{{commit}}",
+                commands=commands,
+            )
+        if resolved_revision is None or resolved_revision.casefold() != source.revision:
+            raise SourcePreparationError(
+                f"source {name!r} did not resolve to locked revision {source.revision}"
+            )
+
+    manifest = {
+        "schema_version": 1,
+        "name": name,
+        "repository": source.repository,
+        "ref": source.ref,
+        "revision": source.revision,
+        "observed_ref_revision": observed_ref_revision,
+        "ref_matches_revision": observed_ref_revision == source.revision,
+        "cache": str(repository_path),
+        "commands": [command.to_dict() for command in commands],
+    }
+    (evidence_path / f"source-{name}.json").write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return PreparedGitSource(
+        name=name,
+        repository=repository_path,
+        remote=source.repository,
+        ref=source.ref,
+        revision=source.revision,
+        observed_ref_revision=observed_ref_revision,
+        evidence_dir=evidence_path,
+    )
+
+
+def create_source_worktree(
+    prepared: PreparedGitSource,
+    source: SourceConfig,
+    root: str | os.PathLike[str],
+    *,
+    git_executable: str = "git",
+    timeout_seconds: float = 300.0,
+) -> GitWorktreeWorkspace:
+    """Create one isolated source worktree and initialize declared submodules."""
+
+    workspace = GitWorktreeWorkspace.create(
+        prepared.repository,
+        root,
+        revision=prepared.revision,
+        git_executable=git_executable,
+        timeout_seconds=timeout_seconds,
+    )
+    if source.submodules:
+        updated = workspace.execute(
+            [git_executable, "submodule", "update", "--init", "--recursive"],
+            artifact_label="source-submodules",
+            timeout_seconds=timeout_seconds,
+        )
+        if not updated.succeeded:
+            raise SourcePreparationError(
+                _command_failure(
+                    f"source {prepared.name!r} submodule initialization failed",
+                    updated,
+                )
+            )
+    return workspace
+
+
 _LABEL_UNSAFE = re.compile(r"[^A-Za-z0-9_.-]+")
+_SAFE_SOURCE_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 _MODE_LINE = re.compile(r"(?:old|new|new file|deleted file) mode ([0-7]{6})$")
 _INDEX_MODE = re.compile(r"^index [0-9a-fA-F]+\.\.[0-9a-fA-F]+ ([0-7]{6})$")
 
@@ -594,6 +822,31 @@ def _run_command(
         timed_out=timed_out,
         error=error,
     )
+
+
+def _git_output(
+    repository: Path,
+    evidence_dir: Path,
+    label: str,
+    timeout_seconds: float,
+    git_executable: str,
+    *arguments: str,
+    commands: list[CommandEvidence],
+    required: bool = True,
+) -> str | None:
+    evidence = _run_command(
+        [git_executable, "-C", str(repository), *arguments],
+        cwd=repository,
+        evidence_dir=evidence_dir,
+        label=label,
+        timeout_seconds=timeout_seconds,
+    )
+    commands.append(evidence)
+    if not evidence.succeeded:
+        if not required:
+            return None
+        raise SourcePreparationError(_command_failure(f"{label} failed", evidence))
+    return _read_single_line(evidence.stdout_path, label).casefold()
 
 
 def _validate_argv(argv: Sequence[str]) -> tuple[str, ...]:

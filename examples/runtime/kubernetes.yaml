@@ -1,17 +1,20 @@
 # Copy this host-only file to ~/.config/euboulia/config.yaml and replace the
-# local path and Pod coordinates. It is deliberately separate from scenario recipes.
+# local paths and cluster policy. It is deliberately separate from scenario recipes.
 storage:
-  root: /absolute/local/path/euboulia-runs
+  root: ~/.local/share/euboulia
   sync:
     raw_profiles: on_demand
 
 executors:
-  h20-pod:
+  gpu-worker:
     type: kubernetes
-    namespace: inference
-    pod: dsv4-h20
+    namespace: your-namespace
+    # Keep the real template outside the repository. One template may be reused by
+    # experiments with the same accelerator resources and cluster policy.
+    pod_template: ~/.config/euboulia/pod-templates/gpu-worker.yaml
     container: runtime
-    # The local checkout must already be available at this path in the Pod.
+    # Euboulia transfers the local checkout here after creating its Pod.
     project_dir: /workspace/euboulia
     scratch_dir: /home/admin/.cache/euboulia
     python: python3
+    startup_timeout_seconds: 600

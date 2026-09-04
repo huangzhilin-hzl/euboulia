@@ -110,7 +110,8 @@ def test_target_resolve_writes_lock_that_runs_without_values(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     template, values = write_input_template(tmp_path)
-    lock = tmp_path / "template.lock.yaml"
+    lock = tmp_path / "private-experiments" / "baseline" / "recipe.lock.yaml"
+    expected = load_optimization_config(template, values)
 
     exit_code = main(
         [
@@ -131,9 +132,15 @@ def test_target_resolve_writes_lock_that_runs_without_values(
     assert payload["resolved"] is True
     assert payload["bound_inputs"] == ["container_image", "sglang_revision"]
     assert lock.is_file()
+    assert lock.parent.stat().st_mode & 0o777 == 0o700
+    assert lock.stat().st_mode & 0o777 == 0o600
     locked_config = load_optimization_config(lock)
     assert locked_config.baseline.source_revision == "b" * 40
     assert locked_config.input_bindings == {}
+    assert (
+        locked_config.optimization.planner.patch_catalog
+        == expected.optimization.planner.patch_catalog
+    )
 
 
 def test_target_run_rejects_unresolved_template_before_artifact_write(
@@ -184,6 +191,8 @@ def test_target_run_parser_accepts_optional_name() -> None:
             "baseline",
             "--executor",
             "h20-pod",
+            "--node",
+            "10.0.0.8",
             "--runtime-config",
             "runtime.yaml",
         ]
@@ -192,6 +201,7 @@ def test_target_run_parser_accepts_optional_name() -> None:
     assert args.values == Path("host-values.yaml")
     assert args.name == "baseline"
     assert args.executor == "h20-pod"
+    assert args.node == "10.0.0.8"
     assert args.runtime_config == Path("runtime.yaml")
 
 
@@ -212,6 +222,22 @@ def test_target_artifact_pull_parser_requires_explicit_snapshot_destination() ->
 
     assert args.run_uid == "run-01HF7YAT000000000000000000"
     assert args.destination == Path("raw-snapshot")
+
+
+def test_target_cleanup_parser_identifies_one_owned_run() -> None:
+    args = build_parser().parse_args(
+        [
+            "target",
+            "cleanup",
+            "--run-uid",
+            "run-01HF7YAT000000000000000000",
+            "--executor",
+            "h20-pod",
+        ]
+    )
+
+    assert args.run_uid == "run-01HF7YAT000000000000000000"
+    assert args.executor == "h20-pod"
 
 
 def test_config_remains_a_compatible_alias_for_recipe() -> None:

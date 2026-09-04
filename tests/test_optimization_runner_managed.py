@@ -333,6 +333,50 @@ def _managed_v3_project(tmp_path: Path) -> OptimizationConfig:
     return load_optimization_config(config_path, values_path)
 
 
+def _managed_v3_source_project(tmp_path: Path) -> OptimizationConfig:
+    _managed_v3_project(tmp_path)
+    config_path = tmp_path / "optimization.yaml"
+    values_path = tmp_path / "values.yaml"
+    document = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    values = yaml.safe_load(values_path.read_text(encoding="utf-8"))
+    repository = tmp_path / "source"
+    revision = _git(repository, "rev-parse", "HEAD")
+    ref = _git(repository, "symbolic-ref", "HEAD")
+    document["sources"] = {
+        "sglang": {
+            "repository": str(repository),
+            "ref": ref,
+            "revision": "${sglang_revision}",
+        },
+        "deepgemm": {
+            "repository": str(repository),
+            "ref": ref,
+            "revision": "${deepgemm_revision}",
+        },
+    }
+    document["inputs"].update(
+        {
+            "deepgemm_revision": {"type": "git_commit", "required": True},
+        }
+    )
+    values["deepgemm_revision"] = revision
+    workspace = document["optimization"]["workspace"]
+    workspace.pop("repository")
+    workspace["source"] = "sglang"
+    components = document["target"]["runtime"]["expected"]["components"]
+    components["sglang"]["source"] = "sglang"
+    components["deepgemm"] = {
+        "source": "deepgemm",
+        "revision": "${deepgemm_revision}",
+        "dirty": False,
+    }
+    build_command = document["target"]["build"]["commands"][0]
+    build_command["argv"].append("{source.deepgemm}")
+    config_path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+    values_path.write_text(yaml.safe_dump(values, sort_keys=False), encoding="utf-8")
+    return load_optimization_config(config_path, values_path)
+
+
 class FakeTargetController:
     def __init__(
         self,
@@ -344,6 +388,7 @@ class FakeTargetController:
         self.fail_stop_role = fail_stop_role
         self.calls: list[str] = []
         self.build_workspaces: dict[str, Path] = {}
+        self.build_specs: dict[str, BuildSpec] = {}
         self.start_workspaces: dict[str, Path] = {}
         self.change_sets: dict[str, TargetChangeSet] = {}
         self.argv: dict[str, tuple[str, ...]] = {}
@@ -366,6 +411,7 @@ class FakeTargetController:
         role = self._role(workspace)
         self.calls.append(f"build:{role}")
         self.build_workspaces[role] = Path(workspace)
+        self.build_specs[role] = spec
         assert len(spec.commands) == 1
         evidence = Path(evidence_dir)
         evidence.mkdir(parents=True, exist_ok=True)
@@ -602,6 +648,33 @@ def test_target_validation_runs_one_baseline_without_candidate(tmp_path: Path) -
     assert "inputs:" not in resolved_text
     assert "${" not in resolved_text
     assert (result.artifact_dir / "logs" / "server.log").is_file()
+
+
+def test_target_validation_prepares_independent_declared_source_worktrees(
+    tmp_path: Path,
+) -> None:
+    config = _managed_v3_source_project(tmp_path)
+    controller = FakeTargetController()
+
+    result = _runner(config, controller).validate_baseline(
+        config,
+        run_uid="run-01HF7YAT000000000000000001",
+    )
+
+    build_argv = controller.build_specs["baseline"].commands[0].argv
+    deepgemm_path = Path(build_argv[-1])
+    assert deepgemm_path.name == "worktree"
+    assert deepgemm_path != result.workspace_path
+    assert _git(deepgemm_path, "rev-parse", "HEAD") == config.sources["deepgemm"].revision
+    assert (result.artifact_dir / "sources" / "source-sglang.json").is_file()
+    assert (result.artifact_dir / "sources" / "source-deepgemm.json").is_file()
+    provenance = json.loads(
+        (result.artifact_dir / "runtime-provenance.json").read_text(encoding="utf-8")
+    )
+    assert provenance["expected"]["components"]["sglang"]["source"] == "sglang"
+    assert provenance["expected"]["components"]["deepgemm"]["path"] == str(
+        deepgemm_path
+    )
 
 
 def test_repeated_name_keeps_content_identity_but_gets_distinct_run_uids(

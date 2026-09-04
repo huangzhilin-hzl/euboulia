@@ -89,12 +89,17 @@ from euboulia.optimization.workspace import (
     PatchLimits,
     PatchRejected,
     WorkspaceError,
+    create_source_worktree,
+    prepare_git_source,
 )
 from euboulia.run_identity import new_run_uid, normalize_run_name, normalize_run_uid
 
 
 class OptimizationRuntimeError(RuntimeError):
     """Raised when a requested active run lacks an executable declaration."""
+
+
+_SOURCE_PLACEHOLDER = re.compile(r"\{source\.([A-Za-z0-9][A-Za-z0-9._-]*)\}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -202,6 +207,24 @@ class _CandidateExecutionResult:
     baseline_evaluation: TieredEvaluationResult | WorkloadSuiteEvaluationResult | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class _ManagedWorkspace:
+    primary: GitWorktreeWorkspace
+    source_paths: Mapping[str, Path]
+
+    @property
+    def path(self) -> Path:
+        return self.primary.path
+
+    @property
+    def base_commit(self) -> str:
+        return self.primary.base_commit
+
+    @property
+    def evidence_dir(self) -> Path:
+        return self.primary.evidence_dir
+
+
 class OptimizationRunner:
     """Join active profile evidence, reviewed changes, isolated trials, and memory."""
 
@@ -254,11 +277,21 @@ class OptimizationRunner:
         artifact_dir.mkdir(parents=True)
         _write_resolved_recipe_snapshot(config, artifact_dir)
 
+        workspace = self._prepare_managed_workspace(
+            config,
+            selected_run_uid,
+            "validation",
+            role="baseline",
+            entity_id=config.baseline.name,
+            ledger=None,
+            source_evidence_dir=artifact_dir / "sources",
+        )
         provenance_record: RuntimeProvenanceRecord | None = None
         if target.runtime is not None:
             provenance_record = capture_runtime_provenance(
                 target.runtime,
-                repository=workspace_config.repository,
+                repository=workspace.path,
+                source_paths=workspace.source_paths,
             )
             write_runtime_provenance(
                 provenance_record,
@@ -266,12 +299,10 @@ class OptimizationRunner:
             )
             validate_runtime_provenance(target.runtime, provenance_record)
             validate_declared_hardware(target.hardware, provenance_record)
-        target_spec = _profile_target_spec(config, provenance_record)
-        workspace = GitWorktreeWorkspace.create(
-            workspace_config.repository,
-            workspace_config.root_dir / selected_run_uid / "validation" / "baseline",
-            revision=config.baseline.source_revision,
-            timeout_seconds=workspace_config.timeout_seconds,
+        target_spec = _profile_target_spec(
+            config,
+            provenance_record,
+            source_paths=workspace.source_paths,
         )
         controller = self._target_controller or SGLangTargetController()
         if target_spec.build is not None:
@@ -358,9 +389,7 @@ class OptimizationRunner:
         """Describe the active capture and authorization boundary without writes."""
 
         if config.target is None:
-            raise OptimizationRuntimeError(
-                "active SGLang profiling requires a managed target"
-            )
+            raise OptimizationRuntimeError("active SGLang profiling requires a managed target")
         _target_spec(config)
         required_capabilities = self.required_capabilities(config)
         profiling = config.optimization.profiling
@@ -418,12 +447,8 @@ class OptimizationRunner:
         run_uid = new_run_uid()
         ledger = EventLedger(config.execution.event_ledger, fsync=True)
         if ledger.by_run(run_uid):
-            raise OptimizationRuntimeError(
-                f"generated run_uid {run_uid!r} already exists"
-            )
-        _write_resolved_recipe_snapshot(
-            config, config.execution.artifacts_dir / run_uid
-        )
+            raise OptimizationRuntimeError(f"generated run_uid {run_uid!r} already exists")
+        _write_resolved_recipe_snapshot(config, config.execution.artifacts_dir / run_uid)
         memory = SQLiteMemoryStore(config.execution.memory)
         lifecycle = Lifecycle()
         champion_id = config.baseline.name
@@ -885,9 +910,7 @@ class OptimizationRunner:
         profiling = config.optimization.profiling
         profiler = self._profiler or SGLangProfiler(profiling)
         point = next(
-            item
-            for item in config.workload_suite.points
-            if item.name == profiling.workload_point
+            item for item in config.workload_suite.points if item.name == profiling.workload_point
         )
         runtime_environment = {
             "EUBOULIA_TARGET_ENDPOINT": handle.endpoint,
@@ -971,11 +994,21 @@ class OptimizationRunner:
 
         controller = self._target_controller or SGLangTargetController()
         evidence_root = context.artifact_dir / "profile-target"
+        workspace = self._prepare_managed_workspace(
+            config,
+            context.run_uid,
+            context.iteration_id,
+            role="profile",
+            entity_id=champion_id,
+            ledger=ledger,
+            source_evidence_dir=evidence_root / "sources",
+        )
         provenance_record: RuntimeProvenanceRecord | None = None
         if target.runtime is not None:
             provenance_record = capture_runtime_provenance(
                 target.runtime,
-                repository=workspace_config.repository,
+                repository=workspace.path,
+                source_paths=workspace.source_paths,
             )
             provenance_path = write_runtime_provenance(
                 provenance_record,
@@ -992,14 +1025,10 @@ class OptimizationRunner:
             )
             validate_runtime_provenance(target.runtime, provenance_record)
             validate_declared_hardware(target.hardware, provenance_record)
-        target_spec = _profile_target_spec(config, provenance_record)
-        workspace = self._prepare_managed_workspace(
+        target_spec = _profile_target_spec(
             config,
-            context.run_uid,
-            context.iteration_id,
-            role="profile",
-            entity_id=champion_id,
-            ledger=ledger,
+            provenance_record,
+            source_paths=workspace.source_paths,
         )
         self._record_target_materialized(
             ledger,
@@ -1208,6 +1237,10 @@ class OptimizationRunner:
         patch_path = Path(patch_path_value)
         lifecycle = lifecycle.move_iteration(IterationState.PREPARING_WORKSPACE)
         workspace_root = workspace_config.root_dir / run_uid / iteration_id
+        if workspace_config.repository is None:
+            raise OptimizationRuntimeError(
+                "unmanaged patch evaluation requires optimization.workspace.repository"
+            )
         workspace = GitWorktreeWorkspace.create(
             workspace_config.repository,
             workspace_root,
@@ -1317,31 +1350,9 @@ class OptimizationRunner:
             )
         controller = self._target_controller or SGLangTargetController()
         evidence_root = config.execution.artifacts_dir / run_uid / iteration_id / "managed-target"
-        provenance_record: RuntimeProvenanceRecord | None = None
         target = config.target
         if target is None:  # guarded by the managed execution entry point
             raise OptimizationRuntimeError("target configuration is required")
-        if target.runtime is not None:
-            provenance_record = capture_runtime_provenance(
-                target.runtime,
-                repository=workspace_config.repository,
-            )
-            provenance_path = write_runtime_provenance(
-                provenance_record,
-                evidence_root / "runtime-provenance.json",
-            )
-            ledger.append(
-                OptimizationEvent.create(
-                    EventType.RUNTIME_PROVENANCE_CAPTURED,
-                    run_uid,
-                    iteration_id=iteration_id,
-                    payload=_json_payload(provenance_record.to_dict()),
-                    artifacts=(_artifact_ref(provenance_path, "runtime-provenance"),),
-                )
-            )
-            validate_runtime_provenance(target.runtime, provenance_record)
-            validate_declared_hardware(target.hardware, provenance_record)
-        target_spec = _target_spec(config, provenance_record)
 
         ledger.append(
             OptimizationEvent.create(
@@ -1360,6 +1371,34 @@ class OptimizationRunner:
             role="baseline",
             entity_id=champion_id,
             ledger=ledger,
+            source_evidence_dir=evidence_root / "baseline" / "sources",
+        )
+        provenance_record: RuntimeProvenanceRecord | None = None
+        if target.runtime is not None:
+            provenance_record = capture_runtime_provenance(
+                target.runtime,
+                repository=baseline_workspace.path,
+                source_paths=baseline_workspace.source_paths,
+            )
+            provenance_path = write_runtime_provenance(
+                provenance_record,
+                evidence_root / "runtime-provenance.json",
+            )
+            ledger.append(
+                OptimizationEvent.create(
+                    EventType.RUNTIME_PROVENANCE_CAPTURED,
+                    run_uid,
+                    iteration_id=iteration_id,
+                    payload=_json_payload(provenance_record.to_dict()),
+                    artifacts=(_artifact_ref(provenance_path, "runtime-provenance"),),
+                )
+            )
+            validate_runtime_provenance(target.runtime, provenance_record)
+            validate_declared_hardware(target.hardware, provenance_record)
+        target_spec = _target_spec(
+            config,
+            provenance_record,
+            source_paths=baseline_workspace.source_paths,
         )
         baseline_change = TargetChangeSet()
         self._record_target_materialized(
@@ -1455,6 +1494,24 @@ class OptimizationRunner:
             entity_id=proposal.proposal_id,
             ledger=ledger,
             revision=baseline_workspace.base_commit,
+            source_evidence_dir=evidence_root / "candidate" / "sources",
+        )
+        candidate_provenance = provenance_record
+        if target.runtime is not None:
+            candidate_provenance = capture_runtime_provenance(
+                target.runtime,
+                repository=candidate_workspace.path,
+                source_paths=candidate_workspace.source_paths,
+            )
+            write_runtime_provenance(
+                candidate_provenance,
+                evidence_root / "candidate" / "runtime-provenance.json",
+            )
+            validate_runtime_provenance(target.runtime, candidate_provenance)
+        candidate_target_spec = _target_spec(
+            config,
+            candidate_provenance,
+            source_paths=candidate_workspace.source_paths,
         )
         lifecycle, candidate_change, change_digest = self._materialize_candidate_change(
             config,
@@ -1471,14 +1528,14 @@ class OptimizationRunner:
             iteration_id,
             proposal.proposal_id,
             "candidate",
-            target_spec,
+            candidate_target_spec,
             candidate_change,
             change_digest,
         )
         lifecycle = lifecycle.move_iteration(IterationState.BUILDING)
         self._build_managed_target(
             controller,
-            target_spec,
+            candidate_target_spec,
             candidate_workspace,
             evidence_root / "candidate" / "build",
             ledger,
@@ -1490,7 +1547,7 @@ class OptimizationRunner:
         lifecycle, candidate_evaluation = self._evaluate_managed_service(
             controller=controller,
             config=config,
-            target_spec=target_spec,
+            target_spec=candidate_target_spec,
             change_set=candidate_change,
             workspace=candidate_workspace,
             evidence_dir=evidence_root / "candidate" / "service",
@@ -1525,36 +1582,80 @@ class OptimizationRunner:
         *,
         role: str,
         entity_id: str,
-        ledger: EventLedger,
+        ledger: EventLedger | None,
         revision: str | None = None,
-    ) -> GitWorktreeWorkspace:
+        source_evidence_dir: Path | None = None,
+    ) -> _ManagedWorkspace:
         workspace_config = config.optimization.workspace
         if workspace_config is None:  # guarded by the managed execution entry point
             raise OptimizationRuntimeError("optimization.workspace is required")
-        workspace = GitWorktreeWorkspace.create(
-            workspace_config.repository,
-            workspace_config.root_dir / run_uid / iteration_id / role,
-            revision=revision or config.baseline.source_revision,
-            timeout_seconds=workspace_config.timeout_seconds,
-        )
-        ledger.append(
-            OptimizationEvent.create(
-                EventType.WORKSPACE_PREPARED,
-                run_uid,
-                iteration_id=iteration_id,
-                entity_id=entity_id,
-                payload={
-                    "role": role,
-                    "worktree": str(workspace.path),
-                    "base_commit": workspace.base_commit,
-                    "automatic_cleanup": False,
-                },
-                artifacts=(
-                    _artifact_ref(workspace.evidence_dir / "workspace-manifest.json", "manifest"),
-                ),
+        role_root = workspace_config.root_dir / run_uid / iteration_id
+        source_paths: dict[str, Path] = {}
+        prepared_sources = {}
+        source_evidence = source_evidence_dir or role_root / f"{role}-source-evidence"
+        for source_name, source in config.sources.items():
+            prepared_sources[source_name] = prepare_git_source(
+                source_name,
+                source,
+                workspace_config.root_dir / ".source-cache",
+                source_evidence,
+                timeout_seconds=workspace_config.timeout_seconds,
             )
-        )
-        return workspace
+
+        if workspace_config.source is not None:
+            primary_name = workspace_config.source
+            prepared_primary = prepared_sources[primary_name]
+            primary = create_source_worktree(
+                prepared_primary,
+                config.sources[primary_name],
+                role_root / role,
+                timeout_seconds=workspace_config.timeout_seconds,
+            )
+            source_paths[primary_name] = primary.path
+        else:
+            if workspace_config.repository is None:  # protected by config parsing
+                raise OptimizationRuntimeError(
+                    "optimization.workspace.repository or source is required"
+                )
+            primary = GitWorktreeWorkspace.create(
+                workspace_config.repository,
+                role_root / role,
+                revision=revision or config.baseline.source_revision,
+                timeout_seconds=workspace_config.timeout_seconds,
+            )
+
+        for source_name, prepared in prepared_sources.items():
+            if source_name == workspace_config.source:
+                continue
+            dependency = create_source_worktree(
+                prepared,
+                config.sources[source_name],
+                role_root / f"{role}-sources" / source_name,
+                timeout_seconds=workspace_config.timeout_seconds,
+            )
+            source_paths[source_name] = dependency.path
+
+        managed = _ManagedWorkspace(primary=primary, source_paths=source_paths)
+        if ledger is not None:
+            ledger.append(
+                OptimizationEvent.create(
+                    EventType.WORKSPACE_PREPARED,
+                    run_uid,
+                    iteration_id=iteration_id,
+                    entity_id=entity_id,
+                    payload={
+                        "role": role,
+                        "worktree": str(managed.path),
+                        "base_commit": managed.base_commit,
+                        "sources": {name: str(path) for name, path in sorted(source_paths.items())},
+                        "automatic_cleanup": False,
+                    },
+                    artifacts=(
+                        _artifact_ref(managed.evidence_dir / "workspace-manifest.json", "manifest"),
+                    ),
+                )
+            )
+        return managed
 
     @staticmethod
     def _materialize_candidate_change(
@@ -1562,7 +1663,7 @@ class OptimizationRunner:
         run_uid: str,
         iteration_id: str,
         proposal: ChangeProposal,
-        workspace: GitWorktreeWorkspace,
+        workspace: _ManagedWorkspace,
         lifecycle: Lifecycle,
         ledger: EventLedger,
     ) -> tuple[Lifecycle, TargetChangeSet, str]:
@@ -1602,7 +1703,7 @@ class OptimizationRunner:
             workspace_config = config.optimization.workspace
             if workspace_config is None:  # guarded by managed execution
                 raise OptimizationRuntimeError("optimization.workspace is required")
-            prepared = workspace.prepare_patch(
+            prepared = workspace.primary.prepare_patch(
                 Path(patch_path_value).read_bytes(),
                 limits=PatchLimits(
                     max_bytes=workspace_config.max_patch_bytes,
@@ -1610,7 +1711,7 @@ class OptimizationRunner:
                     max_changed_lines=workspace_config.max_changed_lines,
                 ),
             )
-            application = workspace.apply_patch(prepared, authorize=True)
+            application = workspace.primary.apply_patch(prepared, authorize=True)
             source_patch_path = prepared.patch_path
             patch_digest = prepared.inspection.sha256
             ledger.append(
@@ -1711,7 +1812,7 @@ class OptimizationRunner:
     def _build_managed_target(
         controller: TargetController,
         spec: TargetSpec,
-        workspace: GitWorktreeWorkspace,
+        workspace: _ManagedWorkspace,
         evidence_dir: Path,
         ledger: EventLedger,
         run_uid: str,
@@ -1761,7 +1862,7 @@ class OptimizationRunner:
         config: OptimizationConfig,
         target_spec: TargetSpec,
         change_set: TargetChangeSet,
-        workspace: GitWorktreeWorkspace,
+        workspace: _ManagedWorkspace,
         evidence_dir: Path,
         ledger: EventLedger,
         run_uid: str,
@@ -1869,9 +1970,7 @@ class OptimizationRunner:
                 "EUBOULIA_TARGET_ARTIFACT_DIR": str(evidence_dir.parent),
             }
             if profile_manifest_path is not None:
-                runtime_environment["EUBOULIA_PROFILE_MANIFEST_PATH"] = str(
-                    profile_manifest_path
-                )
+                runtime_environment["EUBOULIA_PROFILE_MANIFEST_PATH"] = str(profile_manifest_path)
             ledger.append(
                 OptimizationEvent.create(
                     EventType.EVALUATION_STARTED,
@@ -2065,19 +2164,41 @@ class OptimizationRunner:
 def _target_spec(
     config: OptimizationConfig,
     runtime_record: RuntimeProvenanceRecord | None = None,
+    *,
+    source_paths: Mapping[str, Path] | None = None,
 ) -> TargetSpec:
     target = config.target
     if target is None:
         raise OptimizationRuntimeError("target configuration is required for managed execution")
     build: BuildSpec | None = None
     if target.build is not None:
+
+        def render(value: str) -> str:
+            def replace_source(match: re.Match[str]) -> str:
+                name = match.group(1)
+                if name not in config.sources:
+                    raise OptimizationRuntimeError(
+                        f"target build references unknown source {name!r}"
+                    )
+                if source_paths is None:
+                    return f"/sources/{name}"
+                path = source_paths.get(name)
+                if path is None:
+                    raise OptimizationRuntimeError(f"target build source {name!r} was not prepared")
+                return str(path)
+
+            return _SOURCE_PLACEHOLDER.sub(replace_source, value)
+
         build = BuildSpec(
             commands=tuple(
                 BuildCommandSpec(
                     name=command.name,
-                    argv=command.argv,
+                    argv=tuple(render(value) for value in command.argv),
                     timeout_seconds=command.timeout_seconds,
-                    env=command.env,
+                    env={
+                        name: None if value is None else render(value)
+                        for name, value in command.env.items()
+                    },
                 )
                 for command in target.build.commands
             )
@@ -2103,6 +2224,7 @@ def _target_spec(
                             "revision": component.revision,
                             "digest": component.digest,
                             "path": None if component.path is None else str(component.path),
+                            "source": component.source,
                             "dirty": component.dirty,
                             "metadata": dict(component.metadata),
                         }
@@ -2111,9 +2233,7 @@ def _target_spec(
                 }
             }
         )
-    provenance["launch_facets"] = dict(
-        derive_sglang_launch_facets(target.launch.options)
-    )
+    provenance["launch_facets"] = dict(derive_sglang_launch_facets(target.launch.options))
     return TargetSpec(
         provider=target.provider.value,
         model=config.models.target.path,
@@ -2135,8 +2255,10 @@ def _target_spec(
 def _profile_target_spec(
     config: OptimizationConfig,
     runtime_record: RuntimeProvenanceRecord | None = None,
+    *,
+    source_paths: Mapping[str, Path] | None = None,
 ) -> TargetSpec:
-    base = _target_spec(config, runtime_record)
+    base = _target_spec(config, runtime_record, source_paths=source_paths)
     profiling = config.optimization.profiling
     return replace(
         base,
@@ -2340,9 +2462,7 @@ def _run_profile_command(
     artifact_prefix: str,
 ) -> ExecutionResult:
     environment = dict(command.env_overrides)
-    environment["EUBOULIA_COMMAND_EVIDENCE_DIR"] = str(
-        artifact_dir / f"{artifact_prefix}-evidence"
-    )
+    environment["EUBOULIA_COMMAND_EVIDENCE_DIR"] = str(artifact_dir / f"{artifact_prefix}-evidence")
     return CommandExecutor(
         artifact_dir,
         default_timeout_seconds=command.timeout_seconds,
@@ -2400,9 +2520,7 @@ def _execute_workload_suite(
             baseline_value=baseline_values.get(point.name),
             apply_promotion_gate=apply_promotion_gate,
             include_checks=index == 0,
-            include_accuracy=(
-                lane == "qualification" and index == len(selected_points) - 1
-            ),
+            include_accuracy=(lane == "qualification" and index == len(selected_points) - 1),
             stability=lane_config.stability,
             runtime_environment=runtime_environment,
         )
@@ -2489,8 +2607,7 @@ def _external_command_spec(
         return rendered
 
     environment = {
-        name: render(value) if value is not None else None
-        for name, value in command.env.items()
+        name: render(value) if value is not None else None for name, value in command.env.items()
     }
     environment.update(runtime_environment)
     return CommandSpec(
@@ -2575,8 +2692,7 @@ def _aggregate_suite_result(
     )
     artifact_dir.mkdir(parents=True, exist_ok=True)
     (artifact_dir / "evaluation-summary.json").write_text(
-        json.dumps(EvaluationSummary(result).to_dict(), indent=2, sort_keys=True)
-        + "\n",
+        json.dumps(EvaluationSummary(result).to_dict(), indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
     return result
@@ -2715,9 +2831,7 @@ def _write_resolved_recipe_snapshot(config: OptimizationConfig, directory: Path)
     directory.mkdir(parents=True, exist_ok=True)
     destination = directory / "resolved-recipe.yaml"
     if destination.exists() or destination.is_symlink():
-        raise OptimizationRuntimeError(
-            f"resolved recipe snapshot already exists: {destination}"
-        )
+        raise OptimizationRuntimeError(f"resolved recipe snapshot already exists: {destination}")
     destination.write_text(dump_resolved_optimization_config(config), encoding="utf-8")
     return destination
 
