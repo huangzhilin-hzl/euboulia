@@ -98,7 +98,7 @@ records locally. Supply the selected node name or InternalIP for this run:
 
 ```console
 uv run euboulia target run \
-  --recipe ~/julian/euboulia-data/experiments/dsv4-baseline/recipe.lock.yaml \
+  --recipe ~/.local/share/euboulia/experiments/dsv4-baseline/recipe.lock.yaml \
   --executor gpu-worker \
   --node NODE_NAME_OR_INTERNAL_IP \
   --name dsv4-baseline

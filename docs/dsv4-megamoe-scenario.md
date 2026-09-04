@@ -52,11 +52,11 @@ revision, and 30 workload points:
 ```console
 uv run euboulia target resolve \
   --recipe examples/scenarios/dsv4-megamoe.yaml \
-  --values ~/julian/euboulia-data/experiments/dsv4-megamoe/values.yaml \
-  --output ~/julian/euboulia-data/experiments/dsv4-megamoe/recipe.lock.yaml
+  --values ~/.local/share/euboulia/experiments/dsv4-megamoe/values.yaml \
+  --output ~/.local/share/euboulia/experiments/dsv4-megamoe/recipe.lock.yaml
 
 uv run euboulia target plan \
-  --recipe ~/julian/euboulia-data/experiments/dsv4-megamoe/recipe.lock.yaml
+  --recipe ~/.local/share/euboulia/experiments/dsv4-megamoe/recipe.lock.yaml
 ```
 
 The recipe does not hand-maintain model, suite, baseline, or point IDs. Euboulia
@@ -68,7 +68,7 @@ After review, execute exactly one baseline (no generated candidate):
 
 ```console
 uv run euboulia target run \
-  --recipe ~/julian/euboulia-data/experiments/dsv4-megamoe/recipe.lock.yaml \
+  --recipe ~/.local/share/euboulia/experiments/dsv4-megamoe/recipe.lock.yaml \
   --executor gpu-worker \
   --node NODE_NAME_OR_INTERNAL_IP \
   --name dsv4-megamoe-baseline

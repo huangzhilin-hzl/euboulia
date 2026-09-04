@@ -237,11 +237,11 @@ worktrees, or artifacts. Bind values directly with `--values`, or create a lock 
 ```console
 uv run euboulia target resolve \
   --recipe scenario.yaml \
-  --values ~/julian/euboulia-data/experiments/h20-baseline/values.yaml \
-  --output ~/julian/euboulia-data/experiments/h20-baseline/recipe.lock.yaml
+  --values ~/.local/share/euboulia/experiments/gpu-baseline/values.yaml \
+  --output ~/.local/share/euboulia/experiments/gpu-baseline/recipe.lock.yaml
 
 uv run euboulia target run \
-  --recipe ~/julian/euboulia-data/experiments/h20-baseline/recipe.lock.yaml \
+  --recipe ~/.local/share/euboulia/experiments/gpu-baseline/recipe.lock.yaml \
   --executor gpu-worker \
   --node NODE_NAME_OR_INTERNAL_IP
 ```
