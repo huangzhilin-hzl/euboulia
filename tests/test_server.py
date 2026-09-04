@@ -95,6 +95,8 @@ def test_loopback_server_serves_console_and_protects_controls(tmp_path: Path) ->
             assert "status-breathe" in html
             assert "prefers-reduced-motion" in html
             assert "/logs?source=" in html
+            assert 'aria-label", "Copy run ID"' in html
+            assert "navigator.clipboard.writeText" in html
         try:
             _request(url + "/api/runs", body=body)
         except urllib.error.HTTPError as exc:

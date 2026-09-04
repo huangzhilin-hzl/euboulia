@@ -179,7 +179,33 @@
     .detail-hero { padding: 22px 24px 18px; border-bottom: 1px solid var(--line-soft); }
     .detail-line { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
     .detail-name { margin: 5px 0 0; font-size: clamp(20px, 2vw, 29px); line-height: 1.2; font-weight: 560; letter-spacing: -.02em; }
-    .uid { margin-top: 9px; color: var(--quiet); font-family: var(--mono); font-size: 10px; word-break: break-all; }
+    .uid-row { margin-top: 9px; display: flex; align-items: center; gap: 8px; min-width: 0; }
+    .uid { color: var(--quiet); font-family: var(--mono); font-size: 10px; word-break: break-all; }
+    .copy-uid {
+      position: relative;
+      width: 26px;
+      height: 26px;
+      flex: 0 0 26px;
+      border: 1px solid transparent;
+      border-radius: 7px;
+      background: transparent;
+      color: var(--quiet);
+      cursor: pointer;
+      transition: color .14s ease, border-color .14s ease, background .14s ease;
+    }
+    .copy-uid::before, .copy-uid::after {
+      content: "";
+      position: absolute;
+      width: 8px;
+      height: 8px;
+      border: 1px solid currentColor;
+      border-radius: 2px;
+    }
+    .copy-uid::before { top: 7px; left: 8px; }
+    .copy-uid::after { top: 10px; left: 11px; background: var(--ink-2); }
+    .copy-uid:hover { color: var(--paper); border-color: var(--line); background: rgba(255,255,255,.035); }
+    .copy-uid:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
+    .copy-uid.copied { color: var(--ok); border-color: rgba(134,239,172,.35); background: rgba(134,239,172,.06); }
     .state-grid { margin-top: 20px; display: grid; grid-template-columns: repeat(auto-fit, minmax(118px, 1fr)); gap: 8px; }
     .state-card { border: 1px solid var(--line-soft); border-radius: 11px; padding: 11px 12px; background: rgba(8,11,15,.42); }
     .state-label { color: var(--quiet); font-size: 9px; text-transform: uppercase; letter-spacing: .1em; }
@@ -429,6 +455,39 @@
       window.clearTimeout(toast.timer);
       toast.timer = window.setTimeout(() => node.classList.remove("show"), 4200);
     }
+    async function copyText(value) {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(value);
+        return;
+      }
+      const field = document.createElement("textarea");
+      field.value = value;
+      field.setAttribute("readonly", "");
+      field.style.position = "fixed";
+      field.style.opacity = "0";
+      document.body.appendChild(field);
+      field.select();
+      const copied = document.execCommand("copy");
+      field.remove();
+      if (!copied) throw new Error("clipboard unavailable");
+    }
+    async function copyRunUid(runUid, button) {
+      try {
+        await copyText(runUid);
+        button.classList.add("copied");
+        button.setAttribute("aria-label", "Run ID copied");
+        button.title = "Copied";
+        toast("Run ID copied");
+        window.setTimeout(() => {
+          if (!button.isConnected) return;
+          button.classList.remove("copied");
+          button.setAttribute("aria-label", "Copy run ID");
+          button.title = "Copy run ID";
+        }, 1600);
+      } catch (_) {
+        toast("Could not copy run ID", true);
+      }
+    }
     async function api(path, options = {}) {
       const response = await fetch(path, { cache: "no-store", ...options });
       const payload = await response.json().catch(() => ({ error: "invalid server response" }));
@@ -524,7 +583,14 @@
       const hero = element("div", "detail-hero");
       const line = element("div", "detail-line");
       const identity = element("div");
-      identity.append(element("div", "eyebrow", `${run.recipe_name} · ${run.executor}`), element("h1", "detail-name", displayName(run)), element("div", "uid", run.run_uid));
+      const uidRow = element("div", "uid-row");
+      const copyUid = element("button", "copy-uid");
+      copyUid.type = "button";
+      copyUid.setAttribute("aria-label", "Copy run ID");
+      copyUid.title = "Copy run ID";
+      copyUid.addEventListener("click", () => copyRunUid(run.run_uid, copyUid));
+      uidRow.append(element("div", "uid", run.run_uid), copyUid);
+      identity.append(element("div", "eyebrow", `${run.recipe_name} · ${run.executor}`), element("h1", "detail-name", displayName(run)), uidRow);
       line.appendChild(identity);
       if (["queued", "running", "disconnected"].includes(run.status)) {
         const cancel = element("button", "button danger", run.cancel_requested ? "Cancel requested" : "Cancel run");
