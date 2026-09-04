@@ -38,6 +38,7 @@ class BenchmarkSettings:
     backend: str = "sglang"
     random_range_ratio: float = 0.0
     seed: int = 42
+    flush_cache: bool = True
     module: str = "sglang.bench_serving"
     dataset_path: Path | None = None
     evidence_dir: Path | None = None
@@ -45,6 +46,7 @@ class BenchmarkSettings:
     @classmethod
     def from_environment(cls, environ: Mapping[str, str] | None = None) -> BenchmarkSettings:
         values = os.environ if environ is None else environ
+        parameters = _benchmark_parameters(values)
         dataset = _required(values, "EUBOULIA_DATASET").casefold()
         if dataset not in {"random", "random-ids", "sharegpt"}:
             raise BenchmarkHarnessError(
@@ -67,8 +69,9 @@ class BenchmarkSettings:
             metrics_path=Path(values.get("EUBOULIA_METRICS_PATH", "euboulia-result.json")),
             request_rate=_request_rate(values, "EUBOULIA_REQUEST_RATE", "inf"),
             backend=values.get("EUBOULIA_SGLANG_BENCHMARK_BACKEND", "sglang"),
-            random_range_ratio=_ratio(values, "EUBOULIA_RANDOM_RANGE_RATIO", 0.0),
-            seed=_nonnegative_int(values, "EUBOULIA_BENCHMARK_SEED", 42),
+            random_range_ratio=_parameter_ratio(parameters, "random_range_ratio", 0.0),
+            seed=_parameter_nonnegative_int(parameters, "seed", 42),
+            flush_cache=_parameter_bool(parameters, "flush_cache", True),
             module=values.get("EUBOULIA_SGLANG_BENCHMARK_MODULE", "sglang.bench_serving"),
             dataset_path=dataset_path,
             evidence_dir=(
@@ -120,6 +123,7 @@ class BenchmarkSettings:
                 "--sharegpt-context-len",
                 str(self.input_tokens + self.output_tokens),
             )
+        cache_args = ("--flush-cache",) if self.flush_cache else ()
         return (
             *common,
             *dataset_args,
@@ -131,7 +135,7 @@ class BenchmarkSettings:
             str(self.request_rate),
             "--seed",
             str(self.seed),
-            "--flush-cache",
+            *cache_args,
             "--disable-tqdm",
             "--output-file",
             str(output_path),
@@ -329,6 +333,9 @@ def _write_evidence_manifest(evidence_dir: Path, settings: BenchmarkSettings) ->
         "num_prompts": settings.num_prompts,
         "warmups": settings.warmups,
         "repetitions": settings.repetitions,
+        "seed": settings.seed,
+        "random_range_ratio": settings.random_range_ratio,
+        "flush_cache": settings.flush_cache,
         "files": files,
     }
     (evidence_dir / "evidence-manifest.json").write_text(
@@ -365,14 +372,55 @@ def _nonnegative_int(environ: Mapping[str, str], name: str, default: int) -> int
     return value
 
 
-def _ratio(environ: Mapping[str, str], name: str, default: float) -> float:
-    raw = environ.get(name, str(default))
+def _benchmark_parameters(environ: Mapping[str, str]) -> Mapping[str, object]:
+    raw = environ.get("EUBOULIA_BENCHMARK_PARAMETERS", "{}").strip()
     try:
-        value = float(raw)
-    except ValueError as exc:
-        raise BenchmarkHarnessError(f"{name} must be between 0 and 1") from exc
-    if not math.isfinite(value) or not 0 <= value <= 1:
-        raise BenchmarkHarnessError(f"{name} must be between 0 and 1")
+        value: object = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise BenchmarkHarnessError(
+            "EUBOULIA_BENCHMARK_PARAMETERS must be a JSON object"
+        ) from exc
+    if not isinstance(value, dict) or not all(isinstance(key, str) for key in value):
+        raise BenchmarkHarnessError(
+            "EUBOULIA_BENCHMARK_PARAMETERS must be a JSON object"
+        )
+    unknown = sorted(set(value) - {"flush_cache", "random_range_ratio", "seed"})
+    if unknown:
+        raise BenchmarkHarnessError(
+            "unsupported benchmark parameter(s): " + ", ".join(unknown)
+        )
+    return cast(dict[str, object], value)
+
+
+def _parameter_nonnegative_int(
+    parameters: Mapping[str, object], name: str, default: int
+) -> int:
+    value = parameters.get(name, default)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise BenchmarkHarnessError(f"benchmark parameter {name} must be a non-negative integer")
+    return value
+
+
+def _parameter_ratio(
+    parameters: Mapping[str, object], name: str, default: float
+) -> float:
+    value = parameters.get(name, default)
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int | float)
+        or not math.isfinite(float(value))
+        or not 0 <= float(value) <= 1
+    ):
+        raise BenchmarkHarnessError(f"benchmark parameter {name} must be between 0 and 1")
+    return float(value)
+
+
+def _parameter_bool(
+    parameters: Mapping[str, object], name: str, default: bool
+) -> bool:
+    value = parameters.get(name, default)
+    if not isinstance(value, bool):
+        raise BenchmarkHarnessError(f"benchmark parameter {name} must be a boolean")
     return value
 
 

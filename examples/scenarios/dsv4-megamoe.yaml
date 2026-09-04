@@ -77,8 +77,9 @@ benchmark:
   mode: serve
   result_filename: euboulia-result.json
   parameters:
-    protocol: fixed-random-cache-clean
     seed: 1
+    random_range_ratio: 0
+    flush_cache: true
 
 baseline:
   source_revision: ${sglang_revision}
@@ -301,12 +302,10 @@ optimization:
         timeout_seconds: 7200
         required_metrics: [output_throughput, mean_ttft_ms, mean_tpot_ms]
         commands:
-          - name: fixed-random-cache-clean
+          - name: sglang-bench-serving
             executable: python3
             module: euboulia.harnesses.sglang.benchmark
             env:
-              EUBOULIA_BENCHMARK_SEED: "1"
-              EUBOULIA_RANDOM_RANGE_RATIO: "0"
               EUBOULIA_SGLANG_BENCHMARK_BACKEND: sglang-oai-chat
               EUBOULIA_SGLANG_BENCHMARK_MODULE: sglang.bench_serving
   budget:

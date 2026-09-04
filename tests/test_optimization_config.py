@@ -368,7 +368,13 @@ def test_loads_exact_dsv4_megamoe_target_validation_scenario(tmp_path: Path) -> 
         EvaluationTierKind.PERFORMANCE,
     ]
     performance_command = config.optimization.evaluation.tiers[-1].commands[0]
-    assert performance_command.env["EUBOULIA_RANDOM_RANGE_RATIO"] == "0"
+    assert config.benchmark.parameters == {
+        "seed": 1,
+        "random_range_ratio": 0,
+        "flush_cache": True,
+    }
+    assert "EUBOULIA_BENCHMARK_SEED" not in performance_command.env
+    assert "EUBOULIA_RANDOM_RANGE_RATIO" not in performance_command.env
     assert not any(name.startswith("EUBOULIA_SHAREGPT") for name in performance_command.env)
     lanes = config.optimization.evaluation.lanes
     assert lanes is not None
