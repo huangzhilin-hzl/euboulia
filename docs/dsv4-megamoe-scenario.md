@@ -6,8 +6,9 @@ checked-in recipe is `examples/scenarios/dsv4-megamoe.yaml`.
 
 ## Preconditions
 
-Run the Euboulia controller locally and configure a private single-node H20 Pod template.
-The template must provide:
+Run the Euboulia controller locally and configure a private single-node Pod template.
+The selected node and template must satisfy `target.hardware` in the resolved recipe and
+provide:
 
 - `/home/admin/model/DeepSeek-V4-Flash-0731` contains the local model;
 - Git can authenticate to every private repository through a credential helper or
@@ -119,8 +120,8 @@ Execution stops on any of the following:
 
 - runtime component provenance or declared hardware model/count mismatch;
 - managed-service readiness or generic OpenAI-chat correctness failure;
-- fewer than eight H20 GPUs or fewer than eight rank traces containing
-  `fp8_mxfp4_mega_moe`;
+- accelerator identity/count does not match `target.hardware`, or fewer than eight rank
+  traces contain `fp8_mxfp4_mega_moe`;
 - an incomplete benchmark request or invalid benchmark result; or
 - an incomplete qualification matrix, a point that does not stabilize within its
   window/time budget, or a missing/invalid external accuracy result.
