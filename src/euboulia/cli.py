@@ -40,6 +40,14 @@ from euboulia.recipe import (
     plan_recipe,
     run_recipe,
 )
+from euboulia.remote import (
+    KubernetesTargetSupervisor,
+    RemoteConfigError,
+    RemoteExecutionError,
+    load_host_runtime_config,
+    with_worker_storage,
+    write_worker_artifact_index,
+)
 
 Command = Callable[[argparse.Namespace], int]
 
@@ -186,8 +194,40 @@ def build_parser() -> argparse.ArgumentParser:
     _add_recipe_argument(target_run_parser)
     _add_values_argument(target_run_parser)
     target_run_parser.add_argument("--name", help="optional human-readable run name")
+    target_run_parser.add_argument(
+        "--executor",
+        help="Kubernetes executor name from the local runtime config",
+    )
+    target_run_parser.add_argument(
+        "--runtime-config",
+        type=Path,
+        help="local runtime config (default: ~/.config/euboulia/config.yaml)",
+    )
+    target_run_parser.add_argument("--internal-run-uid", help=argparse.SUPPRESS)
+    target_run_parser.add_argument(
+        "--internal-artifacts-root", type=Path, help=argparse.SUPPRESS
+    )
+    target_run_parser.add_argument(
+        "--internal-workspace-root", type=Path, help=argparse.SUPPRESS
+    )
     target_run_parser.add_argument("--json", action="store_true")
     target_run_parser.set_defaults(handler=_target_run)
+
+    target_artifacts_parser = target_commands.add_parser(
+        "artifacts", help="retrieve retained artifacts from a remote target run"
+    )
+    target_artifact_commands = target_artifacts_parser.add_subparsers(
+        dest="target_artifact_command", required=True
+    )
+    target_artifacts_pull_parser = target_artifact_commands.add_parser(
+        "pull", help="pull a complete immutable run snapshot, including raw profiles"
+    )
+    target_artifacts_pull_parser.add_argument("--run-uid", required=True)
+    target_artifacts_pull_parser.add_argument("--executor", required=True)
+    target_artifacts_pull_parser.add_argument("--runtime-config", type=Path)
+    target_artifacts_pull_parser.add_argument("--destination", required=True, type=Path)
+    target_artifacts_pull_parser.add_argument("--json", action="store_true")
+    target_artifacts_pull_parser.set_defaults(handler=_target_artifacts_pull)
     return parser
 
 
@@ -459,10 +499,64 @@ def _target_plan(args: argparse.Namespace) -> int:
 
 def _target_run(args: argparse.Namespace) -> int:
     config = load_optimization_config(args.recipe, args.values)
-    result = OptimizationRunner().validate_baseline(
-        config,
-        name=args.name,
+    internal_values = (
+        args.internal_run_uid,
+        args.internal_artifacts_root,
+        args.internal_workspace_root,
     )
+    if any(value is not None for value in internal_values) and not all(
+        value is not None for value in internal_values
+    ):
+        raise RemoteConfigError("internal worker storage arguments must be supplied together")
+    if args.executor is not None and any(value is not None for value in internal_values):
+        raise RemoteConfigError("--executor cannot be combined with internal worker arguments")
+    if args.executor is not None:
+        require_optimization_execution_lock(config)
+        runtime = load_host_runtime_config(args.runtime_config)
+        remote = KubernetesTargetSupervisor(
+            runtime.executor(args.executor),
+            runtime.storage,
+        ).run(
+            args.recipe,
+            values=args.values,
+            name=args.name,
+        )
+        if args.json:
+            _print_json(remote.to_dict())
+        else:
+            if remote.name is not None:
+                print(f"Name: {remote.name}")
+            print(f"Run UID: {remote.run_uid}")
+            print(f"Status: {remote.status}")
+            print(f"Local records: {remote.local_run_dir}")
+            print(f"Remote artifacts: {remote.remote_run_dir}")
+            if remote.sync is not None:
+                print(
+                    "Artifact sync: "
+                    f"local={remote.sync.local_dir} remote={remote.sync.remote_dir} "
+                    f"added={remote.sync.added} modified={remote.sync.modified} "
+                    f"deleted={remote.sync.deleted}"
+                )
+            if remote.error is not None:
+                print(f"Error: {remote.error}")
+        return 0 if remote.passed else 1
+
+    run_uid = args.internal_run_uid
+    if run_uid is not None:
+        config = with_worker_storage(
+            config,
+            artifacts_root=args.internal_artifacts_root,
+            workspace_root=args.internal_workspace_root,
+        )
+    try:
+        result = OptimizationRunner().validate_baseline(
+            config,
+            name=args.name,
+            run_uid=run_uid,
+        )
+    finally:
+        if run_uid is not None:
+            write_worker_artifact_index(config.execution.artifacts_dir / run_uid, run_uid)
     if args.json:
         _print_json(result.to_dict())
     else:
@@ -474,6 +568,22 @@ def _target_run(args: argparse.Namespace) -> int:
         print(f"Artifacts: {result.artifact_dir}")
         print(f"Worktree: {result.workspace_path}")
     return 0 if result.passed else 1
+
+
+def _target_artifacts_pull(args: argparse.Namespace) -> int:
+    runtime = load_host_runtime_config(args.runtime_config)
+    sync = KubernetesTargetSupervisor(
+        runtime.executor(args.executor),
+        runtime.storage,
+    ).pull_snapshot(args.run_uid, args.destination)
+    if args.json:
+        _print_json(sync.to_dict())
+    else:
+        print(
+            f"Artifact sync: local={sync.local_dir} remote={sync.remote_dir} "
+            f"added={sync.added} modified={sync.modified} deleted={sync.deleted}"
+        )
+    return 0
 
 
 def _print_unresolved_resolution(
@@ -539,6 +649,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     except (
         AdapterError,
         RecipeSafetyError,
+        RemoteExecutionError,
         ConfigError,
         EventLedgerCorruptionError,
         EvaluationError,

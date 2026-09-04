@@ -1851,7 +1851,11 @@ def _parse_workspace(value: object, source: Path) -> WorkspaceConfig:
     )
     return WorkspaceConfig(
         repository=_resolve_path(raw.get("repository"), f"{path}.repository", source),
-        root_dir=_resolve_path(raw.get("root_dir"), f"{path}.root_dir", source),
+        root_dir=(
+            (Path.cwd() / ".euboulia" / "worktrees").resolve()
+            if raw.get("root_dir") is None
+            else _resolve_path(raw.get("root_dir"), f"{path}.root_dir", source)
+        ),
         timeout_seconds=_number(
             raw.get("timeout_seconds", 120.0), f"{path}.timeout_seconds", minimum=0.001
         ),
@@ -1896,9 +1900,13 @@ def _inside(path: Path, directory: Path) -> bool:
 
 def _parse_execution(value: object, source: Path) -> OptimizationExecutionConfig:
     path = "execution"
-    raw = _mapping(value, path)
+    raw = {} if value is None else _mapping(value, path)
     _reject_unknown(raw, {"artifacts_dir", "ledger", "events", "memory"}, path)
-    artifacts = _resolve_path(raw.get("artifacts_dir"), "execution.artifacts_dir", source)
+    artifacts = (
+        (Path.cwd() / ".euboulia").resolve()
+        if raw.get("artifacts_dir") is None
+        else _resolve_path(raw.get("artifacts_dir"), "execution.artifacts_dir", source)
+    )
     filesystem_root = Path(artifacts.anchor)
     if artifacts in {filesystem_root, Path.home().resolve(), source.parent.resolve()}:
         raise OptimizationConfigError(

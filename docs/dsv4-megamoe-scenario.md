@@ -6,7 +6,8 @@ checked-in recipe is `examples/scenarios/dsv4-megamoe.yaml`.
 
 ## Preconditions
 
-Run Euboulia inside the declared single-node H20 container. Before execution:
+Run the Euboulia controller locally and configure a worker in the declared single-node
+H20 Pod. Before execution, the Pod must provide:
 
 - `/home/admin/model/DeepSeek-V4-Flash-0731` contains the local model;
 - `/home/admin/src/dsv4-megamoe/SGLang` is a clean clone containing the exact commit
@@ -15,7 +16,7 @@ Run Euboulia inside the declared single-node H20 container. Before execution:
   selected in the values file;
 - `lm_eval` with API extras is installed in the image at the exact version selected
   in the values file; and
-- the result and worktree roots do not already contain the selected run ID.
+- the same Euboulia checkout is available at the executor's `project_dir`.
 
 The checked-in recipe is intentionally unresolved. Create a local values file with the
 immutable image reference and exact SGLang commit supplied by the user or deployment
@@ -41,7 +42,7 @@ uv run euboulia target plan --recipe examples/scenarios/dsv4-megamoe.yaml
 ```
 
 Bind and validate the execution identity, then inspect the exact launch argv, source
-revision, 30 workload points, and required capabilities:
+revision, and 30 workload points:
 
 ```console
 uv run euboulia target resolve \
@@ -63,8 +64,15 @@ After review, execute exactly one baseline (no generated candidate):
 ```console
 uv run euboulia target run \
   --recipe examples/scenarios/dsv4-megamoe.lock.yaml \
+  --executor h20-pod \
   --name dsv4-megamoe-baseline
 ```
+
+The executor and canonical local storage are machine-specific and therefore live in
+`~/.config/euboulia/config.yaml`, not in the scenario. Start from
+`examples/runtime/kubernetes.yaml`. The configured `project_dir` must contain the
+same Euboulia checkout in the Pod; the model and SGLang paths remain Pod paths in the
+scenario.
 
 `--name` is optional, non-unique display metadata. Euboulia generates an immutable,
 time-sortable ULID `run_uid` used by artifacts, workspaces, service manifests, and
@@ -108,11 +116,15 @@ Execution stops on any of the following:
 
 ## Output
 
-The run root is
-`/home/admin/results/euboulia-dsv4-megamoe/<run-uid>/target-validation`.
-It contains `resolved-recipe.yaml`, the provenance snapshot, the active-profile
-summary/manifest, complete owned service logs, per-command evidence, and these
-canonical files:
+The local controller creates `<storage.root>/runs/<run-uid>` immediately. `run.json`
+and `events.jsonl` retain the control-plane record; `summary.json` is the final result;
+`artifact-manifest.json` records local paths plus immutable Kubernetes URIs and
+SHA-256 values. `memory.sqlite3` remains a single local database and is never copied
+from the Pod.
+
+The automatically synchronized `artifacts/target-validation` snapshot contains
+`resolved-recipe.yaml`, the provenance snapshot, the active-profile summary/manifest,
+owned service logs, per-command evidence, and these files:
 
 - `logs/server.log` and `runtime-provenance.json`;
 - `profile/summary.json` and `profile/manifest.json`;
@@ -121,5 +133,13 @@ canonical files:
 - `euboulia-accuracy.json`, produced directly by external `lm_eval` during
   qualification.
 
-Detached worktrees are retained. Successful raw profile traces follow `keep_raw`;
-failed captures keep raw traces for diagnosis.
+Detached worktrees remain in the configured Pod scratch directory. Raw profile traces
+stay in the Pod by default and remain addressable through `artifact-manifest.json`.
+Pull a complete immutable snapshot explicitly when needed:
+
+```console
+uv run euboulia target artifacts pull \
+  --executor h20-pod \
+  --run-uid <run-uid> \
+  --destination /absolute/local/path/raw-snapshot
+```

@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import re
 import secrets
 import time
 
 _CROCKFORD_BASE32 = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 _MAX_TIMESTAMP_MS = (1 << 48) - 1
+_RUN_UID = re.compile(r"run-[0-9A-HJKMNP-TV-Z]{26}")
 
 
 def new_run_uid() -> str:
@@ -34,3 +36,11 @@ def normalize_run_name(value: str | None) -> str | None:
     if len(selected) > 128:
         raise ValueError("name must not exceed 128 characters")
     return selected
+
+
+def normalize_run_uid(value: str) -> str:
+    """Validate an internally supplied execution identity before using it as a path."""
+
+    if not isinstance(value, str) or _RUN_UID.fullmatch(value) is None:
+        raise ValueError("run_uid must be a run-prefixed Crockford ULID")
+    return value

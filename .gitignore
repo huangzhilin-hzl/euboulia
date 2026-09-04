@@ -23,10 +23,12 @@ build/
 # Euboulia experiment evidence and heavyweight profiler output
 experiments/
 artifacts/
+.euboulia/
 profiles/
 traces/
 *.nsys-rep
 *.sqlite
+*.sqlite3
 !examples/profiles/
 !examples/profiles/vllm-compute.ncu.csv
 

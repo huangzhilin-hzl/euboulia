@@ -581,11 +581,12 @@ def test_target_validation_runs_one_baseline_without_candidate(tmp_path: Path) -
     result = _runner(config, controller).validate_baseline(
         config,
         name="baseline-only",
+        run_uid="run-01HF7YAT000000000000000000",
     )
 
     assert result.passed is True
     assert result.profile.provider == "sglang_torch"
-    assert result.run_uid.startswith("run-")
+    assert result.run_uid == "run-01HF7YAT000000000000000000"
     assert result.name == "baseline-only"
     assert result.evaluation.objective_value == 106.0
     assert controller.calls == [

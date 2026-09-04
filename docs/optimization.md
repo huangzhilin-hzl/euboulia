@@ -217,7 +217,8 @@ uv run euboulia target resolve \
   --output scenario.lock.yaml
 
 uv run euboulia target run \
-  --recipe scenario.lock.yaml
+  --recipe scenario.lock.yaml \
+  --executor h20-pod
 ```
 
 The lock file must be written beside its template so relative paths keep the same
@@ -233,7 +234,16 @@ when present, owns the SGLang service lifecycle, captures the configured profile
 executes the qualification evaluation. These are fixed command semantics rather than
 separate authorization flags.
 
-reviewed candidate patches remain separate experiment inputs. Every active run writes
+For remote execution, executor coordinates and canonical storage are host policy, not
+scenario content. Put them in `~/.config/euboulia/config.yaml` (see
+`examples/runtime/kubernetes.yaml`) and select the executor with `--executor`. The
+local supervisor generates `run_uid`, records start/completion events immediately,
+runs the worker inside the Pod, and always attempts artifact retrieval on success or
+failure. It writes `run.json`, `events.jsonl`, `summary.json`, and
+`artifact-manifest.json` under `<storage.root>/runs/<run-uid>`. Raw profiles remain
+remote unless the sync policy is `always` or `target artifacts pull` is used.
+
+Pre-reviewed candidate patches remain separate experiment inputs. Every active run writes
 the exact bound document to
 `<artifacts>/<run-uid>/resolved-recipe.yaml` (or the target-validation subdirectory for
 `target run`); configuration digests and memory identity are calculated from that
@@ -495,8 +505,10 @@ operator-controlled cleanup action.
   correctness, microbenchmark, and NCU-guided iteration.
 - Validated kernels are not automatically integrated into SGLang, and a promoted
   champion is not automatically re-profiled to select the next hotspot.
-- Trial scheduling is local and sequential; remote workers, interleaved pairs,
-  confidence intervals, and crash-safe resume remain future work.
+- Target validation supports one Kubernetes worker with automatic local result
+  persistence. Iterative optimization remains local and sequential; remote optimizer
+  workers, interleaved pairs, confidence intervals, and crash-safe resume remain
+  future work.
 - Euboulia ends at evidence and a recommendation. Merge, rollout, and production
   observation belong to separate systems.
 

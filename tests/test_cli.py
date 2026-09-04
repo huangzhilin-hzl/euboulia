@@ -182,11 +182,36 @@ def test_target_run_parser_accepts_optional_name() -> None:
             "host-values.yaml",
             "--name",
             "baseline",
+            "--executor",
+            "h20-pod",
+            "--runtime-config",
+            "runtime.yaml",
         ]
     )
 
     assert args.values == Path("host-values.yaml")
     assert args.name == "baseline"
+    assert args.executor == "h20-pod"
+    assert args.runtime_config == Path("runtime.yaml")
+
+
+def test_target_artifact_pull_parser_requires_explicit_snapshot_destination() -> None:
+    args = build_parser().parse_args(
+        [
+            "target",
+            "artifacts",
+            "pull",
+            "--run-uid",
+            "run-01HF7YAT000000000000000000",
+            "--executor",
+            "h20-pod",
+            "--destination",
+            "raw-snapshot",
+        ]
+    )
+
+    assert args.run_uid == "run-01HF7YAT000000000000000000"
+    assert args.destination == Path("raw-snapshot")
 
 
 def test_config_remains_a_compatible_alias_for_recipe() -> None:

@@ -22,3 +22,11 @@ def test_run_name_is_optional_trimmed_display_metadata() -> None:
 
     with pytest.raises(ValueError, match="must not be empty"):
         run_identity.normalize_run_name("   ")
+
+
+def test_run_uid_validation_rejects_path_and_non_ulid_values() -> None:
+    valid = "run-01HF7YAT000000000000000000"
+
+    assert run_identity.normalize_run_uid(valid) == valid
+    with pytest.raises(ValueError, match="Crockford ULID"):
+        run_identity.normalize_run_uid("../../result")
