@@ -14,6 +14,7 @@ import euboulia.remote as remote
 from euboulia.execution import ExecutionResult
 from euboulia.optimization.config import SourceConfig, load_optimization_config
 from euboulia.optimization.events import EventLedger, EventType
+from euboulia.optimization.workspace import SourcePreparationError, WorkspaceError
 
 
 def _executor(
@@ -605,6 +606,45 @@ def test_source_bundle_is_streamed_to_the_owned_pod_and_digest_checked(
     assert observed["timeout"] == 300
     assert observed["shell"] is False
     assert (local_run_dir / "control/source-sglang-stage.stderr.log").is_file()
+
+
+@pytest.mark.parametrize("error_type", [SourcePreparationError, WorkspaceError])
+def test_source_preparation_failure_writes_a_terminal_record_before_pod_creation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error_type: type[WorkspaceError],
+) -> None:
+    run_uid = "run-01HF7YAT000000000000000000"
+    storage = remote.LocalStorageConfig(root=tmp_path / "results")
+    supervisor = remote.KubernetesTargetSupervisor(_executor(tmp_path), storage)
+    monkeypatch.setattr(supervisor, "_worker_recipe", lambda config: "name: source-failure\n")
+
+    def fail_sources(*args, **kwargs):
+        raise error_type("source 'deepgemm' ref fetch failed: exit status 128")
+
+    def unexpected_pod(*args, **kwargs):
+        pytest.fail("source preparation failure must not create a Pod")
+
+    monkeypatch.setattr(supervisor, "_prepare_controller_source_bundles", fail_sources)
+    monkeypatch.setattr(supervisor, "_create_pod", unexpected_pod)
+    result = supervisor.run(
+        SimpleNamespace(sources={"deepgemm": object()}),
+        name="failed-source",
+        node="worker-1",
+        run_uid=run_uid,
+    )
+
+    assert result.status == "failed"
+    assert result.passed is False
+    assert result.error == "source 'deepgemm' ref fetch failed: exit status 128"
+    record = json.loads((storage.runs_dir / run_uid / "run.json").read_text())
+    assert record["status"] == record["phase"] == "failed"
+    assert record["infrastructure_state"] == "not_created"
+    assert record["finished_at"]
+    assert record["pod"] is None
+    summary = json.loads((storage.runs_dir / run_uid / "summary.json").read_text())
+    assert summary["error"] == result.error
+    assert not list((storage.root / ".source-transfer").iterdir())
 
 
 def test_controller_source_delivery_uses_persistent_cache_and_exact_bundle(

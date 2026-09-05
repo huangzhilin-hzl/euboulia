@@ -14,6 +14,7 @@ from euboulia.optimization.workspace import (
     GitWorktreeWorkspace,
     PatchLimits,
     PatchRejected,
+    SourcePreparationError,
     WorkspaceAuthorizationError,
     create_source_bundle,
     create_source_worktree,
@@ -149,6 +150,62 @@ def test_source_bundle_contains_only_the_locked_export_ref(repository: Path) -> 
     )
     assert worker_manifest["repository"] == str(repository)
     assert worker_manifest["transport"] == "controller_bundle"
+
+
+def test_cached_locked_source_remains_usable_when_origin_is_unavailable(repository: Path) -> None:
+    revision = _git(repository, "rev-parse", "HEAD").stdout.strip()
+    ref = _git(repository, "symbolic-ref", "HEAD").stdout.strip()
+    source = SourceConfig(repository=str(repository), ref=ref, revision=revision)
+    cache = repository.parent / "source-cache"
+    prepare_git_source("sglang", source, cache, repository.parent / "initial-evidence")
+    repository.rename(repository.with_name("unavailable-origin"))
+
+    prepared = prepare_git_source("sglang", source, cache, repository.parent / "offline-evidence")
+    workspace = create_source_worktree(prepared, source, repository.parent / "offline-worktree")
+
+    assert _git(workspace.path, "rev-parse", "HEAD").stdout.strip() == revision
+    manifest = json.loads((prepared.evidence_dir / "source-sglang.json").read_text())
+    assert manifest["cache_hit"] is True
+    assert manifest["observed_ref_revision"] is None
+    assert manifest["ref_matches_revision"] is None
+    assert all("fetch" not in command["argv"] for command in manifest["commands"])
+
+
+def test_cache_fetches_a_new_locked_commit_instead_of_reusing_an_old_one(repository: Path) -> None:
+    revision = _git(repository, "rev-parse", "HEAD").stdout.strip()
+    ref = _git(repository, "symbolic-ref", "HEAD").stdout.strip()
+    cache = repository.parent / "source-cache"
+    prepare_git_source(
+        "sglang",
+        SourceConfig(repository=str(repository), ref=ref, revision=revision),
+        cache,
+        repository.parent / "initial-evidence",
+    )
+    (repository / "value.txt").write_text("new locked version\n")
+    _git(repository, "commit", "-am", "next revision")
+    next_revision = _git(repository, "rev-parse", "HEAD").stdout.strip()
+    source = SourceConfig(repository=str(repository), ref=ref, revision=next_revision)
+
+    prepared = prepare_git_source("sglang", source, cache, repository.parent / "next-evidence")
+    workspace = create_source_worktree(prepared, source, repository.parent / "next-worktree")
+
+    assert _git(workspace.path, "rev-parse", "HEAD").stdout.strip() == next_revision
+    assert (workspace.path / "value.txt").read_text() == "new locked version\n"
+    manifest = json.loads((prepared.evidence_dir / "source-sglang.json").read_text())
+    assert manifest["cache_hit"] is False
+    assert manifest["observed_ref_revision"] == next_revision
+
+
+def test_cached_revision_does_not_bypass_origin_validation(repository: Path) -> None:
+    revision = _git(repository, "rev-parse", "HEAD").stdout.strip()
+    ref = _git(repository, "symbolic-ref", "HEAD").stdout.strip()
+    source = SourceConfig(repository=str(repository), ref=ref, revision=revision)
+    cache = repository.parent / "source-cache"
+    prepared = prepare_git_source("sglang", source, cache, repository.parent / "initial-evidence")
+    _git(prepared.repository, "remote", "set-url", "origin", str(repository.parent / "other"))
+
+    with pytest.raises(SourcePreparationError, match="cache origin mismatch"):
+        prepare_git_source("sglang", source, cache, repository.parent / "mismatch-evidence")
 
 
 def test_prepare_is_read_only_and_apply_requires_explicit_authorization(
