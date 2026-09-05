@@ -179,8 +179,11 @@ windows are within 2%. Target validation uses the complete 30-point
 three-round-per-point report path has been removed.
 
 Performance requests use SGLang's standard `random` dataset with fixed ISL/OSL,
-`random_range_ratio=0`, and seed 1. SGLang generates the requests at benchmark time;
-there is no scenario-specific dataset preparation or manifest format.
+`random_range_ratio=1`, and seed 1. SGLang's ratio is the minimum sampled fraction:
+zero samples from 1 through the target length, while one fixes both lengths at their
+declared values. The harness requires per-request `input_lens` and `output_lens` to
+match the point before accepting its metrics. SGLang generates the requests at benchmark
+time; there is no scenario-specific dataset preparation or manifest format.
 
 ## Fail-closed gates
 

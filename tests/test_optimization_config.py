@@ -417,7 +417,7 @@ def test_loads_exact_dsv4_megamoe_target_validation_scenario(tmp_path: Path) -> 
     performance_command = config.optimization.evaluation.tiers[-1].commands[0]
     assert config.benchmark.parameters == {
         "seed": 1,
-        "random_range_ratio": 0,
+        "random_range_ratio": 1,
         "flush_cache": True,
     }
     assert "EUBOULIA_BENCHMARK_SEED" not in performance_command.env

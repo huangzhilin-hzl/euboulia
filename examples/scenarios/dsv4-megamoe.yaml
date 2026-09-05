@@ -115,7 +115,7 @@ benchmark:
   result_filename: euboulia-result.json
   parameters:
     seed: 1
-    random_range_ratio: 0
+    random_range_ratio: 1
     flush_cache: true
 
 baseline:

@@ -93,7 +93,7 @@ def test_benchmark_command_is_fixed_length_and_saturation_oriented(tmp_path: Pat
     assert command[:3] == (command[0], "-m", "sglang.bench_serving")
     assert command[command.index("--random-input-len") + 1] == "1024"
     assert command[command.index("--random-output-len") + 1] == "256"
-    assert command[command.index("--random-range-ratio") + 1] == "0.0"
+    assert command[command.index("--random-range-ratio") + 1] == "1.0"
     assert command[command.index("--request-rate") + 1] == "inf"
     assert command[command.index("--max-concurrency") + 1] == "8"
     assert command[command.index("--base-url") + 1] == "http://127.0.0.1:30000"
@@ -176,10 +176,17 @@ def test_benchmark_discards_warmups_and_writes_median_metrics(
     settings = _benchmark_settings()
     samples = iter(
         [
-            {"completed": 32, "output_throughput": 10.0, "mean_ttft_ms": 90.0},
-            {"completed": 32, "output_throughput": 100.0, "mean_ttft_ms": 30.0},
-            {"completed": 32, "output_throughput": 90.0, "mean_ttft_ms": 40.0},
-            {"completed": 32, "output_throughput": 120.0, "mean_ttft_ms": 20.0},
+            {
+                **sample,
+                "input_lens": [1024] * 32,
+                "output_lens": [256] * 32,
+            }
+            for sample in [
+                {"completed": 32, "output_throughput": 10.0, "mean_ttft_ms": 90.0},
+                {"completed": 32, "output_throughput": 100.0, "mean_ttft_ms": 30.0},
+                {"completed": 32, "output_throughput": 90.0, "mean_ttft_ms": 40.0},
+                {"completed": 32, "output_throughput": 120.0, "mean_ttft_ms": 20.0},
+            ]
         ]
     )
 
@@ -199,6 +206,25 @@ def test_benchmark_discards_warmups_and_writes_median_metrics(
     assert parse_metrics(settings.metrics_path)["output_throughput"] == 100.0
     assert len(written["samples"]) == 3
     assert all(sample["output_throughput"] != 10.0 for sample in written["samples"])
+
+
+@pytest.mark.parametrize("key", ["input_lens", "output_lens"])
+@pytest.mark.parametrize("bad_values", [None, [], [38], [True]])
+def test_fixed_length_benchmark_rejects_missing_or_wrong_request_lengths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, key: str, bad_values: object
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    settings = _benchmark_settings(num_prompts=1, warmups=0, repetitions=1)
+    sample = {
+        "completed": 1,
+        "output_throughput": 100.0,
+        "input_lens": [1024],
+        "output_lens": [256],
+        key: bad_values,
+    }
+    with pytest.raises(BenchmarkHarnessError, match=key):
+        benchmark.run_benchmark(settings, sample_runner=lambda configured, output: sample)
+    assert not settings.metrics_path.exists()
 
 
 def test_benchmark_fails_when_any_request_is_incomplete(
