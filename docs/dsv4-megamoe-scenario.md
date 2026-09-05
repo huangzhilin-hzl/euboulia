@@ -46,6 +46,14 @@ HF Mirror uses the [Hugging Face download API](https://huggingface.co/docs/huggi
 with `HF_ENDPOINT=https://hf-mirror.com` and an explicit endpoint. Install the selected
 SDK in the worker image before running; Euboulia does not install packages implicitly.
 
+The recipe also sets `HF_ENDPOINT=https://hf-mirror.com` explicitly in the performance
+harness (including profile warmup and capture) and in `lm_eval` for GSM8K. The pinned
+SGLang implementation of `dataset: random` still downloads ShareGPT text, so a complete
+local model alone does not make evaluation independent of network access. If another
+Hugging Face endpoint is required, change both command environments in the recipe
+before regenerating the lock. The model download provider does not change these
+dataset settings.
+
 The checked-in recipe is intentionally unresolved. Create a local values file with the
 immutable image reference and exact SGLang commit supplied by the user or deployment
 platform:

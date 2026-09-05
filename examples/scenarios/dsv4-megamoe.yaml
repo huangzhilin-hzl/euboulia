@@ -300,6 +300,8 @@ optimization:
         timeout_seconds: 7200
         executable: python3
         module: lm_eval
+        env:
+          HF_ENDPOINT: https://hf-mirror.com
         options:
           --model: local-chat-completions
           --apply_chat_template: true
@@ -345,6 +347,7 @@ optimization:
             env:
               EUBOULIA_SGLANG_BENCHMARK_BACKEND: sglang-oai-chat
               EUBOULIA_SGLANG_BENCHMARK_MODULE: sglang.bench_serving
+              HF_ENDPOINT: https://hf-mirror.com
   budget:
     max_iterations: 1
     max_wall_time_seconds: 86400
