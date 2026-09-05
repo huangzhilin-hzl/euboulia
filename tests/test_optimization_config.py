@@ -430,7 +430,12 @@ def test_loads_exact_dsv4_megamoe_target_validation_scenario(tmp_path: Path) -> 
     assert lanes.fast.stability.max_windows == 4
     accuracy = config.optimization.evaluation.accuracy
     assert accuracy is not None
-    assert accuracy.command.argv[:3] == ("python3", "-m", "lm_eval")
+    assert accuracy.command.argv[:3] == (
+        "{workspace}/.euboulia-lm-eval/bin/python", "-m", "euboulia.harnesses.lm_eval"
+    )
+    assert accuracy.command.argv[accuracy.command.argv.index("--gsm8k-dataset-path") + 1] == (
+        "openai/gsm8k"
+    )
     assert accuracy.command.argv[accuracy.command.argv.index("--model") + 1] == (
         "local-chat-completions"
     )
@@ -465,6 +470,7 @@ def test_loads_exact_dsv4_megamoe_target_validation_scenario(tmp_path: Path) -> 
     assert config.optimization.workspace.source == "sglang"
     assert config.optimization.workspace.repository is None
     assert config.target.build is not None
+    assert config.target.build.commands[1].argv[-1] == "0.4.9.2"
     assert "{source.deepgemm}" in config.target.build.commands[-1].argv
     assert config.target.runtime.expected.components["sglang"].source == "sglang"
     assert config.target.runtime.expected.components["sglang"].path is None
@@ -509,6 +515,9 @@ def test_loads_exact_dsv4_megamoe_target_validation_scenario(tmp_path: Path) -> 
         if qualification:
             assert plan.accuracy_check is not None
             assert plan.accuracy_check.command.env_overrides["HF_ENDPOINT"] == expected_endpoint
+            assert plan.accuracy_check.command.argv[0] == str(
+                tmp_path / ".euboulia-lm-eval" / "bin" / "python"
+            )
 
 
 def test_load_v3_normalizes_models_suite_runtime_and_derives_launch_facets(
