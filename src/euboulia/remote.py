@@ -14,8 +14,10 @@ import tarfile
 import tempfile
 import threading
 import time
+import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
+from itertools import pairwise
 from pathlib import Path, PurePosixPath
 from typing import IO, cast
 
@@ -1455,7 +1457,90 @@ print(digest.hexdigest())
             raise failures[0]
         if len(results) != 1:  # pragma: no cover - worker thread always records one result
             raise RemoteExecutionError("remote worker did not produce an execution result")
-        return results[0]
+        return self._recover_worker_result(
+            results[0], remote_runs_root / run_uid, local_run_dir, run_uid
+        )
+
+    def _recover_worker_result(
+        self,
+        transport: ExecutionResult,
+        remote_run_dir: PurePosixPath,
+        local_run_dir: Path,
+        run_uid: str,
+    ) -> ExecutionResult:
+        """An ended exec stream does not establish that the worker has exited."""
+
+        _write_json(
+            local_run_dir / "control" / "pod-worker-transport.json",
+            cast(Mapping[str, JSONValue], transport.to_dict()),
+        )
+        while True:
+            observation = self._observe_worker(remote_run_dir, run_uid)
+            if observation is not None:
+                if observation.get("run_uid") != run_uid:
+                    raise RemoteExecutionError("remote worker state has a different run_uid")
+                state = observation.get("state")
+                if state == "finished":
+                    returncode = observation.get("returncode")
+                    if isinstance(returncode, bool) or not isinstance(returncode, int):
+                        raise RemoteExecutionError("remote worker state has no exit status")
+                    payload = observation.get("result")
+                    result_path = local_run_dir / "control" / "pod-worker-result.json"
+                    _write_json(result_path, payload if isinstance(payload, dict) else {})
+                    error = observation.get("error")
+                    return replace(
+                        transport,
+                        returncode=returncode,
+                        stdout_path=result_path,
+                        error=error if isinstance(error, str) else None,
+                        timed_out=False,
+                        finished_at=utc_now(),
+                    )
+                if state != "running":
+                    raise RemoteExecutionError(
+                        str(observation.get("error") or "worker exited without final evidence")
+                    )
+            self._mirror_worker_progress(
+                remote_run_dir / "progress.json", local_run_dir / "worker-progress.json", run_uid
+            )
+            self._mirror_service_logs(
+                remote_run_dir / "target-validation" / "service", local_run_dir / "live"
+            )
+            time.sleep(5)
+
+    def _observe_worker(
+        self, remote_run_dir: PurePosixPath, run_uid: str
+    ) -> Mapping[str, JSONValue] | None:
+        script = (
+            "import json, sys; from pathlib import Path; "
+            "from euboulia.remote import observe_worker; "
+            "print(json.dumps(observe_worker(Path(sys.argv[1]), sys.argv[2])))"
+        )
+        try:
+            argv = [
+                *self._kubectl_exec_prefix(),
+                "/usr/bin/env",
+                f"PYTHONPATH={self.executor.project_dir / 'src'}",
+                self.executor.python,
+                "-c",
+                script,
+                str(remote_run_dir),
+                run_uid,
+            ]
+            completed = subprocess.run(
+                argv, capture_output=True, timeout=15, check=False, shell=False
+            )
+        except (OSError, subprocess.TimeoutExpired, RemoteExecutionError):
+            return None
+        if completed.returncode != 0:
+            return None
+        try:
+            payload: object = json.loads(completed.stdout)
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise RemoteExecutionError("remote worker observation is not JSON") from exc
+        if not isinstance(payload, dict):
+            raise RemoteExecutionError("remote worker observation is not an object")
+        return cast(Mapping[str, JSONValue], payload)
 
     def _mirror_worker_progress(
         self,
@@ -1465,8 +1550,8 @@ print(digest.hexdigest())
     ) -> None:
         """Copy one small atomic progress record; missing early records are expected."""
 
-        argv = [*self._kubectl_exec_prefix(), "cat", str(remote_progress)]
         try:
+            argv = [*self._kubectl_exec_prefix(), "cat", str(remote_progress)]
             completed = subprocess.run(
                 argv,
                 capture_output=True,
@@ -1499,19 +1584,19 @@ print(digest.hexdigest())
 
         stdout_file, stdout_offset = self._live_log_positions.get("stdout", ("", 0))
         stderr_file, stderr_offset = self._live_log_positions.get("stderr", ("", 0))
-        argv = [
-            *self._kubectl_exec_prefix(),
-            self.executor.python,
-            "-c",
-            _REMOTE_SERVICE_LOG_READER,
-            str(remote_service_dir),
-            str(_LIVE_LOG_CHUNK_BYTES),
-            stdout_file,
-            str(stdout_offset),
-            stderr_file,
-            str(stderr_offset),
-        ]
         try:
+            argv = [
+                *self._kubectl_exec_prefix(),
+                self.executor.python,
+                "-c",
+                _REMOTE_SERVICE_LOG_READER,
+                str(remote_service_dir),
+                str(_LIVE_LOG_CHUNK_BYTES),
+                stdout_file,
+                str(stdout_offset),
+                stderr_file,
+                str(stderr_offset),
+            ]
             completed = subprocess.run(
                 argv,
                 capture_output=True,
@@ -1579,7 +1664,9 @@ print(digest.hexdigest())
                 f"local artifact snapshot already exists: {local_artifacts_dir}"
             )
         local_artifacts_dir.mkdir(parents=True)
-        stderr_path = local_artifacts_dir.parent / "control" / "artifact-sync.stderr.log"
+        stderr_path = (
+            local_artifacts_dir.parent / "control" / f"artifact-sync-{uuid.uuid4().hex}.stderr.log"
+        )
         stderr_path.parent.mkdir(parents=True, exist_ok=True)
         tar_argv = [*self._kubectl_exec_prefix(), "tar"]
         include_raw = (
@@ -1644,6 +1731,111 @@ print(digest.hexdigest())
         except ValueError as exc:
             raise RemoteConfigError(f"{path} is outside local project directory {project}") from exc
         return self.executor.project_dir.joinpath(*relative.parts)
+
+
+def _worker_process_identity(pid: int, proc_root: Path = Path("/proc")) -> tuple[str, str] | None:
+    try:
+        fields = (proc_root / str(pid) / "stat").read_text().rsplit(")", 1)[1].split()
+    except FileNotFoundError:
+        return None
+    return fields[0], fields[19]  # Linux stat fields 3 (state) and 22 (start time).
+
+
+def write_worker_state(
+    run_dir: Path,
+    run_uid: str,
+    *,
+    returncode: int | None = None,
+    result: Mapping[str, object] | None = None,
+    error: str | None = None,
+) -> Path:
+    """Persist completion before indexing artifacts or acknowledging the exec client."""
+
+    pid = os.getpid()
+    identity = _worker_process_identity(pid)
+    destination = run_dir / "worker-state.json"
+    if returncode is None:
+        run_dir.mkdir(parents=True, exist_ok=True)
+        # One run UID has one worker; a second invocation must not rewrite live evidence.
+        with (run_dir / "worker.claim").open("x", encoding="utf-8") as claim:
+            claim.write(f"{pid}\n")
+    _write_json(
+        destination,
+        {
+            "schema_version": 1,
+            "run_uid": normalize_run_uid(run_uid),
+            "state": "running" if returncode is None else "finished",
+            "pid": pid,
+            "start_ticks": identity[1] if identity is not None else None,
+            "returncode": returncode,
+            "result": cast(JSONValue, result),
+            "error": error,
+        },
+    )
+    return destination
+
+
+def observe_worker(
+    run_dir: Path, run_uid: str, *, proc_root: Path = Path("/proc")
+) -> Mapping[str, JSONValue]:
+    """Read durable completion or verify the exact Linux worker process is still live."""
+
+    run_uid = normalize_run_uid(run_uid)
+
+    def failure(detail: str) -> Mapping[str, JSONValue]:
+        return {"run_uid": run_uid, "state": "failed", "error": detail}
+
+    def finished(payload: Mapping[str, JSONValue]) -> bool:
+        index_path = run_dir / "artifact-index.json"
+        if payload.get("state") != "finished" or not index_path.is_file():
+            return False
+        index = json.loads(index_path.read_text())
+        return isinstance(index, dict) and index.get("run_uid") == run_uid
+
+    state_path = run_dir / "worker-state.json"
+    if not state_path.exists():
+        # The exec connection can end during CLI startup, before the first state write.
+        for process in proc_root.iterdir():
+            if not process.name.isdecimal():
+                continue
+            try:
+                argv = (process / "cmdline").read_bytes().split(b"\0")
+            except FileNotFoundError:
+                continue
+            if any(
+                left == b"--internal-run-uid" and right == run_uid.encode()
+                for left, right in pairwise(argv)
+            ):
+                return {"run_uid": run_uid, "state": "running"}
+        return failure("worker exited before writing a durable state record")
+    try:
+        raw = json.loads(state_path.read_text())
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return failure("worker state is not valid JSON")
+    if not isinstance(raw, dict) or raw.get("run_uid") != run_uid:
+        return failure("worker state has a different run_uid")
+    if raw.get("schema_version") != 1 or raw.get("state") not in {"running", "finished"}:
+        return failure("worker state has an unsupported schema or state")
+    payload = cast(dict[str, JSONValue], raw)
+    if finished(payload):
+        return payload
+    pid = payload.get("pid")
+    identity = (
+        _worker_process_identity(pid, proc_root)
+        if isinstance(pid, int) and not isinstance(pid, bool)
+        else None
+    )
+    if (
+        identity is not None
+        and identity[0] not in {"Z", "X"}
+        and identity[1] == payload.get("start_ticks")
+    ):
+        return {"run_uid": run_uid, "state": "running"}
+    # Completion can race the liveness read; recheck the atomic final index.
+    current = json.loads(state_path.read_text())
+    if isinstance(current, dict) and current.get("run_uid") == run_uid and finished(current):
+        return cast(Mapping[str, JSONValue], current)
+    return failure("worker exited without a final result and complete artifact index")
 
 
 def write_worker_artifact_index(run_dir: Path, run_uid: str) -> Path:

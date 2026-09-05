@@ -477,10 +477,18 @@ class OptimizationRunner:
         write_run_progress(
             config.execution.artifacts_dir,
             selected_run_uid,
-            status="completed",
-            phase="completed",
-            detail="baseline validation evidence is complete",
-            completed_units=qualification_points,
+            status="completed" if result.passed else "failed",
+            phase="completed" if result.passed else "failed",
+            detail=(
+                "baseline validation passed"
+                if result.passed
+                else "baseline validation failed; inspect the recorded evaluation gates"
+            ),
+            completed_units=(
+                len(evaluation.point_results)
+                if isinstance(evaluation, WorkloadSuiteEvaluationResult)
+                else 1
+            ),
             total_units=qualification_points,
         )
         return result

@@ -79,6 +79,14 @@ that is actually executed. The two repositories and refs are independent.
 
 ## Execution boundary
 
+Workers persist their process identity and final result in `worker-state.json`, then
+index the complete evidence before acknowledging the controller. If `kubectl exec`
+ends early, the controller checks that durable state and continues observing the same
+worker while it remains alive or the connection is unavailable. It retains the original
+transport logs separately from the recovered result. Failed qualification records show
+the number of points actually executed; a failed point does not count skipped points
+as completed.
+
 Inspect the template and its missing bindings without side effects:
 
 ```console

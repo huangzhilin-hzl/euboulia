@@ -716,14 +716,40 @@ def test_target_validation_prepares_independent_declared_source_worktrees(
     assert provenance["expected"]["components"]["deepgemm"]["path"] == str(deepgemm_path)
 
 
+def test_failed_target_validation_records_only_executed_points(tmp_path: Path) -> None:
+    config = _managed_v3_project(tmp_path)
+    evaluation = config.optimization.evaluation
+    first_tier = evaluation.tiers[0]
+    failing = replace(first_tier.commands[0], argv=(sys.executable, "-c", "raise SystemExit(1)"))
+    config = replace(
+        config,
+        optimization=replace(
+            config.optimization,
+            evaluation=replace(
+                evaluation,
+                tiers=(replace(first_tier, commands=(failing,)), *evaluation.tiers[1:]),
+            ),
+        ),
+    )
+    controller = FakeTargetController()
+    result = _runner(config, controller).validate_baseline(config)
+    assert not result.passed
+    progress = json.loads((result.artifact_dir.parent / "progress.json").read_text())
+    assert progress["status"] == "failed"
+    assert progress["phase"] == "failed"
+    assert progress["completed_units"] == 1
+    assert progress["total_units"] == 2
+    assert controller.calls[-1] == "stop:baseline"
+
+
 def test_failed_submodule_logs_survive_workspace_removal(tmp_path: Path) -> None:
     config = _managed_v3_source_project(tmp_path)
     source = config.sources["deepgemm"]
     repository = Path(source.repository)
     (repository / ".gitmodules").write_text(
         '[submodule "third-party/cutlass"]\n'
-        '\tpath = third-party/cutlass\n'
-        f'\turl = {tmp_path / "missing-submodule-repository"}\n'
+        "\tpath = third-party/cutlass\n"
+        f"\turl = {tmp_path / 'missing-submodule-repository'}\n"
     )
     _git(repository, "add", ".gitmodules")
     _git(

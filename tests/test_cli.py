@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -206,6 +207,97 @@ def test_target_cli_reports_profile_failure_as_expected_error(
     output = capsys.readouterr()
     assert "euboulia: error: SGLang profile control" in output.err
     assert "Traceback" not in output.err
+
+
+@pytest.mark.parametrize("passed", [False, True])
+def test_internal_worker_persists_indexed_result_before_stdout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, passed: bool
+) -> None:
+    uid = "run-01HF7YAT000000000000000000"
+    payload = {"run_uid": uid, "passed": passed, "evaluation": {"evidence": "x" * 100000}}
+    config = SimpleNamespace(execution=SimpleNamespace(artifacts_dir=tmp_path))
+    monkeypatch.setattr(cli, "load_optimization_config", lambda *args: config)
+    monkeypatch.setattr(cli, "with_worker_storage", lambda *args, **kwargs: config)
+    monkeypatch.setattr(
+        cli,
+        "OptimizationRunner",
+        lambda **kwargs: SimpleNamespace(
+            validate_baseline=lambda *args, **kwargs: SimpleNamespace(
+                passed=passed,
+                to_dict=lambda: payload,
+            ),
+        ),
+    )
+
+    def disconnected_stdout(value: object) -> None:
+        assert value == {"run_uid": uid, "passed": passed}
+        state = json.loads((tmp_path / uid / "worker-state.json").read_text())
+        assert state["state"] == "finished"
+        assert state["result"] == payload
+        assert state["returncode"] == (0 if passed else 1)
+        index = json.loads((tmp_path / uid / "artifact-index.json").read_text())
+        assert any(item["path"] == "worker-state.json" for item in index["artifacts"])
+        raise BrokenPipeError("exec client disconnected")
+
+    monkeypatch.setattr(cli, "_print_json", disconnected_stdout)
+    args = build_parser().parse_args(
+        [
+            "target",
+            "run",
+            "--recipe",
+            "unused.yaml",
+            "--json",
+            "--internal-run-uid",
+            uid,
+            "--internal-artifacts-root",
+            str(tmp_path),
+            "--internal-workspace-root",
+            str(tmp_path / "worktrees"),
+        ]
+    )
+    with pytest.raises(BrokenPipeError, match="disconnected"):
+        cli._target_run(args)
+
+
+def test_internal_worker_persists_exception_before_artifact_index(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    uid = "run-01HF7YAT000000000000000000"
+    config = SimpleNamespace(execution=SimpleNamespace(artifacts_dir=tmp_path))
+    monkeypatch.setattr(cli, "load_optimization_config", lambda *args: config)
+    monkeypatch.setattr(cli, "with_worker_storage", lambda *args, **kwargs: config)
+
+    def fail(*args: object, **kwargs: object) -> None:
+        raise ProfileCaptureError("profile failed")
+
+    monkeypatch.setattr(
+        cli,
+        "OptimizationRunner",
+        lambda **kwargs: SimpleNamespace(
+            validate_baseline=fail,
+        ),
+    )
+    args = build_parser().parse_args(
+        [
+            "target",
+            "run",
+            "--recipe",
+            "unused.yaml",
+            "--json",
+            "--internal-run-uid",
+            uid,
+            "--internal-artifacts-root",
+            str(tmp_path),
+            "--internal-workspace-root",
+            str(tmp_path / "worktrees"),
+        ]
+    )
+    with pytest.raises(ProfileCaptureError, match="profile failed"):
+        cli._target_run(args)
+    state = json.loads((tmp_path / uid / "worker-state.json").read_text())
+    assert state["returncode"] == 2
+    assert state["error"] == "ProfileCaptureError: profile failed"
+    assert (tmp_path / uid / "artifact-index.json").is_file()
 
 
 def test_optimize_plan_allows_template_but_run_requires_bindings(

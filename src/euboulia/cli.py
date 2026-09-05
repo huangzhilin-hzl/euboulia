@@ -51,6 +51,7 @@ from euboulia.remote import (
     load_host_runtime_config,
     with_worker_storage,
     write_worker_artifact_index,
+    write_worker_state,
 )
 
 Command = Callable[[argparse.Namespace], int]
@@ -659,12 +660,26 @@ def _target_run(args: argparse.Namespace) -> int:
             artifacts_root=args.internal_artifacts_root,
             workspace_root=args.internal_workspace_root,
         )
+        write_worker_state(config.execution.artifacts_dir / run_uid, run_uid)
     try:
         result = OptimizationRunner(
             source_bundles_root=args.internal_source_bundles_root,
         ).validate_baseline(config, name=args.name, run_uid=run_uid)
+        if run_uid is not None:
+            write_worker_state(
+                config.execution.artifacts_dir / run_uid,
+                run_uid,
+                returncode=0 if result.passed else 1,
+                result=result.to_dict(),
+            )
     except KeyboardInterrupt:
         if run_uid is not None:
+            write_worker_state(
+                config.execution.artifacts_dir / run_uid,
+                run_uid,
+                returncode=130,
+                error="worker interrupted by its owning controller",
+            )
             write_run_progress(
                 config.execution.artifacts_dir,
                 run_uid,
@@ -675,6 +690,12 @@ def _target_run(args: argparse.Namespace) -> int:
         raise
     except Exception as exc:
         if run_uid is not None:
+            write_worker_state(
+                config.execution.artifacts_dir / run_uid,
+                run_uid,
+                returncode=2,
+                error=f"{type(exc).__name__}: {exc}"[:4096],
+            )
             write_run_progress(
                 config.execution.artifacts_dir,
                 run_uid,
@@ -687,7 +708,11 @@ def _target_run(args: argparse.Namespace) -> int:
         if run_uid is not None:
             write_worker_artifact_index(config.execution.artifacts_dir / run_uid, run_uid)
     if args.json:
-        _print_json(result.to_dict())
+        _print_json(
+            {"run_uid": run_uid, "passed": result.passed}
+            if run_uid is not None
+            else result.to_dict()
+        )
     else:
         if result.name is not None:
             print(f"Name: {result.name}")
