@@ -31,6 +31,7 @@ from euboulia.optimization.target import (
     TargetChangeSet,
     TargetSpec,
 )
+from euboulia.optimization.workspace import SourcePreparationError
 
 pytestmark = pytest.mark.skipif(shutil.which("git") is None, reason="git is required")
 
@@ -704,11 +705,68 @@ def test_target_validation_prepares_independent_declared_source_worktrees(
     assert _git(deepgemm_path, "rev-parse", "HEAD") == config.sources["deepgemm"].revision
     assert (result.artifact_dir / "sources" / "source-sglang.json").is_file()
     assert (result.artifact_dir / "sources" / "source-deepgemm.json").is_file()
+    for name in ("sglang", "deepgemm"):
+        assert (
+            result.artifact_dir / "sources" / "worktrees" / name / "workspace-manifest.json"
+        ).is_file()
     provenance = json.loads(
         (result.artifact_dir / "runtime-provenance.json").read_text(encoding="utf-8")
     )
     assert provenance["expected"]["components"]["sglang"]["source"] == "sglang"
     assert provenance["expected"]["components"]["deepgemm"]["path"] == str(deepgemm_path)
+
+
+def test_failed_submodule_logs_survive_workspace_removal(tmp_path: Path) -> None:
+    config = _managed_v3_source_project(tmp_path)
+    source = config.sources["deepgemm"]
+    repository = Path(source.repository)
+    (repository / ".gitmodules").write_text(
+        '[submodule "third-party/cutlass"]\n'
+        '\tpath = third-party/cutlass\n'
+        f'\turl = {tmp_path / "missing-submodule-repository"}\n'
+    )
+    _git(repository, "add", ".gitmodules")
+    _git(
+        repository,
+        "update-index",
+        "--add",
+        "--cacheinfo",
+        f"160000,{source.revision},third-party/cutlass",
+    )
+    _git(repository, "commit", "-m", "declare unavailable submodule")
+    config = replace(
+        config,
+        sources={
+            **config.sources,
+            "deepgemm": replace(
+                source,
+                revision=_git(repository, "rev-parse", "HEAD"),
+                submodules=True,
+            ),
+        },
+    )
+    run_uid = "run-01HF7YAT000000000000000001"
+    controller = FakeTargetController()
+
+    with pytest.raises(SourcePreparationError, match="submodule initialization failed"):
+        _runner(config, controller).validate_baseline(config, run_uid=run_uid)
+
+    assert controller.calls == []
+    assert config.optimization.workspace is not None
+    shutil.rmtree(config.optimization.workspace.root_dir)
+    evidence = (
+        config.execution.artifacts_dir
+        / run_uid
+        / "target-validation"
+        / "sources"
+        / "worktrees"
+        / "deepgemm"
+    )
+    assert (evidence / "workspace-manifest.json").is_file()
+    logs = list(evidence.glob("source-submodules-*.stderr.log"))
+    assert len(logs) == 1
+    assert "third-party/cutlass" in logs[0].read_text()
+    assert "fatal:" in logs[0].read_text()
 
 
 def test_repeated_name_keeps_content_identity_but_gets_distinct_run_uids(
