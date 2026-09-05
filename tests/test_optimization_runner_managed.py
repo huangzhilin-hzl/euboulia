@@ -7,18 +7,24 @@ import shutil
 import subprocess
 import sys
 from collections import Counter
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 import yaml
 
 from euboulia.execution import ExecutionResult
-from euboulia.optimization.config import OptimizationConfig, load_optimization_config
+from euboulia.optimization.config import (
+    ModelDownloadConfig,
+    OptimizationConfig,
+    load_optimization_config,
+)
 from euboulia.optimization.contracts import Capability, RunState
 from euboulia.optimization.evaluator import TieredEvaluator
 from euboulia.optimization.events import EventLedger, EventType
+from euboulia.optimization.model_artifacts import ModelPreparationError
 from euboulia.optimization.profiling import SGLangProfiler
-from euboulia.optimization.runner import OptimizationRunner
+from euboulia.optimization.runner import OptimizationRunner, OptimizationRuntimeError
 from euboulia.optimization.target import (
     BuildSpec,
     ServiceHandle,
@@ -620,6 +626,36 @@ def test_managed_args_only_trial_uses_fresh_services_and_measured_baseline(
     ]
 
 
+@pytest.mark.parametrize("download_fails", [False, True])
+def test_model_preparation_precedes_build_and_failure_blocks_service(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    download_fails: bool,
+) -> None:
+    config = _managed_project(tmp_path)
+    model = replace(
+        config.models.target, model_id="example/model", download=ModelDownloadConfig("modelscope")
+    )
+    config = replace(config, models=replace(config.models, target=model))
+    controller = FakeTargetController()
+
+    def prepare(model, evidence_dir):
+        assert not controller.calls
+        controller.calls.append("prepare_model")
+        if download_fails:
+            raise ModelPreparationError("model download failed")
+
+    monkeypatch.setattr("euboulia.optimization.runner.prepare_model", prepare)
+    runner = _runner(config, controller)
+    if download_fails:
+        with pytest.raises(OptimizationRuntimeError, match="model download failed"):
+            runner.validate_baseline(config)
+        assert controller.calls == ["prepare_model"]
+    else:
+        assert runner.validate_baseline(config).passed
+        assert controller.calls[:2] == ["prepare_model", "build:baseline"]
+
+
 def test_target_validation_runs_one_baseline_without_candidate(tmp_path: Path) -> None:
     config = _managed_project(tmp_path)
     controller = FakeTargetController()
@@ -672,9 +708,7 @@ def test_target_validation_prepares_independent_declared_source_worktrees(
         (result.artifact_dir / "runtime-provenance.json").read_text(encoding="utf-8")
     )
     assert provenance["expected"]["components"]["sglang"]["source"] == "sglang"
-    assert provenance["expected"]["components"]["deepgemm"]["path"] == str(
-        deepgemm_path
-    )
+    assert provenance["expected"]["components"]["deepgemm"]["path"] == str(deepgemm_path)
 
 
 def test_repeated_name_keeps_content_identity_but_gets_distinct_run_uids(

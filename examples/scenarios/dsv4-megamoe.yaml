@@ -31,6 +31,12 @@ inputs:
   model_revision:
     type: git_commit
     required: true
+  model_id:
+    type: string
+    required: true
+  model_provider:
+    type: string
+    required: true
   lm_eval_version:
     type: string
     required: true
@@ -54,12 +60,17 @@ sources:
     repository: ${deepgemm_repository}
     ref: ${deepgemm_ref}
     revision: ${deepgemm_revision}
+    submodules: true
 
 models:
   target:
+    model_id: ${model_id}
     path: /home/admin/model/DeepSeek-V4-Flash-0731
     served_name: /home/admin/model/DeepSeek-V4-Flash-0731
     revision: ${model_revision}
+    download:
+      provider: ${model_provider}
+      timeout_seconds: 14400
   drafts: []
 
 endpoint: http://127.0.0.1:8188
@@ -129,7 +140,7 @@ target:
         argv: [python3, -m, pip, uninstall, -y, sgl-deep-gemm, deep-gemm]
         timeout_seconds: 300
       - name: install-pinned-deepgemm
-        argv: [/usr/bin/env, -C, "{source.deepgemm}", DG_FORCE_BUILD=1, bash, ./install.sh]
+        argv: [/usr/bin/env, -C, "{source.deepgemm}", DG_FORCE_BUILD=1, bash, -e, -o, pipefail, ./install.sh]
         timeout_seconds: 3600
   launch:
     python: python3

@@ -409,7 +409,7 @@
     };
     const terminal = new Set(["completed", "failed", "cancelled"]);
     const phaseGroups = [
-      ["submitted", "allocating"], ["pod_ready", "staging"], ["preparing_sources", "capturing_provenance"],
+      ["submitted", "allocating"], ["pod_ready", "staging"], ["preparing_models", "preparing_sources", "capturing_provenance"],
       ["building", "launching", "waiting_ready"], ["profiling"], ["evaluating"], ["stopping", "syncing", "completed"]
     ];
     const phaseLabels = ["allocate", "stage", "prepare", "launch", "profile", "evaluate", "sync"];
