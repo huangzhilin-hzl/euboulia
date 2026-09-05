@@ -471,7 +471,7 @@ def prepare_git_source(
     transport_repository: str | os.PathLike[str] | None = None,
     transport_ref: str | None = None,
 ) -> PreparedGitSource:
-    """Fetch a declared ref and immutable commit into a reusable local cache."""
+    """Reuse a cached immutable commit, or fetch the declared source when absent."""
 
     if _SAFE_SOURCE_NAME.fullmatch(name) is None:
         raise ValueError("source name must be a safe identifier")
@@ -498,7 +498,8 @@ def prepare_git_source(
     commands: list[CommandEvidence] = []
     with lock_path.open("a+b") as lock_file:
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-        if not repository_path.exists():
+        cache_existed = repository_path.exists()
+        if not cache_existed:
             clone_ref = effective_ref.split("/", maxsplit=2)[-1]
             cloned = _run_command(
                 [
@@ -571,40 +572,6 @@ def prepare_git_source(
                     _command_failure(f"source {name!r} transport update failed", changed_origin)
                 )
 
-        fetched_ref = _run_command(
-            [
-                git_executable,
-                "-C",
-                str(repository_path),
-                "fetch",
-                "--no-tags",
-                "--force",
-                "origin",
-                effective_ref,
-            ],
-            cwd=repository_path,
-            evidence_dir=evidence_path,
-            label=f"source-{name}-fetch-ref",
-            timeout_seconds=timeout,
-            env_overrides=_git_auth_env(),
-        )
-        commands.append(fetched_ref)
-        if not fetched_ref.succeeded:
-            raise SourcePreparationError(
-                _command_failure(f"source {name!r} ref fetch failed", fetched_ref)
-            )
-        observed_ref_revision = _git_output(
-            repository_path,
-            evidence_path,
-            f"source-{name}-resolve-ref",
-            timeout,
-            git_executable,
-            "rev-parse",
-            "--verify",
-            "FETCH_HEAD^{commit}",
-            commands=commands,
-        )
-
         resolved_revision = _git_output(
             repository_path,
             evidence_path,
@@ -617,6 +584,55 @@ def prepare_git_source(
             commands=commands,
             required=False,
         )
+        cache_hit = cache_existed and resolved_revision is not None
+        observed_ref_revision = None
+        if not cache_hit:
+            fetched_ref = _run_command(
+                [
+                    git_executable,
+                    "-C",
+                    str(repository_path),
+                    "fetch",
+                    "--no-tags",
+                    "--force",
+                    "origin",
+                    effective_ref,
+                ],
+                cwd=repository_path,
+                evidence_dir=evidence_path,
+                label=f"source-{name}-fetch-ref",
+                timeout_seconds=timeout,
+                env_overrides=_git_auth_env(),
+            )
+            commands.append(fetched_ref)
+            if not fetched_ref.succeeded:
+                raise SourcePreparationError(
+                    _command_failure(f"source {name!r} ref fetch failed", fetched_ref)
+                )
+            observed_ref_revision = _git_output(
+                repository_path,
+                evidence_path,
+                f"source-{name}-resolve-ref",
+                timeout,
+                git_executable,
+                "rev-parse",
+                "--verify",
+                "FETCH_HEAD^{commit}",
+                commands=commands,
+            )
+
+            resolved_revision = _git_output(
+                repository_path,
+                evidence_path,
+                f"source-{name}-resolve-revision",
+                timeout,
+                git_executable,
+                "rev-parse",
+                "--verify",
+                f"{source.revision}^{{commit}}",
+                commands=commands,
+                required=False,
+            )
         if resolved_revision is None:
             fetched_revision = _run_command(
                 [
@@ -663,7 +679,10 @@ def prepare_git_source(
         "ref": source.ref,
         "revision": source.revision,
         "observed_ref_revision": observed_ref_revision,
-        "ref_matches_revision": observed_ref_revision == source.revision,
+        "ref_matches_revision": (
+            observed_ref_revision == source.revision if observed_ref_revision is not None else None
+        ),
+        "cache_hit": cache_hit,
         "transport": "controller_bundle" if transport_repository is not None else "git",
         "cache": str(repository_path),
         "commands": [command.to_dict() for command in commands],

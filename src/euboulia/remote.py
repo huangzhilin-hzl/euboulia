@@ -32,6 +32,7 @@ from euboulia.optimization.events import EventLedger, EventType, OptimizationEve
 from euboulia.optimization.memory import SQLiteMemoryStore
 from euboulia.optimization.workspace import (
     SourceBundle,
+    WorkspaceError,
     create_source_bundle,
     prepare_git_source,
 )
@@ -535,7 +536,7 @@ class KubernetesTargetSupervisor:
         except KeyboardInterrupt:
             cancelled = True
             error = "run cancelled; the owned Pod was retained for recovery"
-        except (OSError, RemoteExecutionError, ValueError) as exc:
+        except (OSError, RemoteExecutionError, ValueError, WorkspaceError) as exc:
             error = str(exc)
         finally:
             if source_transfer is not None:

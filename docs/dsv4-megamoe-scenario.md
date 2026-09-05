@@ -120,9 +120,12 @@ for every remote run; Euboulia resolves the value to `spec.nodeName`.
 time-sortable ULID `run_uid` used by artifacts, workspaces, service manifests, and
 event correlation.
 
-The lock requires an immutable commit for each source. The controller fetches only the
-declared branch without tags into a persistent local cache, verifies the locked commit,
-and transfers an exact-revision Git bundle. The worker creates separate per-run worktrees,
+The lock requires an immutable commit for each source. The controller reuses that exact
+commit from its validated persistent cache; when absent, it fetches the declared branch
+without tags and the locked commit as needed. Cache hits do not contact the origin or
+claim a fresh observation of the branch tip. Source preparation failures are recorded as
+failed runs before any Pod is created. The controller transfers an exact-revision Git
+bundle. The worker creates separate per-run worktrees,
 installs SGLang editable with `--no-deps`, and installs DeepGEMM from its own worktree last.
 DeepGEMM declares `submodules: true` so its pinned CUTLASS and fmt dependencies are
 initialized before the build. Its installer runs with `bash -e -o pipefail` so a failed
