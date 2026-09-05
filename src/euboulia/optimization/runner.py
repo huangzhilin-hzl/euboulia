@@ -62,6 +62,7 @@ from euboulia.optimization.events import (
 from euboulia.optimization.facets import derive_sglang_launch_facets
 from euboulia.optimization.identity import ScenarioIdentity, scenario_identity
 from euboulia.optimization.memory import SQLiteMemoryStore
+from euboulia.optimization.model_artifacts import ModelPreparationError, prepare_model
 from euboulia.optimization.planner import PatchCatalog, RulePlanner
 from euboulia.optimization.profiling import RuleAnalyzer, SGLangProfiler
 from euboulia.optimization.provenance import (
@@ -112,6 +113,7 @@ class OptimizationPlan:
     profile_plan: Mapping[str, JSONValue]
     required_capabilities: tuple[Capability, ...]
     warnings: tuple[str, ...]
+    model_preparation: tuple[dict[str, JSONValue], ...] = ()
 
     @property
     def recipe(self) -> str:
@@ -127,6 +129,7 @@ class OptimizationPlan:
             "profile_plan": dict(self.profile_plan),
             "required_capabilities": [item.value for item in self.required_capabilities],
             "warnings": list(self.warnings),
+            "model_preparation": list(self.model_preparation),
         }
 
 
@@ -287,6 +290,7 @@ class OptimizationRunner:
             )
         artifact_dir.mkdir(parents=True)
         _write_resolved_recipe_snapshot(config, artifact_dir)
+        self._prepare_models(config, selected_run_uid, artifact_dir / "models")
         write_run_progress(
             config.execution.artifacts_dir,
             selected_run_uid,
@@ -521,6 +525,18 @@ class OptimizationRunner:
             },
             required_capabilities=required_capabilities,
             warnings=warnings,
+            model_preparation=tuple(
+                {
+                    "model_id": model.model_id,
+                    "path": model.path,
+                    "revision": model.revision,
+                    "provider": model.download.provider,
+                    "timeout_seconds": model.download.timeout_seconds,
+                    "policy": "reuse complete local model; otherwise download before build",
+                }
+                for model in (config.models.target, *config.models.drafts)
+                if model.download is not None
+            ),
         )
 
     def run(
@@ -623,6 +639,9 @@ class OptimizationRunner:
         )
 
         try:
+            self._prepare_models(
+                config, run_uid, config.execution.artifacts_dir / run_uid / "models"
+            )
             no_improvement = 0
             while not budget.snapshot().exhausted:
                 reservation = budget.reserve_iteration()
@@ -1668,6 +1687,25 @@ class OptimizationRunner:
             workspace_path=candidate_workspace.path,
             baseline_evaluation=baseline_evaluation,
         )
+
+    @staticmethod
+    def _prepare_models(config: OptimizationConfig, run_uid: str, evidence_dir: Path) -> None:
+        for model in (config.models.target, *config.models.drafts):
+            if model.download is None:
+                continue
+            write_run_progress(
+                config.execution.artifacts_dir,
+                run_uid,
+                status="running",
+                phase="preparing_models",
+                detail=f"checking {model.model_id}; download source: {model.download.provider}"[
+                    :512
+                ],
+            )
+            try:
+                prepare_model(model, evidence_dir)
+            except ModelPreparationError as exc:
+                raise OptimizationRuntimeError(str(exc)) from exc
 
     def _prepare_managed_workspace(
         self,

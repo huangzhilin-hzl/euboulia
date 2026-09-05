@@ -82,12 +82,20 @@ class OptimizationWorkloadConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class ModelDownloadConfig:
+    provider: str
+    timeout_seconds: float = 14400.0
+
+
+@dataclass(frozen=True, slots=True)
 class ModelArtifactConfig:
     name: str
     path: str
     served_name: str
     revision: str
     weights_manifest_sha256: str | None = None
+    model_id: str | None = None
+    download: ModelDownloadConfig | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -697,11 +705,54 @@ def _parse_model_artifact(value: object, path: str) -> ModelArtifactConfig:
     raw = _mapping(value, path)
     _reject_unknown(
         raw,
-        {"name", "path", "served_name", "revision", "weights_manifest_sha256"},
+        {
+            "name",
+            "path",
+            "served_name",
+            "revision",
+            "weights_manifest_sha256",
+            "model_id",
+            "download",
+        },
         path,
     )
     model_path = _string(raw.get("path"), f"{path}.path")
     revision = _string(raw.get("revision"), f"{path}.revision")
+    model_id = raw.get("model_id")
+    if model_id is not None:
+        model_id = _string(model_id, f"{path}.model_id")
+        if (
+            re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*/[A-Za-z0-9][A-Za-z0-9._-]*", model_id) is None
+            or ".." in model_id
+            or "--" in model_id
+            or model_id.endswith((".", ".git"))
+        ):
+            raise OptimizationConfigError(f"{path}.model_id must be an owner/model repository ID")
+    download = None
+    if raw.get("download") is not None:
+        download_path = f"{path}.download"
+        download_raw = _mapping(raw["download"], download_path)
+        _reject_unknown(download_raw, {"provider", "timeout_seconds"}, download_path)
+        provider = _string(download_raw.get("provider"), f"{download_path}.provider")
+        if provider not in {"modelscope", "hf_mirror"}:
+            raise OptimizationConfigError(
+                f"{download_path}.provider must be modelscope or hf_mirror"
+            )
+        if model_id is None:
+            raise OptimizationConfigError(f"{path}.model_id is required for model downloads")
+        local_path = Path(model_path)
+        if not local_path.is_absolute() or len(local_path.parts) < 2 or ".." in local_path.parts:
+            raise OptimizationConfigError(f"{path}.path must be an absolute model directory")
+        if _GIT_COMMIT.fullmatch(revision) is None or set(revision) == {"0"}:
+            raise OptimizationConfigError(f"{path}.revision must pin a full commit for downloads")
+        download = ModelDownloadConfig(
+            provider=provider,
+            timeout_seconds=_number(
+                download_raw.get("timeout_seconds", 14400),
+                f"{download_path}.timeout_seconds",
+                minimum=1,
+            ),
+        )
     default_alias = "target"
     if not path.endswith(".target"):
         alias_seed = f"{revision}\0{model_path}".encode()
@@ -711,6 +762,8 @@ def _parse_model_artifact(value: object, path: str) -> ModelArtifactConfig:
         path=model_path,
         served_name=_string(raw.get("served_name", model_path), f"{path}.served_name"),
         revision=revision,
+        model_id=model_id,
+        download=download,
         weights_manifest_sha256=_optional_sha256(
             raw.get("weights_manifest_sha256"), f"{path}.weights_manifest_sha256"
         ),
@@ -2495,6 +2548,7 @@ __all__ = [
     "ExternalAccuracyConfig",
     "ManagedTargetConfig",
     "ModelArtifactConfig",
+    "ModelDownloadConfig",
     "ModelsConfig",
     "OptimizationBenchmarkConfig",
     "OptimizationCommandConfig",

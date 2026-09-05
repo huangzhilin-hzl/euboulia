@@ -341,6 +341,48 @@ def test_imported_profile_compatibility_shape_is_rejected(tmp_path: Path) -> Non
         load_optimization_config(source)
 
 
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"model_id": None}, "model_id is required"),
+        ({"model_id": "/models/local"}, "owner/model repository ID"),
+        ({"model_id": "https://huggingface.co/owner/model"}, "owner/model repository ID"),
+        ({"download": {"provider": "unknown"}}, "modelscope or hf_mirror"),
+        ({"path": "relative/model"}, "absolute model directory"),
+        ({"path": "/"}, "absolute model directory"),
+        ({"revision": "main"}, "pin a full commit"),
+        ({"download": {"provider": "modelscope", "timeout_seconds": 0}}, "must be >= 1"),
+    ],
+)
+def test_model_download_rejects_incomplete_or_unsafe_configuration(
+    tmp_path: Path,
+    overrides: dict,
+    message: str,
+) -> None:
+    document = v3_managed_document(tmp_path)
+    document["models"]["target"].update(
+        model_id="example/model", download={"provider": "modelscope"}
+    )
+    document["models"]["target"].update(overrides)
+    recipe = tmp_path / "recipe.yaml"
+    recipe.write_text(yaml.safe_dump(document))
+    with pytest.raises(OptimizationConfigError, match=message):
+        load_optimization_config(recipe)
+
+
+def test_model_download_lock_round_trip(tmp_path: Path) -> None:
+    document = v3_managed_document(tmp_path)
+    document["models"]["target"].update(
+        model_id="example/model", download={"provider": "hf_mirror", "timeout_seconds": 1800}
+    )
+    recipe = tmp_path / "recipe.yaml"
+    recipe.write_text(yaml.safe_dump(document))
+    config = load_optimization_config(recipe)
+    lock = tmp_path / "recipe.lock.yaml"
+    lock.write_text(dump_resolved_optimization_config(config, destination=lock))
+    assert load_optimization_config(lock).models.target == config.models.target
+
+
 def test_loads_exact_dsv4_megamoe_target_validation_scenario(tmp_path: Path) -> None:
     repository = Path(__file__).resolve().parents[1]
     values = tmp_path / "dsv4-values.yaml"
@@ -353,6 +395,8 @@ def test_loads_exact_dsv4_megamoe_target_validation_scenario(tmp_path: Path) -> 
                 "deepgemm_ref": "refs/heads/deepgemm-test",
                 "lm_eval_version": "0.4.9.2",
                 "model_revision": "d" * 40,
+                "model_id": "example/DeepSeek-V4-Flash-0731",
+                "model_provider": "modelscope",
                 "sglang_revision": "b" * 40,
                 "sglang_repository": "https://example.invalid/sglang.git",
                 "sglang_ref": "refs/heads/sglang-test",
@@ -412,6 +456,10 @@ def test_loads_exact_dsv4_megamoe_target_validation_scenario(tmp_path: Path) -> 
     assert config.sources["sglang"].repository == "https://example.invalid/sglang.git"
     assert config.sources["sglang"].ref == "refs/heads/sglang-test"
     assert config.sources["deepgemm"].revision == "c" * 40
+    assert config.sources["deepgemm"].submodules is True
+    assert config.models.target.model_id == "example/DeepSeek-V4-Flash-0731"
+    assert config.models.target.download is not None
+    assert config.models.target.download.provider == "modelscope"
     assert config.optimization.workspace is not None
     assert config.optimization.workspace.source == "sglang"
     assert config.optimization.workspace.repository is None

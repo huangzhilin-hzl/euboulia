@@ -10,13 +10,41 @@ Run the Euboulia controller locally and configure a private single-node Pod temp
 The selected node and template must satisfy `target.hardware` in the resolved recipe and
 provide:
 
-- `/home/admin/model/DeepSeek-V4-Flash-0731` contains the local model;
+- a persistent model volume at `/home/admin/model`, writable when a download is needed,
+  with enough space for the selected model;
+- the selected downloader (`modelscope` or `huggingface_hub`) installed in the worker
+  image, with network access to ModelScope or HF Mirror when the local model is missing;
 - the local controller can authenticate to every private repository through its Git
   credential helper or SSH agent; credentials must not appear in values or the lock;
 - `lm_eval` with API extras is installed in the image at the exact version selected
   in the values file; and
 - volumes, GPU resources, tolerations, image-pull secrets, and other cluster policy
   needed by the selected node.
+
+Before preparing sources or building SGLang, the worker checks the configured model
+directory for a readable `config.json`, tokenizer, and weights, including every shard
+listed in a weight index. A complete local model is reused without a network request.
+A missing model is downloaded on the selected node to the mounted directory. With a
+hostPath volume this cache is node-local; symlink targets must also be mounted.
+
+The user must supply the model's actual `owner/repository` ID and download provider;
+Euboulia never infers a repository from the local directory name. Both downloaders use
+the pinned `model_revision` from the selected provider. Switching providers may require
+a different revision; there is no automatic fallback between repositories.
+
+The `preparing_models` phase runs with a configurable timeout (four hours in this
+recipe). Download logs and command results are retained under `target-validation/models`.
+An interrupted Euboulia download is resumed through the SDK's local download metadata.
+Concurrent runs serialize writes to the same model directory. Cached downloads with a
+different model ID or revision are rejected; use another directory for that model.
+An incomplete pre-existing directory without Euboulia download metadata must be repaired
+or replaced with an empty destination before downloading. Model weights remain on the
+mounted volume and are not copied into run artifacts.
+
+ModelScope uses its [snapshot download API](https://github.com/modelscope/modelscope/blob/master/modelscope/hub/snapshot_download.py).
+HF Mirror uses the [Hugging Face download API](https://huggingface.co/docs/huggingface_hub/en/guides/download)
+with `HF_ENDPOINT=https://hf-mirror.com` and an explicit endpoint. Install the selected
+SDK in the worker image before running; Euboulia does not install packages implicitly.
 
 The checked-in recipe is intentionally unresolved. Create a local values file with the
 immutable image reference and exact SGLang commit supplied by the user or deployment
@@ -28,6 +56,8 @@ deepgemm_repository: https://github.com/example/DeepGEMM.git
 deepgemm_ref: refs/heads/my-deepgemm-branch
 deepgemm_revision: <40-or-64-hex-commit>
 lm_eval_version: <installed-lm-evaluation-harness-version>
+model_id: <owner/model-repository>
+model_provider: modelscope # or hf_mirror
 model_revision: <40-or-64-hex-model-revision>
 sglang_repository: https://example.com/team/SGLang.git
 sglang_ref: refs/heads/my-sglang-branch
@@ -94,6 +124,11 @@ The lock requires an immutable commit for each source. The controller fetches on
 declared branch without tags into a persistent local cache, verifies the locked commit,
 and transfers an exact-revision Git bundle. The worker creates separate per-run worktrees,
 installs SGLang editable with `--no-deps`, and installs DeepGEMM from its own worktree last.
+DeepGEMM declares `submodules: true` so its pinned CUTLASS and fmt dependencies are
+initialized before the build. Its installer runs with `bash -e -o pipefail` so a failed
+wheel build or installation stops the run instead of being hidden by a later command.
+After changing the recipe, regenerate the experiment lock before submitting a new run;
+existing submission and run artifacts retain the original contract.
 Euboulia starts a new process group and can stop only
 that signed, owned process. It never discovers or kills an existing server.
 

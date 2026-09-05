@@ -543,7 +543,8 @@ def _target_plan(args: argparse.Namespace) -> int:
         _print_unresolved_resolution(resolution, as_json=args.json)
         return 0
     config = resolution.config
-    profile_plan = OptimizationRunner().plan(config).profile_plan
+    plan = OptimizationRunner().plan(config)
+    profile_plan = plan.profile_plan
     lock_issues = optimization_execution_lock_issues(config)
     payload = {
         "recipe": config.name,
@@ -560,6 +561,7 @@ def _target_plan(args: argparse.Namespace) -> int:
         "endpoint": config.endpoint,
         "workload_points": len(config.workload_suite.points),
         "profile_plan": dict(profile_plan),
+        "model_preparation": list(plan.model_preparation),
         "launch_argv": list(config.target_launch_argv),
         "resolved": True,
         "bound_inputs": sorted(resolution.bindings),
@@ -574,6 +576,11 @@ def _target_plan(args: argparse.Namespace) -> int:
         for source_name, source in sorted(config.sources.items()):
             print(f"Source {source_name}: {source.repository} {source.ref} @ {source.revision}")
         print(f"Endpoint: {config.endpoint}")
+        for model in plan.model_preparation:
+            print(
+                f"Model: {model['model_id']} @ {model['revision']} -> {model['path']} "
+                f"({model['provider']}; download if missing)"
+            )
         print(f"Workload points: {len(config.workload_suite.points)}")
         print(
             "Profile: "

@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 import yaml
 from test_config import VALID_CONFIG, write_config
-from test_optimization_config import write_input_template
+from test_optimization_config import v3_managed_document, write_input_template
 
 import euboulia.cli as cli
 from euboulia.cli import build_parser, main
@@ -93,6 +93,34 @@ def test_target_plan_cli_inspects_dsv4_scenario_read_only() -> None:
     exit_code = main(["target", "plan", "--recipe", str(config), "--json"])
 
     assert exit_code == 0
+
+
+@pytest.mark.parametrize("json_output", [False, True])
+def test_target_plan_describes_model_download_without_creating_cache(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    json_output: bool,
+) -> None:
+    document = v3_managed_document(tmp_path)
+    cache = tmp_path / "models" / "target"
+    document["models"]["target"].update(
+        path=str(cache), model_id="example/model", download={"provider": "hf_mirror"}
+    )
+    recipe = tmp_path / "recipe.yaml"
+    recipe.write_text(yaml.safe_dump(document))
+    args = ["target", "plan", "--recipe", str(recipe)]
+    if json_output:
+        args.append("--json")
+    assert main(args) == 0
+    output = capsys.readouterr().out
+    if json_output:
+        preparation = json.loads(output)["model_preparation"][0]
+        assert preparation["model_id"] == "example/model"
+        assert preparation["provider"] == "hf_mirror"
+    else:
+        assert "example/model" in output and "download if missing" in output
+    assert not cache.parent.exists()
+    assert not (tmp_path / "artifacts").exists()
 
 
 def test_target_plan_reports_unresolved_inputs_without_writing(
@@ -228,9 +256,7 @@ def test_serve_and_control_plane_commands_have_focused_interfaces() -> None:
         ]
     )
     list_args = build_parser().parse_args(["target", "list", "--limit", "12"])
-    show_args = build_parser().parse_args(
-        ["target", "show", "run-01HF7YAT000000000000000000"]
-    )
+    show_args = build_parser().parse_args(["target", "show", "run-01HF7YAT000000000000000000"])
 
     assert serve_args.runtime_config == Path("runtime.yaml")
     assert serve_args.port == 9000

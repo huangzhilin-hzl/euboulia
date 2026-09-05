@@ -231,6 +231,27 @@ as `{source.deepgemm}`. Repository credentials remain in the local Git credentia
 helper or SSH agent and are rejected when embedded in an HTTP URL. Kubernetes workers
 receive source bundles rather than repository credentials.
 
+For model downloads, declare the actual model repository separately from its local path:
+
+```yaml
+models:
+  target:
+    model_id: ${model_id}
+    path: /models/target
+    served_name: target
+    revision: ${model_revision}
+    download:
+      provider: ${model_provider} # modelscope or hf_mirror
+      timeout_seconds: 14400
+```
+
+Declare `model_id` and `model_provider` as required string inputs and `model_revision`
+as a required `git_commit` input. The worker reuses a complete local model or downloads
+the pinned revision before preparing sources or starting SGLang. The download provider's
+SDK must be installed in the worker image; the destination must be an absolute path on
+a writable persistent volume when downloading. Planning and resolving remain read-only
+with respect to model files. Existing local-only recipes can omit `download`.
+
 `target plan` and `optimize plan` may inspect an unresolved template and report its
 missing inputs. Active runs reject missing bindings before creating events, memory,
 worktrees, or artifacts. Bind values directly with `--values`, or create a lock recipe:

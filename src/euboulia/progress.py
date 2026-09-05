@@ -16,6 +16,7 @@ RUN_PHASES = (
     "allocating",
     "pod_ready",
     "staging",
+    "preparing_models",
     "preparing_sources",
     "capturing_provenance",
     "building",
