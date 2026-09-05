@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 import sys
@@ -9,10 +10,12 @@ import pytest
 
 from euboulia.optimization.config import SourceConfig
 from euboulia.optimization.workspace import (
+    STAGED_SOURCE_REF,
     GitWorktreeWorkspace,
     PatchLimits,
     PatchRejected,
     WorkspaceAuthorizationError,
+    create_source_bundle,
     create_source_worktree,
     prepare_git_source,
 )
@@ -98,6 +101,54 @@ def test_declared_source_is_fetched_and_materialized_at_locked_revision(
     assert _git(workspace.path, "rev-parse", "HEAD").stdout.strip() == revision
     assert (workspace.path / "value.txt").read_text(encoding="utf-8") == "old\n"
     assert (prepared.evidence_dir / "source-sglang.json").is_file()
+
+
+def test_source_bundle_contains_only_the_locked_export_ref(repository: Path) -> None:
+    revision = _git(repository, "rev-parse", "HEAD").stdout.strip()
+    ref = _git(repository, "symbolic-ref", "HEAD").stdout.strip()
+    source = SourceConfig(repository=str(repository), ref=ref, revision=revision)
+    cache = repository.parent / "persistent-source-cache"
+    evidence = repository.parent / "source-evidence"
+
+    prepared = prepare_git_source("sglang", source, cache, evidence)
+    bundle = create_source_bundle(
+        prepared,
+        repository.parent / "transfer" / "sglang.bundle",
+        evidence,
+    )
+
+    heads = _git(repository, "bundle", "list-heads", str(bundle.path)).stdout.splitlines()
+    assert heads == [f"{revision} {STAGED_SOURCE_REF}"]
+    assert bundle.revision == revision
+    assert bundle.sha256
+    assert bundle.size_bytes == bundle.path.stat().st_size
+    assert bundle.path.stat().st_mode & 0o777 == 0o600
+    source_manifest = json.loads(
+        (evidence / "source-sglang.json").read_text(encoding="utf-8")
+    )
+    clone_argv = source_manifest["commands"][0]["argv"]
+    assert "--single-branch" in clone_argv
+    assert "--no-tags" in clone_argv
+
+    restored = prepare_git_source(
+        "sglang",
+        source,
+        repository.parent / "worker-cache",
+        repository.parent / "worker-evidence",
+        transport_repository=bundle.path,
+        transport_ref=bundle.ref,
+    )
+    workspace = create_source_worktree(
+        restored,
+        source,
+        repository.parent / "restored-worktree",
+    )
+    assert _git(workspace.path, "rev-parse", "HEAD").stdout.strip() == revision
+    worker_manifest = json.loads(
+        (restored.evidence_dir / "source-sglang.json").read_text(encoding="utf-8")
+    )
+    assert worker_manifest["repository"] == str(repository)
+    assert worker_manifest["transport"] == "controller_bundle"
 
 
 def test_prepare_is_read_only_and_apply_requires_explicit_authorization(

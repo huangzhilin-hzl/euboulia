@@ -13,6 +13,7 @@ import json
 import os
 import re
 import subprocess
+import tempfile
 import time
 import uuid
 from collections.abc import Mapping, Sequence
@@ -39,6 +40,9 @@ class SourcePreparationError(WorkspaceError):
     """Raised when an immutable declared source cannot be prepared."""
 
 
+STAGED_SOURCE_REF = "refs/heads/euboulia-source"
+
+
 @dataclass(frozen=True, slots=True)
 class PreparedGitSource:
     """A reusable Git repository cache pinned to a declared source revision."""
@@ -50,6 +54,18 @@ class PreparedGitSource:
     revision: str
     observed_ref_revision: str | None
     evidence_dir: Path
+
+
+@dataclass(frozen=True, slots=True)
+class SourceBundle:
+    """One exact-revision Git bundle prepared for controller-to-worker delivery."""
+
+    name: str
+    path: Path
+    ref: str
+    revision: str
+    sha256: str
+    size_bytes: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -452,6 +468,8 @@ def prepare_git_source(
     *,
     git_executable: str = "git",
     timeout_seconds: float = 300.0,
+    transport_repository: str | os.PathLike[str] | None = None,
+    transport_ref: str | None = None,
 ) -> PreparedGitSource:
     """Fetch a declared ref and immutable commit into a reusable local cache."""
 
@@ -461,6 +479,16 @@ def prepare_git_source(
     timeout = _positive_timeout(timeout_seconds)
     cache_root_path = Path(cache_root).resolve()
     evidence_path = Path(evidence_dir).resolve()
+    effective_repository = (
+        source.repository
+        if transport_repository is None
+        else os.fspath(transport_repository)
+    )
+    effective_ref = source.ref if transport_ref is None else transport_ref
+    if (transport_repository is None) != (transport_ref is None):
+        raise ValueError("transport_repository and transport_ref must be supplied together")
+    if not effective_ref.startswith(("refs/heads/", "refs/tags/")):
+        raise ValueError("transport_ref must be a full branch or tag ref")
     cache_key = hashlib.sha256(source.repository.encode("utf-8")).hexdigest()[:16]
     repository_path = cache_root_path / f"{name}-{cache_key}"
     cache_root_path.mkdir(parents=True, exist_ok=True)
@@ -471,25 +499,27 @@ def prepare_git_source(
     with lock_path.open("a+b") as lock_file:
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
         if not repository_path.exists():
-            clone_ref = source.ref.split("/", maxsplit=2)[-1]
+            clone_ref = effective_ref.split("/", maxsplit=2)[-1]
             cloned = _run_command(
                 [
                     git_executable,
                     "clone",
                     "--no-checkout",
                     "--single-branch",
+                    "--no-tags",
                     "--branch",
                     clone_ref,
                     "--origin",
                     "origin",
                     "--",
-                    source.repository,
+                    effective_repository,
                     str(repository_path),
                 ],
                 cwd=cache_root_path,
                 evidence_dir=evidence_path,
                 label=f"source-{name}-clone",
                 timeout_seconds=timeout,
+                env_overrides=_git_auth_env(),
             )
             commands.append(cloned)
             if not cloned.succeeded:
@@ -514,18 +544,49 @@ def prepare_git_source(
                 _command_failure(f"source {name!r} cache validation failed", origin)
             )
         observed_origin = _read_single_line(origin.stdout_path, f"source {name!r} origin")
-        if observed_origin != source.repository:
-            raise SourcePreparationError(
-                f"source {name!r} cache origin mismatch: expected {source.repository!r}, "
-                f"observed {observed_origin!r}"
+        if observed_origin != effective_repository:
+            if transport_repository is None:
+                raise SourcePreparationError(
+                    f"source {name!r} cache origin mismatch: expected {source.repository!r}, "
+                    f"observed {observed_origin!r}"
+                )
+            changed_origin = _run_command(
+                [
+                    git_executable,
+                    "-C",
+                    str(repository_path),
+                    "remote",
+                    "set-url",
+                    "origin",
+                    effective_repository,
+                ],
+                cwd=repository_path,
+                evidence_dir=evidence_path,
+                label=f"source-{name}-set-transport",
+                timeout_seconds=timeout,
             )
+            commands.append(changed_origin)
+            if not changed_origin.succeeded:
+                raise SourcePreparationError(
+                    _command_failure(f"source {name!r} transport update failed", changed_origin)
+                )
 
         fetched_ref = _run_command(
-            [git_executable, "-C", str(repository_path), "fetch", "--force", "origin", source.ref],
+            [
+                git_executable,
+                "-C",
+                str(repository_path),
+                "fetch",
+                "--no-tags",
+                "--force",
+                "origin",
+                effective_ref,
+            ],
             cwd=repository_path,
             evidence_dir=evidence_path,
             label=f"source-{name}-fetch-ref",
             timeout_seconds=timeout,
+            env_overrides=_git_auth_env(),
         )
         commands.append(fetched_ref)
         if not fetched_ref.succeeded:
@@ -563,6 +624,7 @@ def prepare_git_source(
                     "-C",
                     str(repository_path),
                     "fetch",
+                    "--no-tags",
                     "--force",
                     "origin",
                     source.revision,
@@ -571,6 +633,7 @@ def prepare_git_source(
                 evidence_dir=evidence_path,
                 label=f"source-{name}-fetch-revision",
                 timeout_seconds=timeout,
+                env_overrides=_git_auth_env(),
             )
             commands.append(fetched_revision)
             if not fetched_revision.succeeded:
@@ -601,6 +664,7 @@ def prepare_git_source(
         "revision": source.revision,
         "observed_ref_revision": observed_ref_revision,
         "ref_matches_revision": observed_ref_revision == source.revision,
+        "transport": "controller_bundle" if transport_repository is not None else "git",
         "cache": str(repository_path),
         "commands": [command.to_dict() for command in commands],
     }
@@ -617,6 +681,141 @@ def prepare_git_source(
         observed_ref_revision=observed_ref_revision,
         evidence_dir=evidence_path,
     )
+
+
+def create_source_bundle(
+    prepared: PreparedGitSource,
+    destination: str | os.PathLike[str],
+    evidence_dir: str | os.PathLike[str],
+    *,
+    git_executable: str = "git",
+    timeout_seconds: float = 300.0,
+) -> SourceBundle:
+    """Create a full, exact-revision bundle without exporting unrelated refs or tags."""
+
+    _validate_executable(git_executable, "git_executable")
+    timeout = _positive_timeout(timeout_seconds)
+    destination_path = Path(destination).resolve()
+    evidence_path = Path(evidence_dir).resolve()
+    destination_path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+    evidence_path.mkdir(parents=True, mode=0o700, exist_ok=True)
+    if destination_path.exists() or destination_path.is_symlink():
+        raise SourcePreparationError(
+            f"source bundle destination already exists: {destination_path}"
+        )
+
+    commands: list[CommandEvidence] = []
+    with tempfile.TemporaryDirectory(
+        prefix=f".{prepared.name}-bundle-",
+        dir=destination_path.parent,
+    ) as temporary:
+        export_repository = Path(temporary) / "repository.git"
+        cloned = _run_command(
+            [
+                git_executable,
+                "clone",
+                "--bare",
+                "--shared",
+                "--no-tags",
+                "--",
+                str(prepared.repository),
+                str(export_repository),
+            ],
+            cwd=destination_path.parent,
+            evidence_dir=evidence_path,
+            label=f"source-{prepared.name}-bundle-clone",
+            timeout_seconds=timeout,
+        )
+        commands.append(cloned)
+        if not cloned.succeeded:
+            raise SourcePreparationError(
+                _command_failure(f"source {prepared.name!r} bundle clone failed", cloned)
+            )
+        pinned = _run_command(
+            [
+                git_executable,
+                "-C",
+                str(export_repository),
+                "update-ref",
+                STAGED_SOURCE_REF,
+                prepared.revision,
+            ],
+            cwd=export_repository,
+            evidence_dir=evidence_path,
+            label=f"source-{prepared.name}-bundle-ref",
+            timeout_seconds=timeout,
+        )
+        commands.append(pinned)
+        if not pinned.succeeded:
+            raise SourcePreparationError(
+                _command_failure(f"source {prepared.name!r} bundle ref failed", pinned)
+            )
+        bundled = _run_command(
+            [
+                git_executable,
+                "-C",
+                str(export_repository),
+                "bundle",
+                "create",
+                str(destination_path),
+                STAGED_SOURCE_REF,
+            ],
+            cwd=export_repository,
+            evidence_dir=evidence_path,
+            label=f"source-{prepared.name}-bundle-create",
+            timeout_seconds=timeout,
+        )
+        commands.append(bundled)
+        if not bundled.succeeded:
+            raise SourcePreparationError(
+                _command_failure(f"source {prepared.name!r} bundle creation failed", bundled)
+            )
+
+    destination_path.chmod(0o600)
+    head = _git_output(
+        prepared.repository,
+        evidence_path,
+        f"source-{prepared.name}-bundle-head",
+        timeout,
+        git_executable,
+        "bundle",
+        "list-heads",
+        str(destination_path),
+        STAGED_SOURCE_REF,
+        commands=commands,
+    )
+    fields = head.split(maxsplit=1) if head is not None else []
+    if len(fields) != 2 or fields[0] != prepared.revision or fields[1] != STAGED_SOURCE_REF:
+        raise SourcePreparationError(
+            f"source {prepared.name!r} bundle does not contain the locked revision"
+        )
+    digest = _file_sha256(destination_path)
+    bundle = SourceBundle(
+        name=prepared.name,
+        path=destination_path,
+        ref=STAGED_SOURCE_REF,
+        revision=prepared.revision,
+        sha256=digest,
+        size_bytes=destination_path.stat().st_size,
+    )
+    (evidence_path / f"source-{prepared.name}-bundle.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "name": bundle.name,
+                "ref": bundle.ref,
+                "revision": bundle.revision,
+                "sha256": bundle.sha256,
+                "size_bytes": bundle.size_bytes,
+                "commands": [command.to_dict() for command in commands],
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return bundle
 
 
 def create_source_worktree(
@@ -764,6 +963,20 @@ def _patch_bytes(patch: str | bytes) -> bytes:
     raise TypeError("patch must be text or bytes")
 
 
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _git_auth_env() -> Mapping[str, str | None]:
+    """Expose an existing local SSH agent only to Git source transport commands."""
+
+    return {"SSH_AUTH_SOCK": os.environ.get("SSH_AUTH_SOCK")}
+
+
 def _run_command(
     argv: Sequence[str],
     *,
@@ -890,6 +1103,7 @@ def _command_failure(prefix: str, evidence: CommandEvidence) -> str:
 
 
 __all__ = [
+    "STAGED_SOURCE_REF",
     "CommandEvidence",
     "GitWorktreeWorkspace",
     "IsolatedPatchWorkspace",
@@ -898,6 +1112,11 @@ __all__ = [
     "PatchLimits",
     "PatchRejected",
     "PreparedPatch",
+    "SourceBundle",
+    "SourcePreparationError",
     "WorkspaceAuthorizationError",
     "WorkspaceError",
+    "create_source_bundle",
+    "create_source_worktree",
+    "prepare_git_source",
 ]
