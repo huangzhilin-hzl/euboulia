@@ -24,6 +24,7 @@ from euboulia.optimization.config import (
     require_optimization_execution_lock,
     resolve_optimization_config,
 )
+from euboulia.optimization.runner import _evaluation_plan
 
 VALID_CONFIG = """
 schema_version: 2
@@ -489,6 +490,25 @@ def test_loads_exact_dsv4_megamoe_target_validation_scenario(tmp_path: Path) -> 
     assert parallelism["tp_size"] == 8
     assert parallelism["enable_prefill_cp"] is True
     assert parallelism["cp_strategy"] == "interleave"
+    # Profile warmup/capture and qualification compile separate command plans.
+    # Both must carry the chosen dataset endpoint through to their child process.
+    expected_endpoint = "https://hf-mirror.com"
+    for qualification in (False, True):
+        plan = _evaluation_plan(
+            config,
+            "dataset-endpoint",
+            tmp_path,
+            point=config.workload_suite.points[-1],
+            metrics_path=Path("metrics.json"),
+            baseline_value=None,
+            apply_promotion_gate=False,
+            include_checks=qualification,
+            include_accuracy=qualification,
+        )
+        assert plan.benchmark.command.env_overrides["HF_ENDPOINT"] == expected_endpoint
+        if qualification:
+            assert plan.accuracy_check is not None
+            assert plan.accuracy_check.command.env_overrides["HF_ENDPOINT"] == expected_endpoint
 
 
 def test_load_v3_normalizes_models_suite_runtime_and_derives_launch_facets(
