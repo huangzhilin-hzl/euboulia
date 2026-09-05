@@ -11,6 +11,7 @@ from euboulia.cli import build_parser, main
 from euboulia.control import ControlStore
 from euboulia.optimization.config import load_optimization_config
 from euboulia.optimization.events import EventLedger, EventType, OptimizationEvent
+from euboulia.optimization.profiling import ProfileCaptureError
 from euboulia.remote import OwnedPod
 
 
@@ -192,6 +193,19 @@ def test_target_run_rejects_unresolved_template_before_artifact_write(
     assert exit_code == 2
     assert "missing required input binding" in capsys.readouterr().err
     assert not (tmp_path / "artifacts").exists()
+
+
+def test_target_cli_reports_profile_failure_as_expected_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def fail(args: object) -> int:
+        raise ProfileCaptureError("SGLang profile control /start_profile failed: HTTP 500")
+
+    monkeypatch.setattr(cli, "_target_run", fail)
+    assert main(["target", "run", "--recipe", str(tmp_path / "unused.yaml"), "--json"]) == 2
+    output = capsys.readouterr()
+    assert "euboulia: error: SGLang profile control" in output.err
+    assert "Traceback" not in output.err
 
 
 def test_optimize_plan_allows_template_but_run_requires_bindings(

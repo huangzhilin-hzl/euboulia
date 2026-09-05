@@ -152,6 +152,9 @@ fresh result, byte for byte, to the declared result path. Missing or ambiguous o
 fails the check. For GSM8K it inherits the installed task configuration and uses the
 canonical `openai/gsm8k` dataset ID, preserving prompts, splits, filters, and metrics.
 The configured 200-item limit, eight examples, and accuracy threshold remain unchanged.
+Bounded profiling waits for SGLang to automatically stop after `num_steps` and flush
+the rank traces. It sends `/stop_profile` only when cleaning up an incomplete capture;
+a cleanup failure does not replace the original workload or trace failure.
 Worktree creation and submodule command evidence is also copied to
 `target-validation/sources/worktrees/<source>/`, including failed preparation attempts,
 so the Git error logs are synchronized before the owned Pod is cleaned up.

@@ -1,6 +1,10 @@
 import gzip
+import io
 import json
+from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
+from urllib.error import HTTPError
 
 import pytest
 
@@ -19,6 +23,16 @@ class _LocalProfiler(SGLangProfiler):
         if path == "/start_profile":
             self.start_payload = payload
             self.raw_dir = Path(str(payload["output_dir"]))
+
+
+class _AutoStoppingProfiler(_LocalProfiler):
+    stop_calls = 0
+
+    def _post_json(self, endpoint: str, path: str, payload: dict[str, object]) -> None:
+        if path == "/stop_profile":
+            self.stop_calls += 1
+            raise ProfileCaptureError("HTTP 500: Profiling is not in progress")
+        super()._post_json(endpoint, path, payload)
 
 
 def _trace(path: Path, *, kernel: str = "fp8_mxfp4_mega_moe") -> None:
@@ -87,7 +101,7 @@ def _config(**overrides: object) -> SGLangProfilingConfig:
 def test_active_profiler_streams_summary_validates_ranks_and_evicts_raw(
     tmp_path: Path,
 ) -> None:
-    profiler = _LocalProfiler(_config())
+    profiler = _AutoStoppingProfiler(_config())
 
     def workload() -> ExecutionResult:
         assert profiler.raw_dir is not None
@@ -104,6 +118,7 @@ def test_active_profiler_streams_summary_validates_ranks_and_evicts_raw(
     report = RuleAnalyzer(profiler).analyze(profile, (), _context(tmp_path))
 
     assert profile.provider == "sglang_torch"
+    assert profiler.stop_calls == 0
     assert profiler.start_payload is not None
     assert profiler.start_payload["num_steps"] == 3
     assert profiler.start_payload["with_stack"] is False
@@ -115,6 +130,48 @@ def test_active_profiler_streams_summary_validates_ranks_and_evicts_raw(
     assert (tmp_path / "profile/summary.json").is_file()
     assert (tmp_path / "profile/manifest.json").is_file()
     assert any(finding.category == "launch" for finding in report.findings)
+
+
+def test_cleanup_stop_failure_does_not_mask_failed_workload(tmp_path: Path) -> None:
+    profiler = _AutoStoppingProfiler(_config())
+    with pytest.raises(ProfileCaptureError, match="profile workload failed"):
+        profiler.capture(
+            ProfileRequest("champion", "abc", "workload", max_bytes=1_000_000),
+            _context(tmp_path),
+            endpoint="http://127.0.0.1:30000",
+            run_workload=lambda: replace(_execution(tmp_path), returncode=7),
+        )
+    assert profiler.stop_calls == 1
+
+
+def test_missing_auto_stop_traces_fail_and_attempt_cleanup(tmp_path: Path) -> None:
+    profiler = _AutoStoppingProfiler(_config(settle_timeout_seconds=0.01))
+    with pytest.raises(ProfileCaptureError, match="produced no trace"):
+        profiler.capture(
+            ProfileRequest("champion", "abc", "workload", max_bytes=1_000_000),
+            _context(tmp_path),
+            endpoint="http://127.0.0.1:30000",
+            run_workload=lambda: _execution(tmp_path),
+        )
+    assert profiler.stop_calls == 1
+
+
+def test_profile_control_error_includes_bounded_response_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail(*args: object, **kwargs: object) -> None:
+        raise HTTPError(
+            "http://localhost/start_profile", 500, "Internal Server Error", {},
+            io.BytesIO(b"Profiling already active " + b"x" * 5000),
+        )
+
+    monkeypatch.setattr(
+        "euboulia.optimization.profiling.build_opener",
+        lambda *args: SimpleNamespace(open=fail),
+    )
+    with pytest.raises(ProfileCaptureError, match="Profiling already active") as raised:
+        SGLangProfiler(_config())._post_json("http://localhost", "/start_profile", {})
+    assert len(str(raised.value)) < 4300
 
 
 def test_active_profiler_keeps_failed_capture_for_diagnosis(tmp_path: Path) -> None:
