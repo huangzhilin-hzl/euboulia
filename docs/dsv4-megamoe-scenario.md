@@ -138,6 +138,9 @@ installs SGLang editable with `--no-deps`, and installs DeepGEMM from its own wo
 DeepGEMM declares `submodules: true` so its pinned CUTLASS and fmt dependencies are
 initialized before the build. Its installer runs with `bash -e -o pipefail` so a failed
 wheel build or installation stops the run instead of being hidden by a later command.
+Worktree creation and submodule command evidence is also copied to
+`target-validation/sources/worktrees/<source>/`, including failed preparation attempts,
+so the Git error logs are synchronized before the owned Pod is cleaned up.
 After changing the recipe, regenerate the experiment lock before submitting a new run;
 existing submission and run artifacts retain the original contract.
 Euboulia starts a new process group and can stop only
