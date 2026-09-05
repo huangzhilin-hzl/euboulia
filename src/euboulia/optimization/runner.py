@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import shutil
 import uuid
 from collections.abc import Callable, Mapping
 from contextlib import suppress
@@ -476,10 +477,18 @@ class OptimizationRunner:
         write_run_progress(
             config.execution.artifacts_dir,
             selected_run_uid,
-            status="completed",
-            phase="completed",
-            detail="baseline validation evidence is complete",
-            completed_units=qualification_points,
+            status="completed" if result.passed else "failed",
+            phase="completed" if result.passed else "failed",
+            detail=(
+                "baseline validation passed"
+                if result.passed
+                else "baseline validation failed; inspect the recorded evaluation gates"
+            ),
+            completed_units=(
+                len(evaluation.point_results)
+                if isinstance(evaluation, WorkloadSuiteEvaluationResult)
+                else 1
+            ),
             total_units=qualification_points,
         )
         return result
@@ -1746,15 +1755,20 @@ class OptimizationRunner:
                 transport_ref=transport_ref,
             )
 
+        def materialize_source(source_name: str, root: Path) -> GitWorktreeWorkspace:
+            try:
+                return create_source_worktree(
+                    prepared_sources[source_name],
+                    config.sources[source_name],
+                    root,
+                    timeout_seconds=workspace_config.timeout_seconds,
+                )
+            finally:
+                _preserve_workspace_evidence(root, source_evidence / "worktrees" / source_name)
+
         if workspace_config.source is not None:
             primary_name = workspace_config.source
-            prepared_primary = prepared_sources[primary_name]
-            primary = create_source_worktree(
-                prepared_primary,
-                config.sources[primary_name],
-                role_root / role,
-                timeout_seconds=workspace_config.timeout_seconds,
-            )
+            primary = materialize_source(primary_name, role_root / role)
             source_paths[primary_name] = primary.path
         else:
             if workspace_config.repository is None:  # protected by config parsing
@@ -1768,14 +1782,11 @@ class OptimizationRunner:
                 timeout_seconds=workspace_config.timeout_seconds,
             )
 
-        for source_name, prepared in prepared_sources.items():
+        for source_name in prepared_sources:
             if source_name == workspace_config.source:
                 continue
-            dependency = create_source_worktree(
-                prepared,
-                config.sources[source_name],
-                role_root / f"{role}-sources" / source_name,
-                timeout_seconds=workspace_config.timeout_seconds,
+            dependency = materialize_source(
+                source_name, role_root / f"{role}-sources" / source_name
             )
             source_paths[source_name] = dependency.path
 
@@ -2438,6 +2449,14 @@ def _service_artifacts(handle: ServiceHandle) -> tuple[ArtifactRef, ...]:
         if path.is_file() and not path.is_symlink():
             artifacts.append(_artifact_ref(path, label))
     return tuple(artifacts)
+
+
+def _preserve_workspace_evidence(root: Path, destination: Path) -> None:
+    """Retain source/worktree diagnostics in the run even when preparation fails."""
+
+    evidence = root / "evidence"
+    if evidence.is_dir():
+        shutil.copytree(evidence, destination, dirs_exist_ok=True)
 
 
 def _preserve_service_log(handle: ServiceHandle, artifact_dir: Path) -> None:

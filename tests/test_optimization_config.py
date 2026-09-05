@@ -24,6 +24,7 @@ from euboulia.optimization.config import (
     require_optimization_execution_lock,
     resolve_optimization_config,
 )
+from euboulia.optimization.runner import _evaluation_plan
 
 VALID_CONFIG = """
 schema_version: 2
@@ -416,7 +417,7 @@ def test_loads_exact_dsv4_megamoe_target_validation_scenario(tmp_path: Path) -> 
     performance_command = config.optimization.evaluation.tiers[-1].commands[0]
     assert config.benchmark.parameters == {
         "seed": 1,
-        "random_range_ratio": 0,
+        "random_range_ratio": 1,
         "flush_cache": True,
     }
     assert "EUBOULIA_BENCHMARK_SEED" not in performance_command.env
@@ -429,7 +430,12 @@ def test_loads_exact_dsv4_megamoe_target_validation_scenario(tmp_path: Path) -> 
     assert lanes.fast.stability.max_windows == 4
     accuracy = config.optimization.evaluation.accuracy
     assert accuracy is not None
-    assert accuracy.command.argv[:3] == ("python3", "-m", "lm_eval")
+    assert accuracy.command.argv[:3] == (
+        "{workspace}/.euboulia-lm-eval/bin/python", "-m", "euboulia.harnesses.lm_eval"
+    )
+    assert accuracy.command.argv[accuracy.command.argv.index("--gsm8k-dataset-path") + 1] == (
+        "openai/gsm8k"
+    )
     assert accuracy.command.argv[accuracy.command.argv.index("--model") + 1] == (
         "local-chat-completions"
     )
@@ -464,6 +470,7 @@ def test_loads_exact_dsv4_megamoe_target_validation_scenario(tmp_path: Path) -> 
     assert config.optimization.workspace.source == "sglang"
     assert config.optimization.workspace.repository is None
     assert config.target.build is not None
+    assert config.target.build.commands[1].argv[-1] == "0.4.9.2"
     assert "{source.deepgemm}" in config.target.build.commands[-1].argv
     assert config.target.runtime.expected.components["sglang"].source == "sglang"
     assert config.target.runtime.expected.components["sglang"].path is None
@@ -489,6 +496,28 @@ def test_loads_exact_dsv4_megamoe_target_validation_scenario(tmp_path: Path) -> 
     assert parallelism["tp_size"] == 8
     assert parallelism["enable_prefill_cp"] is True
     assert parallelism["cp_strategy"] == "interleave"
+    # Profile warmup/capture and qualification compile separate command plans.
+    # Both must carry the chosen dataset endpoint through to their child process.
+    expected_endpoint = "https://hf-mirror.com"
+    for qualification in (False, True):
+        plan = _evaluation_plan(
+            config,
+            "dataset-endpoint",
+            tmp_path,
+            point=config.workload_suite.points[-1],
+            metrics_path=Path("metrics.json"),
+            baseline_value=None,
+            apply_promotion_gate=False,
+            include_checks=qualification,
+            include_accuracy=qualification,
+        )
+        assert plan.benchmark.command.env_overrides["HF_ENDPOINT"] == expected_endpoint
+        if qualification:
+            assert plan.accuracy_check is not None
+            assert plan.accuracy_check.command.env_overrides["HF_ENDPOINT"] == expected_endpoint
+            assert plan.accuracy_check.command.argv[0] == str(
+                tmp_path / ".euboulia-lm-eval" / "bin" / "python"
+            )
 
 
 def test_load_v3_normalizes_models_suite_runtime_and_derives_launch_facets(

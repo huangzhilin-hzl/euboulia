@@ -16,8 +16,8 @@ provide:
   image, with network access to ModelScope or HF Mirror when the local model is missing;
 - the local controller can authenticate to every private repository through its Git
   credential helper or SSH agent; credentials must not appear in values or the lock;
-- `lm_eval` with API extras is installed in the image at the exact version selected
-  in the values file; and
+- Python's `venv` and pip support, plus package-index access for the pinned
+  `lm_eval` installation; and
 - volumes, GPU resources, tolerations, image-pull secrets, and other cluster policy
   needed by the selected node.
 
@@ -46,6 +46,14 @@ HF Mirror uses the [Hugging Face download API](https://huggingface.co/docs/huggi
 with `HF_ENDPOINT=https://hf-mirror.com` and an explicit endpoint. Install the selected
 SDK in the worker image before running; Euboulia does not install packages implicitly.
 
+The recipe also sets `HF_ENDPOINT=https://hf-mirror.com` explicitly in the performance
+harness (including profile warmup and capture) and in `lm_eval` for GSM8K. The pinned
+SGLang implementation of `dataset: random` still downloads ShareGPT text, so a complete
+local model alone does not make evaluation independent of network access. If another
+Hugging Face endpoint is required, change both command environments in the recipe
+before regenerating the lock. The model download provider does not change these
+dataset settings.
+
 The checked-in recipe is intentionally unresolved. Create a local values file with the
 immutable image reference and exact SGLang commit supplied by the user or deployment
 platform:
@@ -55,7 +63,7 @@ container_image: acr.example/sglang/deepep-base@sha256:<64-hex-digest>
 deepgemm_repository: https://github.com/example/DeepGEMM.git
 deepgemm_ref: refs/heads/my-deepgemm-branch
 deepgemm_revision: <40-or-64-hex-commit>
-lm_eval_version: <installed-lm-evaluation-harness-version>
+lm_eval_version: <exact-lm-evaluation-harness-version>
 model_id: <owner/model-repository>
 model_provider: modelscope # or hf_mirror
 model_revision: <40-or-64-hex-model-revision>
@@ -70,6 +78,14 @@ fetch, `ref` records the selected branch or tag, and `revision` is the immutable
 that is actually executed. The two repositories and refs are independent.
 
 ## Execution boundary
+
+Workers persist their process identity and final result in `worker-state.json`, then
+index the complete evidence before acknowledging the controller. If `kubectl exec`
+ends early, the controller checks that durable state and continues observing the same
+worker while it remains alive or the connection is unavailable. It retains the original
+transport logs separately from the recovered result. Failed qualification records show
+the number of points actually executed; a failed point does not count skipped points
+as completed.
 
 Inspect the template and its missing bindings without side effects:
 
@@ -130,6 +146,26 @@ installs SGLang editable with `--no-deps`, and installs DeepGEMM from its own wo
 DeepGEMM declares `submodules: true` so its pinned CUTLASS and fmt dependencies are
 initialized before the build. Its installer runs with `bash -e -o pipefail` so a failed
 wheel build or installation stops the run instead of being hidden by a later command.
+The build also creates a workspace-local virtual environment with access to the image's
+installed packages, installs `lm_eval[api]` at the selected exact version into that
+environment with Transformers 4.57.6 and its compatible optional kernels package 0.11.7,
+and imports its evaluator and model registry before starting the GPU service. These pins
+preserve APIs removed by Transformers 5 and avoid inheriting incompatible image packages.
+Additional evaluator dependencies remain in that environment; the SGLang Python
+environment is unchanged.
+
+Accuracy runs through `euboulia.harnesses.lm_eval`, a thin launcher for the external CLI.
+It keeps lm-eval's timestamped raw output under command evidence and copies the single
+fresh result, byte for byte, to the declared result path. Missing or ambiguous output
+fails the check. For GSM8K it inherits the installed task configuration and uses the
+canonical `openai/gsm8k` dataset ID, preserving prompts, splits, filters, and metrics.
+The configured 200-item limit, eight examples, and accuracy threshold remain unchanged.
+Bounded profiling waits for SGLang to automatically stop after `num_steps` and flush
+the rank traces. It sends `/stop_profile` only when cleaning up an incomplete capture;
+a cleanup failure does not replace the original workload or trace failure.
+Worktree creation and submodule command evidence is also copied to
+`target-validation/sources/worktrees/<source>/`, including failed preparation attempts,
+so the Git error logs are synchronized before the owned Pod is cleaned up.
 After changing the recipe, regenerate the experiment lock before submitting a new run;
 existing submission and run artifacts retain the original contract.
 Euboulia starts a new process group and can stop only
@@ -151,8 +187,11 @@ windows are within 2%. Target validation uses the complete 30-point
 three-round-per-point report path has been removed.
 
 Performance requests use SGLang's standard `random` dataset with fixed ISL/OSL,
-`random_range_ratio=0`, and seed 1. SGLang generates the requests at benchmark time;
-there is no scenario-specific dataset preparation or manifest format.
+`random_range_ratio=1`, and seed 1. SGLang's ratio is the minimum sampled fraction:
+zero samples from 1 through the target length, while one fixes both lengths at their
+declared values. The harness requires per-request `input_lens` and `output_lens` to
+match the point before accepting its metrics. SGLang generates the requests at benchmark
+time; there is no scenario-specific dataset preparation or manifest format.
 
 ## Fail-closed gates
 
@@ -183,8 +222,8 @@ owned service logs, per-command evidence, and these files:
 - `profile/summary.json` and `profile/manifest.json`;
 - per-point `evaluation.json` and `benchmark-windows.json`;
 - the generic `evaluation-summary.json` for the complete lane;
-- `euboulia-accuracy.json`, produced directly by external `lm_eval` during
-  qualification.
+- `euboulia-accuracy.json`, copied unchanged from the external `lm_eval` result during
+  qualification, with the timestamped original retained under accuracy command evidence.
 
 Required artifacts are synchronized before the ephemeral Pod is deleted. With the
 default `raw_profiles: on_demand` policy, the exact owned Pod is retained only when its
