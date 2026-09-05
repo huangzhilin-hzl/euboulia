@@ -30,6 +30,7 @@ from euboulia.optimization.evaluator import EvaluationError
 from euboulia.optimization.events import EventLedger, EventLedgerCorruptionError
 from euboulia.optimization.memory import MemoryConflictError
 from euboulia.optimization.planner import PatchCatalogError
+from euboulia.optimization.profiling import ProfileCaptureError
 from euboulia.optimization.runner import OptimizationRunner, OptimizationRuntimeError
 from euboulia.optimization.target import TargetError
 from euboulia.optimization.workspace import WorkspaceError
@@ -902,6 +903,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         OptimizationConfigError,
         OptimizationRuntimeError,
         PatchCatalogError,
+        ProfileCaptureError,
         TargetError,
         TypeError,
         ValueError,
