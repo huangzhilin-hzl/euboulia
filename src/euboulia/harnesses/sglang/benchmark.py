@@ -36,7 +36,7 @@ class BenchmarkSettings:
     metrics_path: Path
     request_rate: str | float = "inf"
     backend: str = "sglang"
-    random_range_ratio: float = 0.0
+    random_range_ratio: float = 1.0
     seed: int = 42
     flush_cache: bool = True
     module: str = "sglang.bench_serving"
@@ -69,7 +69,7 @@ class BenchmarkSettings:
             metrics_path=Path(values.get("EUBOULIA_METRICS_PATH", "euboulia-result.json")),
             request_rate=_request_rate(values, "EUBOULIA_REQUEST_RATE", "inf"),
             backend=values.get("EUBOULIA_SGLANG_BENCHMARK_BACKEND", "sglang"),
-            random_range_ratio=_parameter_ratio(parameters, "random_range_ratio", 0.0),
+            random_range_ratio=_parameter_ratio(parameters, "random_range_ratio", 1.0),
             seed=_parameter_nonnegative_int(parameters, "seed", 42),
             flush_cache=_parameter_bool(parameters, "flush_cache", True),
             module=values.get("EUBOULIA_SGLANG_BENCHMARK_MODULE", "sglang.bench_serving"),
@@ -244,6 +244,20 @@ def _validate_sample(
         or float(throughput) <= 0
     ):
         raise BenchmarkHarnessError(f"{label} has invalid output_throughput")
+    if settings.dataset in {"random", "random-ids"} and settings.random_range_ratio == 1.0:
+        for key, expected in (
+            ("input_lens", settings.input_tokens),
+            ("output_lens", settings.output_tokens),
+        ):
+            lengths = sample.get(key)
+            if not isinstance(lengths, list) or len(lengths) != settings.num_prompts:
+                raise BenchmarkHarnessError(
+                    f"{label} must report {settings.num_prompts} values in {key}"
+                )
+            if any(isinstance(value, bool) or value != expected for value in lengths):
+                raise BenchmarkHarnessError(
+                    f"{label} {key} must all equal the declared length {expected}"
+                )
 
 
 def _aggregate_numeric_metrics(

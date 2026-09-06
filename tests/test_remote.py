@@ -710,9 +710,7 @@ def test_controller_source_delivery_uses_persistent_cache_and_exact_bundle(
     assert bundles["sglang"].revision == revision
     assert any((storage.root / "source-cache").iterdir())
     manifest = json.loads(
-        (local_run_dir / "control/source-delivery/source-delivery.json").read_text(
-            encoding="utf-8"
-        )
+        (local_run_dir / "control/source-delivery/source-delivery.json").read_text(encoding="utf-8")
     )
     assert manifest["transport"] == "controller_bundle"
     assert manifest["sources"]["sglang"]["revision"] == revision
@@ -930,6 +928,16 @@ def test_remote_worker_keeps_the_selected_kubeconfig_environment(
     monkeypatch.setattr(remote, "CommandExecutor", FakeExecutor)
     monkeypatch.setattr(supervisor, "_mirror_worker_progress", lambda *args: None)
     monkeypatch.setattr(supervisor, "_mirror_service_logs", lambda *args: None)
+    monkeypatch.setattr(
+        supervisor,
+        "_observe_worker",
+        lambda *args: {
+            "run_uid": supervisor._pod.run_uid,
+            "state": "finished",
+            "returncode": 0,
+            "result": {"passed": True, "run_uid": supervisor._pod.run_uid},
+        },
+    )
 
     result = supervisor._run_worker(
         PurePosixPath("/scratch/runs/run-01HF7YAT000000000000000000/recipe.lock.yaml"),
@@ -949,6 +957,157 @@ def test_remote_worker_keeps_the_selected_kubeconfig_environment(
     assert isinstance(argv, list)
     source_root_index = argv.index("--internal-source-bundles-root")
     assert argv[source_root_index + 1] == "/scratch/source-bundles/run-test"
+
+
+@pytest.mark.parametrize("worker_code", [0, 1, 2])
+def test_worker_result_survives_lost_exec_stream(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, worker_code: int
+) -> None:
+    supervisor = remote.KubernetesTargetSupervisor(
+        _executor(tmp_path), remote.LocalStorageConfig(root=tmp_path / "results")
+    )
+    uid = "run-01HF7YAT000000000000000000"
+    stdout, stderr = tmp_path / "stdout", tmp_path / "stderr"
+    stdout.write_text("")
+    stderr.write_text("transport disconnected")
+    transport = ExecutionResult(
+        "transport",
+        ("kubectl", "exec"),
+        None,
+        0,
+        "2026-09-05T07:00:00Z",
+        "2026-09-05T07:02:00Z",
+        120,
+        stdout,
+        stderr,
+        (),
+    )
+    payload = {"run_uid": uid, "passed": worker_code == 0}
+    states = iter(
+        [
+            None,  # Transport failure cannot establish worker completion.
+            {"run_uid": uid, "state": "running"},
+            {
+                "run_uid": uid,
+                "state": "finished",
+                "returncode": worker_code,
+                "result": payload if worker_code != 2 else None,
+                "error": "build failed" if worker_code == 2 else None,
+            },
+        ]
+    )
+    monkeypatch.setattr(supervisor, "_observe_worker", lambda *args: next(states))
+    monkeypatch.setattr(supervisor, "_mirror_worker_progress", lambda *args: None)
+    monkeypatch.setattr(supervisor, "_mirror_service_logs", lambda *args: None)
+    sleeps = []
+    monkeypatch.setattr(remote.time, "sleep", sleeps.append)
+    result = supervisor._recover_worker_result(transport, PurePosixPath("/run"), tmp_path, uid)
+    assert sleeps == [5, 5]
+    assert result.returncode == worker_code
+    assert result.error == ("build failed" if worker_code == 2 else None)
+    assert json.loads(result.stdout_path.read_text()) == (payload if worker_code != 2 else {})
+    assert stdout.read_text() == ""
+    assert stderr.read_text() == "transport disconnected"
+    assert (
+        json.loads((tmp_path / "control/pod-worker-transport.json").read_text())["returncode"] == 0
+    )
+
+
+@pytest.mark.parametrize(
+    "process_state,start_ticks,expected",
+    [
+        ("S", "123", "running"),
+        ("Z", "123", "failed"),
+        ("S", "999", "failed"),
+    ],
+)
+def test_worker_observation_checks_process_identity_and_zombies(
+    tmp_path: Path, process_state: str, start_ticks: str, expected: str
+) -> None:
+    uid = "run-01HF7YAT000000000000000000"
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "worker-state.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "run_uid": uid,
+                "state": "running",
+                "pid": 65,
+                "start_ticks": "123",
+            }
+        )
+    )
+    proc = tmp_path / "proc/65"
+    proc.mkdir(parents=True)
+    (proc / "stat").write_text(
+        "65 (python worker) " + " ".join([process_state, *(["0"] * 18), start_ticks])
+    )
+    assert remote.observe_worker(run_dir, uid, proc_root=proc.parent)["state"] == expected
+    (proc / "stat").unlink()
+    assert remote.observe_worker(run_dir, uid, proc_root=proc.parent)["state"] == "failed"
+
+
+def test_worker_completion_requires_index_and_matches_run_uid(tmp_path: Path) -> None:
+    uid = "run-01HF7YAT000000000000000000"
+    payload = {"run_uid": uid, "passed": False}
+    remote.write_worker_state(tmp_path, uid, returncode=1, result=payload)
+    proc = tmp_path / "proc"
+    proc.mkdir()
+    assert remote.observe_worker(tmp_path, uid, proc_root=proc)["state"] == "failed"
+    remote.write_worker_artifact_index(tmp_path, uid)
+    observed = remote.observe_worker(tmp_path, uid, proc_root=proc)
+    assert observed["state"] == "finished"
+    assert observed["returncode"] == 1
+    assert observed["result"] == payload
+    other_uid = "run-01HF7YAT000000000000000001"
+    assert "different run_uid" in remote.observe_worker(tmp_path, other_uid)["error"]
+
+
+def test_worker_startup_is_not_mistaken_for_missing_worker(tmp_path: Path) -> None:
+    uid = "run-01HF7YAT000000000000000000"
+    proc = tmp_path / "proc/65"
+    proc.mkdir(parents=True)
+    (proc / "cmdline").write_bytes(b"python\0--internal-run-uid\0" + uid.encode() + b"\0")
+    assert remote.observe_worker(tmp_path, uid, proc_root=proc.parent)["state"] == "running"
+    (proc / "cmdline").write_bytes(b"")
+    assert remote.observe_worker(tmp_path, uid, proc_root=proc.parent)["state"] == "failed"
+
+
+def test_second_worker_cannot_overwrite_claimed_run(tmp_path: Path) -> None:
+    uid = "run-01HF7YAT000000000000000000"
+    path = remote.write_worker_state(tmp_path, uid)
+    original = path.read_bytes()
+    with pytest.raises(FileExistsError):
+        remote.write_worker_state(tmp_path, uid)
+    assert path.read_bytes() == original
+
+
+def test_artifact_recovery_uses_a_new_log_for_each_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    supervisor = remote.KubernetesTargetSupervisor(
+        _executor(tmp_path), remote.LocalStorageConfig(root=tmp_path / "results")
+    )
+    data = io.BytesIO()
+    with tarfile.open(fileobj=data, mode="w") as archive:
+        item = tarfile.TarInfo("evidence.json")
+        item.size = 2
+        archive.addfile(item, io.BytesIO(b"{}"))
+    monkeypatch.setattr(supervisor, "_kubectl_exec_prefix", lambda: ("kubectl", "exec"))
+    monkeypatch.setattr(
+        remote.subprocess,
+        "Popen",
+        lambda *args, **kwargs: SimpleNamespace(
+            stdout=io.BytesIO(data.getvalue()),
+            wait=lambda: 0,
+        ),
+    )
+    for name in ("first", "second"):
+        result = supervisor._pull_artifacts(PurePosixPath("/run"), tmp_path / name)
+        assert result.added == 1
+        assert (tmp_path / name / "evidence.json").read_bytes() == b"{}"
+    assert len(list((tmp_path / "control").glob("artifact-sync-*.stderr.log"))) == 2
 
 
 def test_live_service_logs_are_mirrored_incrementally(

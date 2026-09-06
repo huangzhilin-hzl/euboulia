@@ -115,7 +115,7 @@ benchmark:
   result_filename: euboulia-result.json
   parameters:
     seed: 1
-    random_range_ratio: 0
+    random_range_ratio: 1
     flush_cache: true
 
 baseline:
@@ -130,6 +130,22 @@ target:
     node_count: 1
   build:
     commands:
+      - name: create-lm-eval-environment
+        argv: [python3, -m, venv, --system-site-packages, "{workspace}/.euboulia-lm-eval"]
+        timeout_seconds: 300
+      - name: install-pinned-lm-eval
+        argv:
+          - "{workspace}/.euboulia-lm-eval/bin/python"
+          - -c
+          - "import subprocess, sys; subprocess.run([sys.executable, '-m', 'pip', 'install', 'lm_eval[api]==' + sys.argv[1], 'transformers==4.57.6', 'kernels==0.11.7'], check=True)"
+          - ${lm_eval_version}
+        timeout_seconds: 1800
+      - name: verify-lm-eval-runtime
+        argv:
+          - "{workspace}/.euboulia-lm-eval/bin/python"
+          - -c
+          - "import importlib.metadata, lm_eval.evaluator, lm_eval.models; print('lm_eval=' + importlib.metadata.version('lm_eval'))"
+        timeout_seconds: 300
       - name: uninstall-image-sglang
         argv: [python3, -m, pip, uninstall, -y, sglang]
         timeout_seconds: 300
@@ -294,12 +310,14 @@ optimization:
       max_regression_per_point: 0.01
       noise_tolerance: 0.01
     accuracy:
-      # lm-evaluation-harness is supplied by the runtime image, not vendored here.
+      # Run the pinned external harness in its prepared environment.
       command:
         name: lm-eval-gsm8k-200-8shot
         timeout_seconds: 7200
-        executable: python3
-        module: lm_eval
+        executable: "{workspace}/.euboulia-lm-eval/bin/python"
+        module: euboulia.harnesses.lm_eval
+        env:
+          HF_ENDPOINT: https://hf-mirror.com
         options:
           --model: local-chat-completions
           --apply_chat_template: true
@@ -319,7 +337,8 @@ optimization:
           --tasks: gsm8k
           --num_fewshot: 8
           --limit: 200
-          --output_path: "{result_path}"
+          --result-path: "{result_path}"
+          --gsm8k-dataset-path: openai/gsm8k
       result:
         path: euboulia-accuracy.json
         metric: results.gsm8k.exact_match,flexible-extract
@@ -345,6 +364,7 @@ optimization:
             env:
               EUBOULIA_SGLANG_BENCHMARK_BACKEND: sglang-oai-chat
               EUBOULIA_SGLANG_BENCHMARK_MODULE: sglang.bench_serving
+              HF_ENDPOINT: https://hf-mirror.com
   budget:
     max_iterations: 1
     max_wall_time_seconds: 86400

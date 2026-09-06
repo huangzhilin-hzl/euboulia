@@ -9,6 +9,7 @@ import re
 import shutil
 import time
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.error import HTTPError, URLError
@@ -98,6 +99,7 @@ class SGLangProfiler:
             "profile_prefix": f"{context.run_uid}-{context.iteration_id}",
         }
         started = False
+        traces_written = False
         workload: ExecutionResult | None = None
         try:
             self._post_json(endpoint, "/start_profile", payload)
@@ -108,11 +110,17 @@ class SGLangProfiler:
                     "profile workload failed; inspect "
                     f"{workload.stdout_path} and {workload.stderr_path}"
                 )
+            # num_steps makes SGLang stop and export automatically. A second
+            # /stop_profile rejects the already completed profile with HTTP 500.
+            trace_paths = self._wait_for_traces(raw_dir)
+            traces_written = True
         finally:
-            if started:
-                self._post_json(endpoint, "/stop_profile", {})
+            if started and not traces_written:
+                # Clean up an interrupted/incomplete capture without replacing
+                # the workload or trace error with a secondary stop failure.
+                with suppress(ProfileCaptureError):
+                    self._post_json(endpoint, "/stop_profile", {})
 
-        trace_paths = self._wait_for_traces(raw_dir)
         trace_ranks = self._trace_ranks(trace_paths)
         sizes = {path: path.stat().st_size for path in trace_paths}
         total_bytes = sum(sizes.values())
@@ -383,7 +391,14 @@ class SGLangProfiler:
         try:
             with opener.open(request, timeout=self.config.timeout_seconds) as response:
                 response.read()
-        except (HTTPError, URLError, TimeoutError, OSError) as exc:
+        except HTTPError as exc:
+            detail = ""
+            with suppress(OSError), exc:
+                detail = exc.read(4096).decode("utf-8", errors="replace").strip()
+            raise ProfileCaptureError(
+                f"SGLang profile control {path} failed: {exc}; {detail}"
+            ) from exc
+        except (URLError, TimeoutError, OSError) as exc:
             raise ProfileCaptureError(f"SGLang profile control {path} failed: {exc}") from exc
 
 
