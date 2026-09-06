@@ -110,6 +110,10 @@
       top: 0;
       z-index: 3;
     }
+    .page-heading { display: flex; align-items: center; gap: 16px; }
+    .back-to-runs { font-size: 12px; }
+    #runListPanel { scroll-margin-top: 92px; }
+    #runListPanel:focus-visible { outline: 2px solid var(--cyan); outline-offset: 3px; }
     .eyebrow { color: var(--quiet); font-family: var(--mono); font-size: 10px; letter-spacing: .14em; text-transform: uppercase; }
     .page-title { margin-top: 4px; font-size: 18px; font-weight: 590; }
     .actions { display: flex; gap: 9px; }
@@ -384,6 +388,7 @@
       .nav button { display: grid; gap: 2px; padding: 5px; text-align: center; }
       .nav-label { display: block; font-size: 9px; }
       .topbar { padding: 0 16px; }
+      .back-to-runs:not(.hidden) + .page-context { display: none; }
       .main { padding: 18px 14px 90px; }
       .summary-grid { gap: 8px; }
       .metric { padding: 14px; min-height: 78px; }
@@ -418,7 +423,10 @@
 
     <div class="workspace">
       <header class="topbar">
-        <div><div class="eyebrow">experiment control plane</div><div class="page-title" id="pageTitle">Runs</div></div>
+        <div class="page-heading">
+          <button type="button" class="button back-to-runs hidden" id="backToRunsButton" aria-label="Back to experiment list">← Back to runs</button>
+          <div class="page-context"><div class="eyebrow">experiment control plane</div><div class="page-title" id="pageTitle">Runs</div></div>
+        </div>
         <div class="actions">
           <button class="button" id="refreshButton">Refresh</button>
           <button class="button primary" id="newRunButton">＋ Submit run</button>
@@ -434,7 +442,7 @@
         </section>
 
         <section id="runsView" class="runs-layout">
-          <div class="panel">
+          <div class="panel" id="runListPanel" role="region" aria-label="Experiment runs" tabindex="-1">
             <div class="panel-head"><span class="panel-title">Experiment runs</span><span class="count" id="runCount">0 runs</span></div>
             <div class="run-list" id="runList"></div>
           </div>
@@ -645,7 +653,7 @@
     }
     function renderDetail() {
       const host = $("runDetail");
-      host.closest(".runs-layout").classList.toggle("results-expanded", state.tab === "result" && resultExpanded);
+      updateResultLayout();
       clear(host);
       const detail = state.detail;
       if (!detail) return;
@@ -868,6 +876,24 @@
     }
     const resultViews = new Map();
     let resultExpanded = true;
+    function updateResultLayout() {
+      const expanded = state.view === "runs" && state.tab === "result" && resultExpanded && !!state.detail;
+      $("runsView").classList.toggle("results-expanded", expanded);
+      $("backToRunsButton").classList.toggle("hidden", !expanded);
+      $("pageTitle").textContent = expanded ? "Run results" : state.view[0].toUpperCase() + state.view.slice(1);
+      const toggle = $("resultExpandButton");
+      if (toggle) {
+        toggle.textContent = resultExpanded ? "Show run list" : "Expand results";
+        toggle.setAttribute("aria-pressed", String(resultExpanded));
+      }
+    }
+    function returnToRunList() {
+      resultExpanded = false;
+      switchView("runs");
+      const panel = $("runListPanel");
+      panel.scrollIntoView({ block: "start" });
+      panel.focus({ preventScroll: true });
+    }
     function resultBadge(status) {
       return element("span", `result-badge ${status.toLowerCase()}`, status);
     }
@@ -996,12 +1022,11 @@
       title.append(element("div", "eyebrow", "EVALUATION REPORT"), element("h2", "", "Results at a glance"));
       const headingActions = element("div", "result-heading-actions");
       const expand = element("button", "button", resultExpanded ? "Show run list" : "Expand results");
+      expand.id = "resultExpandButton";
       expand.setAttribute("aria-pressed", String(resultExpanded));
       expand.addEventListener("click", () => {
-        resultExpanded = !resultExpanded;
-        host.closest(".runs-layout").classList.toggle("results-expanded", resultExpanded);
-        expand.textContent = resultExpanded ? "Show run list" : "Expand results";
-        expand.setAttribute("aria-pressed", String(resultExpanded));
+        if (resultExpanded) returnToRunList();
+        else { resultExpanded = true; updateResultLayout(); }
       });
       headingActions.append(resultBadge(passed === true ? "Passed" : passed === false ? "Failed" : "Pending"), expand);
       heading.append(title, headingActions);
@@ -1168,11 +1193,15 @@
       $("artifactsView").classList.toggle("hidden", view !== "artifacts");
       $("memoryView").classList.toggle("hidden", view !== "memory");
       $("summaryGrid").classList.toggle("hidden", view === "memory");
-      $("pageTitle").textContent = view[0].toUpperCase() + view.slice(1);
+      updateResultLayout();
       if (view === "memory") loadMemory().catch(error => toast(error.message, true));
     }
 
-    document.querySelectorAll(".nav button").forEach(button => button.addEventListener("click", () => switchView(button.dataset.view)));
+    document.querySelectorAll(".nav button").forEach(button => button.addEventListener("click", () => {
+      if (button.dataset.view === "runs") returnToRunList();
+      else switchView(button.dataset.view);
+    }));
+    $("backToRunsButton").addEventListener("click", returnToRunList);
     $("newRunButton").addEventListener("click", () => $("submitDialog").showModal());
     $("closeDialog").addEventListener("click", () => $("submitDialog").close());
     $("cancelDialog").addEventListener("click", () => $("submitDialog").close());
