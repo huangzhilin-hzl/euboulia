@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <meta
+      name="description"
+      content="Euboulia 推理优化世界：人、Agent、任务、证据与经验的可交互产品原型。"
+    />
+    <title>Euboulia · 推理优化世界</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <a class="brand" href="../../inference-world.md"
+        ><span class="brand-symbol">EU</span
+        ><span>EUBOULIA<small>INFERENCE WORLD</small></span></a
+      >
+      <div class="world-name">
+        Julian 的推理实验室 <span class="dot"></span>
+      </div>
+      <div class="top-meta">
+        <span class="demo-label">产品原型 · 全部执行为演示</span
+        ><button id="reset">重置演示</button>
+      </div>
+    </header>
+    <div class="app-layout">
+      <nav class="sidebar" aria-label="世界导航">
+        <div class="nav-label">WORKSPACE</div>
+        <button data-page="network" aria-current="page">
+          <span>◈</span> 任务网络
+        </button>
+        <button data-page="resources"><span>▦</span> 成员与资源</button>
+        <button data-page="learning"><span>✧</span> 经验与 RSI</button>
+        <div class="nav-label goals-label">当前目标</div>
+        <div class="goal-card">
+          <span class="goal-orbit"></span><strong>DSV4 / H20</strong
+          ><small>长上下文推理优化</small>
+          <div class="goal-progress"><span></span></div>
+          <small>正确性优先 · 保留所有反例</small>
+        </div>
+        <div class="sidebar-note">
+          <span class="dot"></span> 人与 Agent 共同参与<small
+            >图决定依赖<br />证据决定结论</small
+          >
+        </div>
+      </nav>
+      <main>
+        <section class="page-heading">
+          <div>
+            <div class="eyebrow">GOAL 01 / DEEPSEEK V4</div>
+            <h1 id="page-title">让每次试验，连接下一次突破</h1>
+            <p id="page-subtitle">
+              沿任务网络观察工作如何分叉、汇合，并成为团队可复用的经验。
+            </p>
+          </div>
+          <button class="primary" id="add-hypothesis">＋ 提出优化假设</button>
+        </section>
+        <section id="network-page">
+          <div class="network-toolbar">
+            <div class="segments" aria-label="网络关系">
+              <button data-view="tasks" aria-pressed="true">任务依赖</button
+              ><button data-view="lineage" aria-pressed="false">版本谱系</button
+              ><button data-view="memory" aria-pressed="false">经验关联</button>
+            </div>
+            <div class="toolbar-right">
+              <span id="graph-revision">图 v1</span
+              ><button id="toggle-list" aria-pressed="false">列表</button
+              ><button id="edit-edge">连接任务</button>
+            </div>
+          </div>
+          <div class="network-layout">
+            <div class="canvas-shell">
+              <div class="canvas-heading">
+                <span id="view-label">任务 DAG · 连线表示产物依赖</span
+                ><span class="canvas-caption">可拖动画布</span>
+              </div>
+              <div id="graph-viewport" aria-label="任务网络画布">
+                <div id="graph-world">
+                  <svg id="edges" aria-hidden="true"></svg>
+                  <div id="nodes"></div>
+                </div>
+              </div>
+              <div id="task-list" hidden></div>
+              <div class="canvas-bottom">
+                <div class="legend">
+                  <span><i class="completed"></i>已交付</span
+                  ><span><i class="running"></i>执行中</span
+                  ><span><i class="pending"></i>待接力</span
+                  ><span><i class="failed"></i>失败</span>
+                </div>
+                <div class="zoom">
+                  <button id="zoom-out" aria-label="缩小">−</button
+                  ><span id="zoom-value">100%</span
+                  ><button id="zoom-in" aria-label="放大">＋</button
+                  ><button id="zoom-reset">复位</button>
+                </div>
+              </div>
+              <div class="signal-feed">
+                <span class="signal-icon">↗</span>
+                <div id="latest-event"></div>
+                <span class="demo-tag">演示事件</span>
+              </div>
+            </div>
+            <aside class="inspector" aria-label="选中任务">
+              <div id="inspector-heading"></div>
+              <div class="inspector-tabs">
+                <button data-detail="task" aria-pressed="true">任务</button
+                ><button data-detail="discussion" aria-pressed="false">
+                  讨论</button
+                ><button data-detail="evidence" aria-pressed="false">
+                  证据
+                </button>
+              </div>
+              <div id="inspector-content"></div>
+            </aside>
+          </div>
+        </section>
+        <section id="resources-page" hidden></section>
+        <section id="learning-page" hidden></section>
+        <div class="notice" id="notice" role="status" aria-live="polite"></div>
+        <footer>
+          设计原型 · 状态只保存在本次页面中 · 不调用 Agent、模型 API 或
+          Kubernetes <a href="../../inference-world.md">阅读完整设计 ↗</a>
+        </footer>
+      </main>
+    </div>
+    <dialog id="hypothesis-dialog">
+      <form id="hypothesis-form">
+        <div class="eyebrow">NEW BRANCH</div>
+        <h2>把一个想法变成可验证的分支</h2>
+        <p>从热点分析 A0 派生物化、A/B、Profile、判定与经验任务。</p>
+        <label for="hypothesis-title">你想验证什么</label
+        ><input
+          id="hypothesis-title"
+          maxlength="90"
+          required
+          placeholder="例如：验证 MHC 融合能否减少中间张量开销"
+        /><label for="hypothesis-source">来源</label
+        ><select id="hypothesis-source">
+          <option value="human">真人提出</option>
+          <option value="agent">Agent 提出</option>
+          <option value="joint">共同讨论</option>
+        </select>
+        <div class="dialog-actions">
+          <button type="button" data-close="hypothesis-dialog">取消</button
+          ><button class="primary" type="submit">创建演示分支</button>
+        </div>
+      </form>
+    </dialog>
+    <dialog id="edge-dialog">
+      <form id="edge-form">
+        <div class="eyebrow">GRAPH REVISION</div>
+        <h2>连接任务产物</h2>
+        <p>新增依赖会进行环检测；已执行的任务输入保持不变。</p>
+        <label for="edge-from">前置任务</label
+        ><select id="edge-from"></select
+        ><label for="edge-to">下游任务</label
+        ><select id="edge-to"></select>
+        <div class="dialog-actions">
+          <button type="button" data-close="edge-dialog">取消</button
+          ><button class="primary" type="submit">提交依赖</button>
+        </div>
+        <div id="edge-error" role="alert"></div>
+      </form>
+    </dialog>
+    <script type="module" src="app.mjs"></script>
+  </body>
+</html>
