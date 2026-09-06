@@ -11,7 +11,7 @@ const start = script.indexOf('    function resultNumber(');
 const end = script.indexOf('    const resultViews =');
 const context = vm.createContext({});
 vm.runInContext(script.slice(start, end), context);
-const { resultPoints, resultSource, resultFormat, filteredResultPoints, resultChartSeries } = context;
+const { resultPoints, resultSource, resultFormat, filteredResultPoints, resultChartSeries, nearestResultChartPoint, resultChartPointLabel } = context;
 const point = (metrics = {}, extra = {}) => ({ metrics, gate_passed: true, ...extra });
 const source = (point_results, extra = {}) => ({ evaluation: { point_results, ...extra } });
 const names = rows => Array.from(rows, p => p.name);
@@ -105,7 +105,7 @@ test('charts separate output lengths and request-count protocols, and retain gap
   }));
   const lines = resultChartSeries(rows, 1024, 'throughput', 'concurrency');
   assert.equal(lines.length, 2);
-  assert.deepEqual(Array.from(lines.find(line => line.name.endsWith('N = C')).values, v => v.y), [9, null, 40]);
+  assert.deepEqual(Array.from(lines.find(line => line.name.endsWith('requests = concurrency')).values, v => v.y), [9, null, 40]);
   assert.equal(lines.flatMap(line => line.values).every(v => v.point.output === 1024), true);
 });
 
@@ -114,4 +114,32 @@ test('custom point names retain their identity, dimensions from metrics and prim
   assert.equal(rows[0].name, 'long context');
   assert.equal(rows[0].input, 65536);
   assert.equal(rows[0].primary, true);
+});
+
+test('ordinary chart legends omit shorthand while mixed request protocols stay explicit', () => {
+  const rows = resultPoints(source({
+    'isl1024-osl1024-c1-n1': point({ output_throughput: 9 }),
+    'isl1024-osl1024-c2-n2': point({ output_throughput: 18 }),
+  }));
+  assert.equal(resultChartSeries(rows, 1024, 'throughput', 'concurrency')[0].name, 'Input 1,024');
+  const custom = resultPoints(source({ custom: point({ random_output_len: 1024, max_concurrency: 2 }) }));
+  assert.match(resultChartSeries(custom, 1024, 'throughput', 'concurrency')[0].name, /— requests\/window/);
+});
+
+test('pointer hit testing selects the closest visible point within a screen-pixel radius', () => {
+  const near = { x: 100, y: 100, visible: true };
+  const far = { x: 120, y: 118, visible: true };
+  assert.equal(nearestResultChartPoint([near, far], 91, 108), near);
+  assert.equal(nearestResultChartPoint([near, far], 118, 116), far);
+  assert.equal(nearestResultChartPoint([near, far], 20, 20), null);
+  assert.equal(nearestResultChartPoint([{ ...near, visible: false }, far], 100, 100), far);
+  assert.equal(nearestResultChartPoint([{ ...near, visible: false }], 100, 100), null);
+});
+
+test('point descriptions include human-readable workload dimensions and metric units', () => {
+  const row = resultPoints(source({ 'isl1024-osl1024-c16-n16': point({ output_throughput: 1441.4345 }) }))[0];
+  const description = resultChartPointLabel({ point: row, y: row.throughput }, 'Output throughput', 'tok/s');
+  assert.match(description, /1,441.43 tok\/s/);
+  assert.match(description, /Input 1,024 tokens · Output 1,024 tokens/);
+  assert.match(description, /Concurrency 16 · Requests per window 16 · Passed/);
 });

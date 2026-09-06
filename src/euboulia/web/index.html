@@ -288,7 +288,15 @@
     .result-chart svg text { fill: var(--muted); font: 11px var(--mono); }
     .chart-grid { stroke: var(--line-soft); stroke-dasharray: 3 4; }
     .result-chart circle { cursor: crosshair; }
-    .result-chart circle:hover, .result-chart circle:focus { r: 6; stroke: var(--paper); outline: none; }
+    .result-chart circle.is-active, .result-chart circle:focus-visible { r: 6; stroke: var(--paper); outline: none; }
+    .result-chart-plot { position: relative; }
+    .result-chart-tooltip { position: absolute; z-index: 2; pointer-events: none; width: 220px; max-width: calc(100% - 16px); padding: 12px; border: 1px solid var(--series-color, var(--line)); border-radius: 10px; background: #18222f; box-shadow: 0 8px 26px rgba(0,0,0,.5); }
+    .result-tooltip-title { color: var(--muted); font-size: 10px; }
+    .result-tooltip-value { color: var(--series-color, var(--cyan)); font: 600 17px/1.4 var(--mono); margin: 3px 0 10px; }
+    .result-tooltip-dimensions { display: grid; grid-template-columns: 1fr 1fr; gap: 9px 12px; margin: 0 0 10px; }
+    .result-tooltip-dimensions dt { color: var(--muted); font-size: 10px; }
+    .result-tooltip-dimensions dd { margin: 3px 0 0; color: var(--paper); font: 11px var(--mono); }
+    .result-chart-scope { margin: -4px 0 12px; }
     .result-legend { display: flex; flex-wrap: wrap; gap: 7px 12px; margin: 0 4px 12px; }
     .result-legend-item { border: 0; padding: 2px 0; color: var(--muted); font-size: 9px; background: transparent; cursor: pointer; }
     .result-legend-item::before { content: ""; display: inline-block; width: 12px; height: 3px; background: var(--series-color); vertical-align: middle; margin-right: 5px; }
@@ -865,16 +873,33 @@
     function resultChartSeries(points, output, metric, axis) {
       // Separate request counts as well as sequence lengths so distinct workloads never share a line.
       const series = new Map();
-      points.filter(point => point.output === output && point[axis] !== null).forEach(point => {
+      const selected = points.filter(point => point.output === output && point[axis] !== null);
+      const matchingRequests = selected.every(point => point.requests !== null && point.requests === point.concurrency);
+      selected.forEach(point => {
         const group = axis === "concurrency" ? `Input ${resultFormat(point.input, 0)}` : `Concurrency ${resultFormat(point.concurrency, 0)}`;
-        const requests = point.requests === point.concurrency ? "N = C" : `N = ${resultFormat(point.requests, 0)}`;
-        const name = `${group} · ${requests}`;
+        const requests = point.requests !== null && point.requests === point.concurrency ? "requests = concurrency" : `${resultFormat(point.requests, 0)} requests/window`;
+        const name = matchingRequests ? group : `${group} · ${requests}`;
         if (!series.has(name)) series.set(name, []);
         series.get(name).push({ point, x: point[axis], y: point[metric] });
       });
       return [...series].map(([name, values]) => ({ name, values: values.sort((a, b) => a.x - b.x) }));
     }
+    function nearestResultChartPoint(candidates, x, y, radius = 28) {
+      let nearest = null;
+      let distance = radius ** 2;
+      candidates.forEach(candidate => {
+        if (!candidate.visible) return;
+        const squared = (candidate.x - x) ** 2 + (candidate.y - y) ** 2;
+        if (squared <= distance) { nearest = candidate; distance = squared; }
+      });
+      return nearest;
+    }
+    function resultChartPointLabel(value, title, unit) {
+      const point = value.point;
+      return `${title}: ${resultFormat(value.y)} ${unit} · Input ${resultFormat(point.input, 0)} tokens · Output ${resultFormat(point.output, 0)} tokens · Concurrency ${resultFormat(point.concurrency, 0)} · Requests per window ${resultFormat(point.requests, 0)} · ${point.status} · ${point.name}`;
+    }
     const resultViews = new Map();
+    let resultChartId = 0;
     let resultExpanded = true;
     function updateResultLayout() {
       const expanded = state.view === "runs" && state.tab === "result" && resultExpanded && !!state.detail;
@@ -937,7 +962,9 @@
       const ceiling = tickCount * step;
       const x = value => ticks.length === 1 ? 267 : 58 + ticks.indexOf(value) * 418 / (ticks.length - 1);
       const y = value => 198 - value / ceiling * 162;
+      const plot = element("div", "result-chart-plot");
       const svg = resultSvg("svg", { viewBox: "0 0 510 250", role: "group", "aria-label": `${title}, ${unit}; exact values in the test point table` });
+      svg.appendChild(resultSvg("rect", { x: 48, y: 26, width: 438, height: 182, fill: "transparent", "pointer-events": "all" }));
       for (let tick = 0; tick <= tickCount; tick++) {
         const value = tick * step;
         svg.append(resultSvg("line", { x1: 58, x2: 476, y1: y(value), y2: y(value), class: "chart-grid" }),
@@ -946,7 +973,63 @@
       ticks.forEach(value => svg.appendChild(resultSvg("text", { x: x(value), y: 220, "text-anchor": "middle" }, resultFormat(value, 0))));
       svg.appendChild(resultSvg("text", { x: 267, y: 243, "text-anchor": "middle" }, axis === "input" ? "Input tokens · tested lengths" : "Concurrency · tested levels"));
       const legend = element("div", "result-legend");
-      const readout = element("div", "result-chart-readout", "Hover or focus a point for its value. Click a legend to hide a series.");
+      const hint = "Hover near a point, tap it or focus it for details. Click a legend to hide a series.";
+      const readout = element("div", "result-chart-readout", hint);
+      const tooltip = element("div", "result-chart-tooltip hidden");
+      tooltip.id = `result-chart-tooltip-${++resultChartId}`;
+      tooltip.setAttribute("role", "tooltip");
+      plot.append(svg, tooltip);
+      const targets = [];
+      let active = null;
+      function hideTooltip() {
+        active?.circle.classList.remove("is-active");
+        active = null;
+        tooltip.classList.add("hidden");
+        readout.textContent = hint;
+      }
+      function showTooltip(target) {
+        if (!target) { hideTooltip(); return; }
+        if (active !== target) {
+          active?.circle.classList.remove("is-active");
+          active = target;
+          target.circle.classList.add("is-active");
+          clear(tooltip);
+          const point = target.value.point;
+          tooltip.append(element("div", "result-tooltip-title", title), element("div", "result-tooltip-value", `${resultFormat(target.value.y)} ${unit}`));
+          const dimensions = element("dl", "result-tooltip-dimensions");
+          [["Input tokens", point.input], ["Output tokens", point.output], ["Concurrency", point.concurrency], ["Requests / window", point.requests]].forEach(([label, value]) => {
+            const pair = element("div");
+            pair.append(element("dt", "", label), element("dd", "", resultFormat(value, 0)));
+            dimensions.appendChild(pair);
+          });
+          tooltip.append(dimensions, resultBadge(point.status));
+          tooltip.style.setProperty("--series-color", target.color);
+          readout.textContent = target.label;
+        }
+        tooltip.classList.remove("hidden");
+        const bounds = plot.getBoundingClientRect();
+        const dot = target.circle.getBoundingClientRect();
+        const pointX = dot.left + dot.width / 2 - bounds.left;
+        const pointY = dot.top + dot.height / 2 - bounds.top;
+        let left = pointX + 14;
+        if (left + tooltip.offsetWidth > bounds.width - 8) left = pointX - tooltip.offsetWidth - 14;
+        tooltip.style.left = `clamp(8px, ${left}px, calc(100% - 228px))`;
+        tooltip.style.top = `${Math.max(8, Math.min(pointY - tooltip.offsetHeight / 2, bounds.height - tooltip.offsetHeight - 8))}px`;
+      }
+      function inspectPointer(event) {
+        const transform = svg.getScreenCTM();
+        if (!transform) return;
+        // Measure hit distance in CSS pixels, including responsive SVG scaling.
+        const candidates = targets.map(target => ({ target, visible: target.group.style.display !== "none",
+          x: transform.a * target.x + transform.c * target.y + transform.e,
+          y: transform.b * target.x + transform.d * target.y + transform.f }));
+        showTooltip(nearestResultChartPoint(candidates, event.clientX, event.clientY)?.target);
+      }
+      svg.addEventListener("pointermove", inspectPointer);
+      svg.addEventListener("pointerdown", inspectPointer);
+      svg.addEventListener("pointerleave", hideTooltip);
+      svg.addEventListener("pointercancel", hideTooltip);
+      svg.addEventListener("keydown", event => { if (event.key === "Escape") hideTooltip(); });
       const colors = ["#6ee7f2", "#d9ff62", "#b9a7ff", "#ffad70", "#f390bd", "#86efac", "#98afff"];
       series.forEach((line, index) => {
         const color = colors[index % colors.length];
@@ -959,10 +1042,12 @@
         line.values.forEach(value => { if (value.y === null) flush(); else segment.push(`${x(value.x)},${y(value.y)}`); });
         flush();
         line.values.filter(value => value.y !== null).forEach(value => {
-          const label = `${value.point.name} · ${resultFormat(value.y)} ${unit} · ${value.point.status}`;
-          const circle = resultSvg("circle", { cx: x(value.x), cy: y(value.y), r: 4, fill: color, stroke: "#10151d", "stroke-width": 2, tabindex: 0, role: "img", "aria-label": label });
-          circle.appendChild(resultSvg("title", {}, label));
-          ["mouseenter", "focus"].forEach(event => circle.addEventListener(event, () => { readout.textContent = label; }));
+          const label = resultChartPointLabel(value, title, unit);
+          const circle = resultSvg("circle", { cx: x(value.x), cy: y(value.y), r: 4, fill: color, stroke: "#10151d", "stroke-width": 2, tabindex: 0, role: "img", "aria-label": label, "aria-describedby": tooltip.id });
+          const target = { value, label, circle, group, color, x: x(value.x), y: y(value.y) };
+          targets.push(target);
+          circle.addEventListener("focus", () => showTooltip(target));
+          circle.addEventListener("blur", hideTooltip);
           group.appendChild(circle);
         });
         svg.appendChild(group);
@@ -973,10 +1058,11 @@
           const visible = toggle.getAttribute("aria-pressed") !== "true";
           toggle.setAttribute("aria-pressed", String(visible));
           group.style.display = visible ? "" : "none";
+          hideTooltip();
         });
         legend.appendChild(toggle);
       });
-      card.append(svg, legend, readout);
+      card.append(plot, legend, readout);
       host.appendChild(card);
     }
     function renderPointDetails(host, point) {
@@ -1056,15 +1142,20 @@
           if (!outputLengths.includes(Number(view.chartOutput))) view.chartOutput = String(outputLengths.reduce((best, value) => points.filter(p => p.output === value).length > points.filter(p => p.output === best).length ? value : best));
           const chartHeading = element("div", "result-section-head");
           chartHeading.append(element("h3", "", "Performance trends"), resultSelect("Chart output length", outputLengths.map(value => [String(value), `${resultFormat(value, 0)} tokens`]), view.chartOutput, value => { view.chartOutput = value; drawCharts(); }));
+          const chartScope = element("p", "result-note result-chart-scope");
           const charts = element("div", "result-charts");
           function drawCharts() {
             clear(charts);
             const output = Number(view.chartOutput);
+            const selected = points.filter(point => point.output === output);
+            chartScope.textContent = selected.every(point => point.requests !== null && point.requests === point.concurrency)
+              ? "Requests per measurement window equal concurrency. For example, concurrency 16 means 16 total requests in that window."
+              : "Concurrency is the maximum number of simultaneous requests. Requests / window is the total number of prompts sent in one measurement window.";
             const oneConcurrency = new Set(points.filter(p => p.output === output).map(p => p.concurrency)).size === 1;
             renderResultChart(charts, points, output, "throughput", oneConcurrency ? "input" : "concurrency", "Output throughput", "tok/s");
             renderResultChart(charts, points, output, "ttft", "input", "Time to first token", "ms");
           }
-          dashboard.append(chartHeading, charts);
+          dashboard.append(chartHeading, chartScope, charts);
           drawCharts();
         }
         const tableHeading = element("div", "result-section-head");
@@ -1081,10 +1172,10 @@
         const scroller = element("div", "result-table-scroll");
         scroller.tabIndex = 0; scroller.setAttribute("role", "region"); scroller.setAttribute("aria-label", "Test point results, horizontally scrollable");
         const table = element("table", "result-table");
-        const caption = element("caption", "", "Input / output in tokens · throughput in tok/s · mean TTFT / TPOT in ms. Recorded aggregate metrics; stable multi-window runs use the median across measurement windows. ★ Primary point.");
+        const caption = element("caption", "", "Input / output in tokens · throughput in tok/s · mean TTFT / TPOT in ms. Concurrency = maximum simultaneous requests; requests = prompts per measurement window. Recorded aggregate metrics; stable multi-window runs use the median across measurement windows. ★ Primary point.");
         table.appendChild(caption);
         const thead = element("thead"); const tbody = element("tbody"); table.append(thead, tbody); scroller.appendChild(table);
-        const columns = [["input", "Input"], ["output", "Output"], ["concurrency", "C"], ["requests", "N"], ["throughput", "Throughput"], ["ttft", "TTFT"], ["tpot", "TPOT"], ["status", "Status"]];
+        const columns = [["input", "Input"], ["output", "Output"], ["concurrency", "Concurrency"], ["requests", "Requests"], ["throughput", "Throughput"], ["ttft", "TTFT"], ["tpot", "TPOT"], ["status", "Status"]];
         function drawTable() {
           const rows = filteredResultPoints(points, view);
           count.textContent = `${rows.length} of ${points.length} points`;
@@ -1096,8 +1187,8 @@
             const button = element("button", "result-sort", label + (view.sort === key ? view.direction === 1 ? " ↑" : " ↓" : " ↕"));
             button.setAttribute("aria-label", `Sort by ${label}`);
             if (key === "concurrency") button.title = "Maximum concurrent requests";
-            if (key === "requests") button.title = "Number of prompts";
-            const units = { input: "tokens", output: "tokens", throughput: "tok/s", ttft: "mean · ms", tpot: "mean · ms" };
+            if (key === "requests") button.title = "Total prompts per measurement window";
+            const units = { input: "tokens", output: "tokens", concurrency: "max in flight", requests: "per window", throughput: "tok/s", ttft: "mean · ms", tpot: "mean · ms" };
             if (units[key]) button.appendChild(element("span", "result-table-unit", units[key]));
             button.addEventListener("click", () => { view.direction = view.sort === key ? -view.direction : 1; view.sort = key; drawTable(); thead.querySelectorAll("button")[columns.findIndex(c => c[0] === key)].focus(); });
             th.appendChild(button); tr.appendChild(th);
