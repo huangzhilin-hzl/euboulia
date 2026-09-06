@@ -254,6 +254,74 @@
     .kv { border-bottom: 1px solid var(--line-soft); padding: 10px 0; min-width: 0; }
     .kv-key { color: var(--quiet); font-size: 10px; }
     .kv-value { margin-top: 5px; font-family: var(--mono); font-size: 11px; word-break: break-word; }
+    .runs-layout.results-expanded { grid-template-columns: minmax(0, 1fr); }
+    .runs-layout.results-expanded > .panel:first-child { display: none; }
+    .result-heading-actions { display: flex; align-items: center; gap: 12px; }
+    .result-heading-actions .button { min-height: 32px; font-size: 11px; }
+    .result-dashboard { container-type: inline-size; }
+    .result-heading, .result-section-head { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 14px; }
+    .result-heading { margin-bottom: 20px; }
+    .result-heading h2 { margin: 6px 0 0; font-size: 23px; font-weight: 580; letter-spacing: -.025em; }
+    .result-section-head { margin: 24px 0 12px; }
+    .result-dashboard h3 { margin: 0; font-size: 13px; font-weight: 650; }
+    .result-note { color: var(--muted); font-size: 11px; line-height: 1.6; overflow-wrap: anywhere; }
+    .result-overview { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+    .result-stat { border: 1px solid var(--line); border-radius: 12px; padding: 16px; background: linear-gradient(135deg, #19222b, #10151d); }
+    .result-stat-value { font: 600 26px/1.25 var(--mono); margin: 10px 0 8px; letter-spacing: -.04em; }
+    .result-accent { color: var(--acid); }
+    .result-badge { display: inline-flex; align-items: center; gap: 6px; padding: 4px 8px; border-radius: 6px; font-size: 10px; font-weight: 600; color: var(--muted); background: rgba(141,153,168,.08); white-space: nowrap; }
+    .result-badge::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+    .result-badge.passed { color: var(--ok); background: rgba(134,239,172,.08); }
+    .result-badge.failed { color: var(--coral); background: rgba(255,125,110,.08); }
+    .result-badge.pending { color: var(--amber); }
+    .result-select { display: grid; gap: 5px; font-size: 10px; }
+    .result-select select { min-height: 34px; border-radius: 7px; font-size: 11px; padding: 0 9px; }
+    .result-charts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+    .result-chart { min-width: 0; padding: 16px 12px 10px; border: 1px solid var(--line-soft); border-radius: 12px; background: #0c1118; }
+    .result-chart h3, .result-chart > p { margin-left: 4px; }
+    .result-chart > p { margin-top: 4px; margin-bottom: 0; }
+    .result-chart svg { display: block; width: 100%; overflow: visible; }
+    .result-chart svg text { fill: var(--muted); font: 11px var(--mono); }
+    .chart-grid { stroke: var(--line-soft); stroke-dasharray: 3 4; }
+    .result-chart circle { cursor: crosshair; }
+    .result-chart circle:hover, .result-chart circle:focus { r: 6; stroke: var(--paper); outline: none; }
+    .result-legend { display: flex; flex-wrap: wrap; gap: 7px 12px; margin: 0 4px 12px; }
+    .result-legend-item { border: 0; padding: 2px 0; color: var(--muted); font-size: 9px; background: transparent; cursor: pointer; }
+    .result-legend-item::before { content: ""; display: inline-block; width: 12px; height: 3px; background: var(--series-color); vertical-align: middle; margin-right: 5px; }
+    .result-legend-item[aria-pressed="false"] { opacity: .4; text-decoration: line-through; }
+    .result-chart-readout { color: var(--muted); font: 9px/1.5 var(--mono); min-height: 29px; border-top: 1px solid var(--line-soft); padding: 8px 4px 0; overflow-wrap: anywhere; }
+    .result-chart-empty { min-height: 180px; display: grid; place-items: center; color: var(--muted); font-size: 11px; }
+    .result-filters { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 14px; }
+    .result-filters > label { min-width: 125px; flex: 1; }
+    .result-table-scroll { overflow: auto; max-height: 580px; border: 1px solid var(--line); border-radius: 10px; }
+    .result-table { width: 100%; border-collapse: collapse; text-align: right; font: 12px var(--mono); white-space: nowrap; }
+    .result-table caption { caption-side: bottom; text-align: left; white-space: normal; color: var(--muted); font: 10px/1.6 var(--sans); padding: 12px 14px; border-top: 1px solid var(--line); }
+    .result-table th { position: sticky; top: 0; z-index: 1; background: #19212c; color: var(--muted); font: 10px var(--sans); }
+    .result-table td, .result-table th { padding: 11px 10px; border-bottom: 1px solid var(--line-soft); }
+    .result-table td:first-child, .result-table th:first-child { width: 44px; text-align: center; }
+    .result-table tbody > tr:not(.result-expanded-row):nth-child(4n + 3) { background: rgba(23,30,40,.5); }
+    .result-table tbody > tr:not(.result-expanded-row):hover { background: rgba(110,231,242,.04); }
+    .result-throughput { color: var(--cyan); font-weight: 600; }
+    .result-table-unit { display: block; margin-top: 3px; color: var(--quiet); font-size: 9px; }
+    .result-sort { padding: 0; border: 0; background: none; color: inherit; font: inherit; white-space: nowrap; cursor: pointer; }
+    .result-expand { border: 1px solid var(--line); border-radius: 5px; width: 23px; height: 23px; background: var(--ink-2); color: var(--muted); cursor: pointer; }
+    .result-expanded-row > td { padding: 18px !important; text-align: left !important; white-space: normal; background: #0a1017; }
+    .result-point-id { color: var(--cyan); font-size: 11px; overflow-wrap: anywhere; }
+    .result-detail-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin: 6px 0 14px; }
+    .result-window { display: grid; grid-template-columns: 25px 1fr 100px; align-items: center; gap: 12px; color: var(--muted); font: 11px var(--mono); margin: 10px 0; }
+    .result-window > :last-child { text-align: right; }
+    .result-window-track { height: 7px; background: var(--line-soft); border-radius: 3px; overflow: hidden; }
+    .result-window-fill { height: 100%; background: var(--cyan); opacity: .7; border-radius: 3px; }
+    .result-failure { padding: 12px; border-left: 2px solid var(--coral); color: #ffc1ba; background: rgba(255,125,110,.04); font: 11px/1.6 var(--sans); overflow-wrap: anywhere; }
+    .result-no-matches { height: 90px; text-align: center !important; color: var(--muted); }
+    .result-disclosure { margin-top: 18px; border: 1px solid var(--line-soft); border-radius: 9px; text-align: left; }
+    .result-disclosure summary { padding: 12px 14px; color: var(--muted); font: 11px var(--sans); cursor: pointer; }
+    .result-disclosure-body { border-top: 1px solid var(--line-soft); min-width: 0; }
+    .result-disclosure pre { max-height: 350px; font-size: 10px; }
+    .result-dashboard button:focus-visible, .result-disclosure summary:focus-visible, .result-table-scroll:focus-visible { outline: 2px solid var(--cyan); outline-offset: 3px; }
+    @container (max-width: 740px) { .result-charts { grid-template-columns: 1fr; } }
+    @container (max-width: 440px) { .result-chart svg text { font-size: 15px; } .result-overview { grid-template-columns: 1fr; } .result-stat { padding: 13px; } .result-stat-value { font-size: 23px; } }
+
     .artifact-row { padding: 11px 0; border-bottom: 1px solid var(--line-soft); display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 16px; }
     .artifact-name { font-family: var(--mono); font-size: 10px; word-break: break-all; }
     .artifact-meta { color: var(--quiet); font-family: var(--mono); font-size: 9px; }
@@ -522,8 +590,9 @@
       const requested = uid;
       const payload = await api(`/api/runs/${encodeURIComponent(uid)}`);
       if (state.selected !== requested) return;
+      const unchangedResult = state.tab === "result" && JSON.stringify(state.detail) === JSON.stringify(payload);
       state.detail = payload;
-      renderDetail();
+      if (!unchangedResult) renderDetail();
       if (state.tab === "console") await loadLog();
     }
     async function loadMemory() {
@@ -576,6 +645,7 @@
     }
     function renderDetail() {
       const host = $("runDetail");
+      host.closest(".runs-layout").classList.toggle("results-expanded", state.tab === "result" && resultExpanded);
       clear(host);
       const detail = state.detail;
       if (!detail) return;
@@ -733,23 +803,319 @@
       node.append(element("div", "kv-key", key), element("div", "kv-value", value === null || value === undefined ? "—" : value));
       return node;
     }
-    function flatten(value, prefix = "") {
-      const rows = [];
-      if (value && typeof value === "object" && !Array.isArray(value)) {
-        Object.entries(value).forEach(([key, child]) => {
-          const path = prefix ? `${prefix}.${key}` : key;
-          if (child && typeof child === "object") rows.push(...flatten(child, path));
-          else rows.push([path, child]);
+    // Result data stays separate from DOM rendering so incomplete/legacy runs use the same rules.
+    function resultNumber(value) {
+      return typeof value === "number" && Number.isFinite(value) ? value : null;
+    }
+    function resultFormat(value, digits = 2) {
+      return resultNumber(value) === null ? "—" : value.toLocaleString("en-US", { maximumFractionDigits: digits });
+    }
+    function resultSource(detail) {
+      return detail.validation || detail.summary?.result || detail.summary;
+    }
+    function resultPoints(source) {
+      const evaluation = source?.evaluation || {};
+      const results = evaluation.point_results || {};
+      const objectives = evaluation.objective_values || {};
+      const names = new Set([...(source?.identity?.aliases?.points || []), ...Object.keys(results), ...Object.keys(objectives)]);
+      return [...names].map(name => {
+        const point = results[name] || {};
+        const dimensions = /^isl(\d+)-osl(\d+)-c(\d+)-n(\d+)$/.exec(name);
+        const metrics = point.metrics || {};
+        const metric = key => resultNumber(metrics[key]);
+        // Objective values may be latency or another custom metric; never label them as throughput.
+        const failed = point.gate_passed === false || ["failed", "rejected", "error"].includes(point.outcome);
+        const passed = !failed && point.gate_passed === true;
+        return {
+          name, raw: point, input: dimensions ? Number(dimensions[1]) : metric("random_input_len"),
+          output: dimensions ? Number(dimensions[2]) : metric("random_output_len"),
+          concurrency: dimensions ? Number(dimensions[3]) : metric("max_concurrency"),
+          requests: dimensions ? Number(dimensions[4]) : null,
+          throughput: metric("output_throughput"), ttft: metric("mean_ttft_ms"), tpot: metric("mean_tpot_ms"),
+          objective: resultNumber(point.objective_value ?? objectives[name]),
+          windows: Array.isArray(point.measurement_values) ? point.measurement_values.map(resultNumber) : [],
+          stable: point.measurement_stable, accuracy: resultNumber(point.accuracy_value),
+          status: failed ? "Failed" : passed ? "Passed" : point.outcome === "skipped" ? "Skipped" : "Pending",
+          primary: (evaluation.primary_points || []).includes(name)
+        };
+      }).sort((a, b) => compareResultPoints(a, b, "output"));
+    }
+    function compareResultPoints(a, b, key, direction = 1) {
+      const left = a[key], right = b[key];
+      if (left === null && right !== null) return 1;
+      if (right === null && left !== null) return -1;
+      const order = typeof left === "string" ? left.localeCompare(right) : (left ?? 0) - (right ?? 0);
+      return direction * order || (a.output ?? Infinity) - (b.output ?? Infinity) ||
+        (a.input ?? Infinity) - (b.input ?? Infinity) || (a.concurrency ?? Infinity) - (b.concurrency ?? Infinity) ||
+        (a.requests ?? Infinity) - (b.requests ?? Infinity) || a.name.localeCompare(b.name);
+    }
+    function filteredResultPoints(points, options) {
+      return points.filter(point => (!options.output || String(point.output) === options.output) &&
+        (!options.input || String(point.input) === options.input) && (!options.status || point.status === options.status))
+        .sort((a, b) => compareResultPoints(a, b, options.sort, options.direction));
+    }
+    function resultChartSeries(points, output, metric, axis) {
+      // Separate request counts as well as sequence lengths so distinct workloads never share a line.
+      const series = new Map();
+      points.filter(point => point.output === output && point[axis] !== null).forEach(point => {
+        const group = axis === "concurrency" ? `Input ${resultFormat(point.input, 0)}` : `Concurrency ${resultFormat(point.concurrency, 0)}`;
+        const requests = point.requests === point.concurrency ? "N = C" : `N = ${resultFormat(point.requests, 0)}`;
+        const name = `${group} · ${requests}`;
+        if (!series.has(name)) series.set(name, []);
+        series.get(name).push({ point, x: point[axis], y: point[metric] });
+      });
+      return [...series].map(([name, values]) => ({ name, values: values.sort((a, b) => a.x - b.x) }));
+    }
+    const resultViews = new Map();
+    let resultExpanded = true;
+    function resultBadge(status) {
+      return element("span", `result-badge ${status.toLowerCase()}`, status);
+    }
+    function resultSelect(label, options, value, onChange) {
+      const field = element("label", "result-select", label);
+      const select = element("select");
+      select.setAttribute("aria-label", label);
+      options.forEach(([key, text]) => { const option = element("option", "", text); option.value = key; select.appendChild(option); });
+      select.value = value;
+      select.addEventListener("change", () => onChange(select.value));
+      field.appendChild(select);
+      return field;
+    }
+    function resultDisclosure(label, build, open = false, onToggle = () => {}) {
+      const details = element("details", "result-disclosure");
+      details.appendChild(element("summary", "", label));
+      let body;
+      function populate() { if (!body) { body = element("div", "result-disclosure-body"); build(body); details.appendChild(body); } }
+      details.open = open;
+      if (open) populate();
+      details.addEventListener("toggle", () => { if (details.open) populate(); onToggle(details.open); });
+      return details;
+    }
+    function resultSvg(tag, attributes = {}, text) {
+      const node = document.createElementNS("http://www.w3.org/2000/svg", tag);
+      Object.entries(attributes).forEach(([key, value]) => node.setAttribute(key, value));
+      if (text !== undefined) node.textContent = text;
+      return node;
+    }
+    function renderResultChart(host, points, output, metric, axis, title, unit) {
+      const card = element("section", "result-chart");
+      card.append(element("h3", "", title), element("p", "result-note", `${unit} · output ${resultFormat(output, 0)} tokens`));
+      const series = resultChartSeries(points, output, metric, axis);
+      const measured = series.flatMap(line => line.values).filter(value => value.y !== null);
+      if (!measured.length) { card.appendChild(element("div", "result-chart-empty", "No measured values for this workload.")); host.appendChild(card); return; }
+      const ticks = [...new Set(series.flatMap(line => line.values.map(value => value.x)))].sort((a, b) => a - b);
+      const maximum = Math.max(...measured.map(value => value.y), 0.01);
+      const magnitude = 10 ** Math.floor(Math.log10(maximum / 5));
+      const step = [1, 2, 2.5, 5, 10].find(value => value * magnitude >= maximum / 5) * magnitude;
+      const tickCount = Math.ceil(maximum / step);
+      const ceiling = tickCount * step;
+      const x = value => ticks.length === 1 ? 267 : 58 + ticks.indexOf(value) * 418 / (ticks.length - 1);
+      const y = value => 198 - value / ceiling * 162;
+      const svg = resultSvg("svg", { viewBox: "0 0 510 250", role: "group", "aria-label": `${title}, ${unit}; exact values in the test point table` });
+      for (let tick = 0; tick <= tickCount; tick++) {
+        const value = tick * step;
+        svg.append(resultSvg("line", { x1: 58, x2: 476, y1: y(value), y2: y(value), class: "chart-grid" }),
+          resultSvg("text", { x: 48, y: y(value) + 4, "text-anchor": "end" }, resultFormat(value)));
+      }
+      ticks.forEach(value => svg.appendChild(resultSvg("text", { x: x(value), y: 220, "text-anchor": "middle" }, resultFormat(value, 0))));
+      svg.appendChild(resultSvg("text", { x: 267, y: 243, "text-anchor": "middle" }, axis === "input" ? "Input tokens · tested lengths" : "Concurrency · tested levels"));
+      const legend = element("div", "result-legend");
+      const readout = element("div", "result-chart-readout", "Hover or focus a point for its value. Click a legend to hide a series.");
+      const colors = ["#6ee7f2", "#d9ff62", "#b9a7ff", "#ffad70", "#f390bd", "#86efac", "#98afff"];
+      series.forEach((line, index) => {
+        const color = colors[index % colors.length];
+        const group = resultSvg("g");
+        let segment = [];
+        const flush = () => {
+          if (segment.length) group.appendChild(resultSvg("polyline", { points: segment.join(" "), fill: "none", stroke: color, "stroke-width": 2, "stroke-dasharray": index >= colors.length ? "5 3" : "none" }));
+          segment = [];
+        };
+        line.values.forEach(value => { if (value.y === null) flush(); else segment.push(`${x(value.x)},${y(value.y)}`); });
+        flush();
+        line.values.filter(value => value.y !== null).forEach(value => {
+          const label = `${value.point.name} · ${resultFormat(value.y)} ${unit} · ${value.point.status}`;
+          const circle = resultSvg("circle", { cx: x(value.x), cy: y(value.y), r: 4, fill: color, stroke: "#10151d", "stroke-width": 2, tabindex: 0, role: "img", "aria-label": label });
+          circle.appendChild(resultSvg("title", {}, label));
+          ["mouseenter", "focus"].forEach(event => circle.addEventListener(event, () => { readout.textContent = label; }));
+          group.appendChild(circle);
+        });
+        svg.appendChild(group);
+        const toggle = element("button", "result-legend-item", line.name);
+        toggle.style.setProperty("--series-color", color);
+        toggle.setAttribute("aria-pressed", "true");
+        toggle.addEventListener("click", () => {
+          const visible = toggle.getAttribute("aria-pressed") !== "true";
+          toggle.setAttribute("aria-pressed", String(visible));
+          group.style.display = visible ? "" : "none";
+        });
+        legend.appendChild(toggle);
+      });
+      card.append(svg, legend, readout);
+      host.appendChild(card);
+    }
+    function renderPointDetails(host, point) {
+      host.appendChild(element("div", "result-point-id", point.name));
+      const stats = element("div", "result-detail-stats");
+      stats.append(kv("Requests", resultFormat(point.requests, 0)), kv("Objective · native metric", resultFormat(point.objective)),
+        kv("Stability", point.stable === true ? "Stable" : point.stable === false ? "Unstable" : "Not reported"));
+      host.appendChild(stats);
+      if (point.raw.reason) host.appendChild(element("p", "result-failure", `${point.raw.failure_stage || "Evaluation"}: ${point.raw.reason}`));
+      if (point.windows.length) {
+        host.appendChild(element("p", "result-note", "Objective by measurement window · excludes warmup · native metric units"));
+        const maximum = Math.max(...point.windows.filter(value => value !== null).map(Math.abs), 1e-12);
+        point.windows.forEach((value, index) => {
+          const row = element("div", "result-window");
+          const bar = element("div", "result-window-track");
+          const fill = element("div", "result-window-fill");
+          fill.style.width = `${value === null ? 0 : Math.abs(value) / maximum * 100}%`;
+          bar.appendChild(fill);
+          row.append(element("span", "", `W${index + 1}`), bar, element("span", "", resultFormat(value)));
+          host.appendChild(row);
         });
       }
-      return rows;
+      const accuracy = Object.entries(point.raw.accuracy_metrics || {}).filter(([key, value]) => key.startsWith("results.") && resultNumber(value) !== null);
+      if (accuracy.length) {
+        const grid = element("div", "result-detail-stats");
+        accuracy.forEach(([key, value]) => grid.appendChild(kv(key.replace(/^results\./, ""), resultFormat(value, 4))));
+        host.appendChild(grid);
+      }
+      host.appendChild(resultDisclosure("Point evidence · raw JSON", body => body.appendChild(element("pre", "", JSON.stringify(point.raw, null, 2)))));
     }
     function renderResult(host, detail) {
-      const source = detail.validation || detail.summary;
+      const source = resultSource(detail);
       if (!source) { host.appendChild(element("div", "empty", "No result has been synchronized yet.")); return; }
-      const grid = element("div", "kv-grid");
-      flatten(source).slice(0, 40).forEach(([key, value]) => grid.appendChild(kv(key, Array.isArray(value) ? JSON.stringify(value) : value)));
-      host.appendChild(grid);
+      const points = resultPoints(source);
+      const uid = detail.run.run_uid;
+      if (!resultViews.has(uid)) resultViews.set(uid, { output: "", input: "", status: "", sort: "output", direction: 1, expanded: new Set(), raw: false });
+      const view = resultViews.get(uid);
+      const dashboard = element("div", "result-dashboard");
+      const evaluation = source.evaluation || {};
+      const passed = source.passed ?? evaluation.gate_passed;
+      const heading = element("div", "result-heading");
+      const title = element("div");
+      title.append(element("div", "eyebrow", "EVALUATION REPORT"), element("h2", "", "Results at a glance"));
+      const headingActions = element("div", "result-heading-actions");
+      const expand = element("button", "button", resultExpanded ? "Show run list" : "Expand results");
+      expand.setAttribute("aria-pressed", String(resultExpanded));
+      expand.addEventListener("click", () => {
+        resultExpanded = !resultExpanded;
+        host.closest(".runs-layout").classList.toggle("results-expanded", resultExpanded);
+        expand.textContent = resultExpanded ? "Show run list" : "Expand results";
+        expand.setAttribute("aria-pressed", String(resultExpanded));
+      });
+      headingActions.append(resultBadge(passed === true ? "Passed" : passed === false ? "Failed" : "Pending"), expand);
+      heading.append(title, headingActions);
+      dashboard.appendChild(heading);
+      const cards = element("div", "result-overview");
+      function stat(label, value, note, accent = "") {
+        const card = element("div", "result-stat");
+        card.append(element("div", "result-note", label), element("div", `result-stat-value ${accent}`, value), element("div", "result-note", note));
+        cards.appendChild(card);
+      }
+      const qualified = points.filter(point => point.status === "Passed").length;
+      stat("Test points passed", points.length ? `${qualified} / ${points.length}` : "—", points.length ? `${points.filter(point => point.stable === true).length} stable · ${points.filter(point => point.status === "Failed").length} failed` : "No test point results reported", qualified ? "result-accent" : "");
+      const accuracies = points.filter(point => point.accuracy !== null);
+      const accuracy = accuracies.length === 1 ? accuracies[0] : null;
+      const accuracyNames = accuracy ? Object.entries(accuracy.raw.accuracy_metrics || {}).filter(([key, value]) => key.startsWith("results.") && value === accuracy.accuracy).map(([key]) => key.replace(/^results\./, "")) : [];
+      const fractionMetric = accuracy && accuracy.accuracy >= 0 && accuracy.accuracy <= 1 && accuracyNames.length && accuracyNames.every(name => /\.(exact_match|acc|acc_norm)(,|$)/.test(name));
+      const accuracyText = accuracy ? fractionMetric ? `${resultFormat(accuracy.accuracy * 100)}%` : resultFormat(accuracy.accuracy, 4) : accuracies.length ? `${accuracies.length} checks` : "—";
+      stat("Accuracy · gate metric", accuracyText, accuracyNames.join(" · ") || (accuracies.length ? "See point evidence for metric details" : "No accuracy result reported"));
+      const profile = source.profile;
+      stat("Profile capture", profile?.complete === true ? "Complete" : profile?.complete === false ? "Incomplete" : "—", profile ? `${resultFormat(profile.metrics?.raw_trace_count, 0)} traces · ${resultFormat(profile.metrics?.summary_row_count, 0)} summary rows` : "No profile result reported");
+      dashboard.appendChild(cards);
+      const failureReason = evaluation.reason || source.error;
+      if (failureReason) dashboard.appendChild(element("p", "result-failure", failureReason));
+      if (points.length) {
+        const outputLengths = [...new Set(points.map(point => point.output).filter(value => value !== null))].sort((a, b) => a - b);
+        if (outputLengths.length) {
+          if (!outputLengths.includes(Number(view.chartOutput))) view.chartOutput = String(outputLengths.reduce((best, value) => points.filter(p => p.output === value).length > points.filter(p => p.output === best).length ? value : best));
+          const chartHeading = element("div", "result-section-head");
+          chartHeading.append(element("h3", "", "Performance trends"), resultSelect("Chart output length", outputLengths.map(value => [String(value), `${resultFormat(value, 0)} tokens`]), view.chartOutput, value => { view.chartOutput = value; drawCharts(); }));
+          const charts = element("div", "result-charts");
+          function drawCharts() {
+            clear(charts);
+            const output = Number(view.chartOutput);
+            const oneConcurrency = new Set(points.filter(p => p.output === output).map(p => p.concurrency)).size === 1;
+            renderResultChart(charts, points, output, "throughput", oneConcurrency ? "input" : "concurrency", "Output throughput", "tok/s");
+            renderResultChart(charts, points, output, "ttft", "input", "Time to first token", "ms");
+          }
+          dashboard.append(chartHeading, charts);
+          drawCharts();
+        }
+        const tableHeading = element("div", "result-section-head");
+        const count = element("span", "result-note");
+        count.setAttribute("aria-live", "polite");
+        tableHeading.append(element("h3", "", "Test point results"), count);
+        const filters = element("div", "result-filters");
+        function filter(label, key, options) {
+          filters.appendChild(resultSelect(label, options, view[key], value => { view[key] = value; drawTable(); }));
+        }
+        filter("Output tokens", "output", [["", "All lengths"], ...outputLengths.map(value => [String(value), resultFormat(value, 0)])]);
+        filter("Input tokens", "input", [["", "All lengths"], ...[...new Set(points.map(p => p.input).filter(value => value !== null))].sort((a, b) => a - b).map(value => [String(value), resultFormat(value, 0)])]);
+        filter("Point status", "status", [["", "All statuses"], ...["Passed", "Failed", "Pending", "Skipped"].map(value => [value, value])]);
+        const scroller = element("div", "result-table-scroll");
+        scroller.tabIndex = 0; scroller.setAttribute("role", "region"); scroller.setAttribute("aria-label", "Test point results, horizontally scrollable");
+        const table = element("table", "result-table");
+        const caption = element("caption", "", "Input / output in tokens · throughput in tok/s · mean TTFT / TPOT in ms. Recorded aggregate metrics; stable multi-window runs use the median across measurement windows. ★ Primary point.");
+        table.appendChild(caption);
+        const thead = element("thead"); const tbody = element("tbody"); table.append(thead, tbody); scroller.appendChild(table);
+        const columns = [["input", "Input"], ["output", "Output"], ["concurrency", "C"], ["requests", "N"], ["throughput", "Throughput"], ["ttft", "TTFT"], ["tpot", "TPOT"], ["status", "Status"]];
+        function drawTable() {
+          const rows = filteredResultPoints(points, view);
+          count.textContent = `${rows.length} of ${points.length} points`;
+          clear(thead); clear(tbody);
+          const tr = element("tr"); const expandHead = element("th", "", "Detail"); expandHead.scope = "col"; tr.appendChild(expandHead);
+          columns.forEach(([key, label]) => {
+            const th = element("th"); th.scope = "col";
+            th.setAttribute("aria-sort", view.sort === key ? view.direction === 1 ? "ascending" : "descending" : "none");
+            const button = element("button", "result-sort", label + (view.sort === key ? view.direction === 1 ? " ↑" : " ↓" : " ↕"));
+            button.setAttribute("aria-label", `Sort by ${label}`);
+            if (key === "concurrency") button.title = "Maximum concurrent requests";
+            if (key === "requests") button.title = "Number of prompts";
+            const units = { input: "tokens", output: "tokens", throughput: "tok/s", ttft: "mean · ms", tpot: "mean · ms" };
+            if (units[key]) button.appendChild(element("span", "result-table-unit", units[key]));
+            button.addEventListener("click", () => { view.direction = view.sort === key ? -view.direction : 1; view.sort = key; drawTable(); thead.querySelectorAll("button")[columns.findIndex(c => c[0] === key)].focus(); });
+            th.appendChild(button); tr.appendChild(th);
+          });
+          thead.appendChild(tr);
+          rows.forEach((point, index) => {
+            const row = element("tr"); row.dataset.point = point.name;
+            const toggleCell = element("td");
+            const toggle = element("button", "result-expand", view.expanded.has(point.name) ? "−" : "+");
+            toggle.setAttribute("aria-label", `Details for ${point.name}`);
+            toggle.setAttribute("aria-expanded", String(view.expanded.has(point.name)));
+            const detailRow = element("tr", "result-expanded-row");
+            detailRow.id = `result-point-${index}`;
+            toggle.setAttribute("aria-controls", detailRow.id);
+            detailRow.hidden = !view.expanded.has(point.name);
+            const cell = element("td"); cell.colSpan = columns.length + 1; detailRow.appendChild(cell);
+            let rendered = false;
+            const populate = () => { if (!rendered) { renderPointDetails(cell, point); rendered = true; } };
+            if (!detailRow.hidden) populate();
+            toggle.addEventListener("click", () => {
+              detailRow.hidden = !detailRow.hidden;
+              if (!detailRow.hidden) { view.expanded.add(point.name); populate(); } else view.expanded.delete(point.name);
+              toggle.textContent = detailRow.hidden ? "+" : "−";
+              toggle.setAttribute("aria-expanded", String(!detailRow.hidden));
+            });
+            toggleCell.appendChild(toggle); row.appendChild(toggleCell);
+            columns.forEach(([key]) => {
+              const td = element("td");
+              if (key === "status") td.appendChild(resultBadge(point.status));
+              else td.textContent = resultFormat(point[key]) + (key === "input" && point.primary ? " ★" : "");
+              if (key === "input") td.title = point.name;
+              if (key === "throughput") td.className = "result-throughput";
+              row.appendChild(td);
+            });
+            tbody.append(row, detailRow);
+          });
+          if (!rows.length) { const row = element("tr"); const cell = element("td", "result-no-matches", "No points match these filters."); cell.colSpan = columns.length + 1; row.appendChild(cell); tbody.appendChild(row); }
+        }
+        dashboard.append(tableHeading, filters, scroller);
+        drawTable();
+      } else dashboard.appendChild(element("p", "result-note", "No test point measurements were reported. The synchronized result is available below."));
+      dashboard.appendChild(resultDisclosure("Raw result & metadata", body => body.appendChild(element("pre", "", JSON.stringify(source, null, 2))), view.raw, open => { view.raw = open; }));
+      host.appendChild(dashboard);
     }
     function renderArtifacts(host, artifacts) {
       const items = artifacts && artifacts.items ? artifacts.items : [];
