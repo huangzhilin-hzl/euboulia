@@ -431,7 +431,9 @@ def test_loads_exact_dsv4_megamoe_target_validation_scenario(tmp_path: Path) -> 
     accuracy = config.optimization.evaluation.accuracy
     assert accuracy is not None
     assert accuracy.command.argv[:3] == (
-        "{workspace}/.euboulia-lm-eval/bin/python", "-m", "euboulia.harnesses.lm_eval"
+        "{workspace}/.euboulia-lm-eval/bin/python",
+        "-m",
+        "euboulia.harnesses.lm_eval",
     )
     assert accuracy.command.argv[accuracy.command.argv.index("--gsm8k-dataset-path") + 1] == (
         "openai/gsm8k"
@@ -483,7 +485,11 @@ def test_loads_exact_dsv4_megamoe_target_validation_scenario(tmp_path: Path) -> 
     assert config.target.launch.env["SGLANG_OPT_USE_DEEPGEMM_MEGA_MOE"] == "1"
     assert config.optimization.profiling.workload_point == "isl16384-osl256-c1-n1"
     assert config.optimization.profiling.expected_rank_traces == 8
-    assert config.optimization.profiling.keep_raw is False
+    assert config.optimization.profiling.keep_raw is True
+    assert config.optimization.profiling.repetitions == 2
+    assert config.optimization.profiling.request_waves == 4
+    assert config.optimization.profiling.activities == ("CPU", "GPU")
+    assert len(config.optimization.profiling.workload_points) == 2
     assert config.optimization.profiling.required_kernel_pattern == "fp8_mxfp4_mega_moe"
     launch_facets = derive_sglang_launch_facets(config.target.launch.options)
     assert launch_facets["backends"] == {"moe_a2a": "megamoe"}
@@ -1223,3 +1229,44 @@ def test_execution_storage_and_workspace_root_are_host_defaults(
 
     assert managed.optimization.workspace is not None
     assert managed.optimization.workspace.root_dir == tmp_path / ".euboulia/worktrees"
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("workload_points", ["missing"]),
+        ("workload_points", ["short-c1", "short-c1"]),
+        ("repetitions", 0),
+        ("repetitions", 11),
+        ("request_waves", 33),
+        ("purpose", "performance-verdict"),
+    ],
+)
+def test_profile_collection_rejects_invalid_policy(
+    tmp_path: Path, field: str, value: object
+) -> None:
+    document = v3_managed_document(tmp_path)
+    document["optimization"]["profiling"][field] = value
+    config_path = tmp_path / "collection.yaml"
+    config_path.write_text(yaml.safe_dump(document))
+    with pytest.raises(OptimizationConfigError, match="profiling"):
+        load_optimization_config(config_path)
+
+
+def test_semantic_scopes_require_cpu_gpu_and_only_wrap_profile_target(tmp_path):
+    from euboulia.optimization.runner import _profile_target_spec, _target_spec
+
+    document = v3_managed_document(tmp_path)
+    document["optimization"]["profiling"].update(semantic_scopes=True, activities=["GPU"])
+    path = tmp_path / "scopes.yaml"
+    path.write_text(yaml.safe_dump(document))
+    with pytest.raises(OptimizationConfigError, match="requires CPU and GPU"):
+        load_optimization_config(path)
+    document["optimization"]["profiling"]["activities"] = ["CPU", "GPU"]
+    path.write_text(yaml.safe_dump(document))
+    config = load_optimization_config(path)
+    profile, baseline = _profile_target_spec(config), _target_spec(config)
+    assert "euboulia.profilers.sglang_launcher" in profile.launch_argv
+    assert "sglang.launch_server" in baseline.launch_argv
+    assert profile.launch_env["EUBOULIA_SEMANTIC_SCOPES"] == "1"
+    assert "EUBOULIA_SEMANTIC_SCOPES" not in baseline.launch_env

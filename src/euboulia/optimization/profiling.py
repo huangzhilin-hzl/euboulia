@@ -8,7 +8,7 @@ import os
 import re
 import shutil
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,6 +16,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import ProxyHandler, Request, build_opener
 
 from euboulia.execution import ExecutionResult
+from euboulia.models import JSONValue
 from euboulia.optimization.config import SGLangProfilingConfig
 from euboulia.optimization.contracts import (
     AnalysisReport,
@@ -66,13 +67,13 @@ class SGLangProfiler:
         *,
         endpoint: str,
         run_workload: Callable[[], ExecutionResult],
+        workload_metadata: Mapping[str, JSONValue] | None = None,
     ) -> ProfileResult:
         required = {Capability.PROFILE_EXECUTION, Capability.BENCHMARK_EXECUTION}
         missing = sorted(required - context.authorizations, key=lambda item: item.value)
         if missing:
             raise ProfileCaptureError(
-                "active profile requires capabilities: "
-                + ", ".join(item.value for item in missing)
+                "active profile requires capabilities: " + ", ".join(item.value for item in missing)
             )
 
         profile_root = context.artifact_dir / "profile"
@@ -177,8 +178,24 @@ class SGLangProfiler:
                 "status": "complete",
                 "profile_id": profile_id,
                 "provider": self.config.provider.value,
+                "run_uid": context.run_uid,
+                "iteration_id": context.iteration_id,
+                "recipe_digest": context.input_digest,
                 "candidate_id": request.candidate_id,
                 "source_revision": request.source_revision,
+                "workload_point": (workload_metadata or {}).get("name", self.config.workload_point),
+                "purpose": self.config.purpose,
+                "workload": dict(workload_metadata or {}),
+                "clock_alignment": "unverified",
+                "semantic_scopes": {
+                    "enabled": self.config.semantic_scopes,
+                    "schema": "euboulia::json/v1",
+                    "step_basis": "per-model-runner profiled forward sequence",
+                    "module_basis": "Python module forward hooks during profiling",
+                    "cuda_graph_modules": "unavailable unless separately recorded",
+                },
+                "measurement_lane": "profile_diagnostic",
+                "gate_eligible": False,
                 "workload_digest": request.workload_digest,
                 "capture": payload,
                 "retention": {
@@ -208,8 +225,7 @@ class SGLangProfiler:
         ]
         if self.config.keep_raw:
             references.extend(
-                _artifact_ref(path, "profile-raw", _raw_media_type(path))
-                for path in trace_paths
+                _artifact_ref(path, "profile-raw", _raw_media_type(path)) for path in trace_paths
             )
         self._observations[profile_id] = observations
         return ProfileResult(
@@ -228,7 +244,7 @@ class SGLangProfiler:
             metadata={
                 "source_revision": request.source_revision,
                 "workload_digest": request.workload_digest,
-                "workload_point": self.config.workload_point,
+                "workload_point": (workload_metadata or {}).get("name", self.config.workload_point),
                 "raw_retained": self.config.keep_raw,
                 "measurement_lane": "profile_diagnostic",
                 "gate_eligible": False,
@@ -268,13 +284,13 @@ class SGLangProfiler:
                 stable_polls = 0
             previous = state
             time.sleep(0.25)
+        if paths and stable_polls < 2:
+            raise ProfileCaptureError("profile export did not settle before the deadline")
         if not paths:
             raise ProfileCaptureError(f"SGLang produced no trace under {raw_dir}")
         expected = self.config.expected_rank_traces
         if expected is not None and len(paths) != expected:
-            raise ProfileCaptureError(
-                f"expected {expected} per-rank traces, found {len(paths)}"
-            )
+            raise ProfileCaptureError(f"expected {expected} per-rank traces, found {len(paths)}")
         return paths
 
     def _summarize(
@@ -324,9 +340,7 @@ class SGLangProfiler:
                 aggregate.total_duration_ns += observation.duration_ns or 0
 
         if raw_count == 0:
-            raise ProfileCaptureError(
-                "SGLang traces contained no complete-duration profile events"
-            )
+            raise ProfileCaptureError("SGLang traces contained no complete-duration profile events")
         if required is not None and len(matched_files) != len(paths):
             missing = sorted(str(path) for path in paths if str(path) not in matched_files)
             raise ProfileCaptureError(
@@ -499,9 +513,7 @@ def _sha256_file(path: Path) -> str:
 
 
 def _write_json_durable(path: Path, payload: dict[str, object]) -> None:
-    encoded = (
-        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
-    ).encode()
+    encoded = (json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n").encode()
     with path.open("xb") as handle:
         handle.write(encoded)
         handle.flush()

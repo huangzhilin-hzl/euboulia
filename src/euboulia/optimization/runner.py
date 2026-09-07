@@ -9,7 +9,7 @@ import shutil
 import uuid
 from collections.abc import Callable, Mapping
 from contextlib import suppress
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import cast
 
@@ -516,6 +516,10 @@ class OptimizationRunner:
             profile_plan={
                 "provider": profiling.provider.value,
                 "workload_point": profiling.workload_point,
+                "workload_points": list(profiling.workload_points),
+                "repetitions": profiling.repetitions,
+                "request_waves": profiling.request_waves,
+                "purpose": profiling.purpose,
                 "warmup_runs": profiling.warmup_runs,
                 "start_step": profiling.start_step,
                 "num_steps": profiling.num_steps,
@@ -523,6 +527,7 @@ class OptimizationRunner:
                 "merge_profiles": profiling.merge_profiles,
                 "with_stack": profiling.with_stack,
                 "record_shapes": profiling.record_shapes,
+                "semantic_scopes": profiling.semantic_scopes,
                 "timeout_seconds": profiling.timeout_seconds,
                 "settle_timeout_seconds": profiling.settle_timeout_seconds,
                 "max_raw_bytes": profiling.max_raw_bytes,
@@ -1030,10 +1035,78 @@ class OptimizationRunner:
         role: str,
         candidate_id: str,
     ) -> tuple[SGLangProfiler, ProfileResult]:
+        primary_profiler, primary = self._capture_one_service_profile(
+            config,
+            context,
+            workspace,
+            handle,
+            role=role,
+            candidate_id=candidate_id,
+        )
+        policy = config.optimization.profiling
+        artifacts = list(primary.artifacts)
+        captures: list[JSONValue] = [
+            {"profile_id": primary.profile_id, "workload_point": policy.workload_point, "window": 1}
+        ]
+        points = tuple(dict.fromkeys((policy.workload_point, *policy.workload_points)))
+        for point in points:
+            for window in range(1, policy.repetitions + 1):
+                if point == policy.workload_point and window == 1:
+                    continue
+                selected = replace(
+                    config,
+                    optimization=replace(
+                        config.optimization,
+                        profiling=replace(policy, workload_point=point),
+                    ),
+                )
+                capture_context = replace(
+                    context,
+                    artifact_dir=context.artifact_dir
+                    / "profile-captures"
+                    / point
+                    / f"window-{window}",
+                )
+                _, capture = self._capture_one_service_profile(
+                    selected,
+                    capture_context,
+                    workspace,
+                    handle,
+                    role=role,
+                    candidate_id=candidate_id,
+                )
+                artifacts.extend(capture.artifacts)
+                captures.append(
+                    {"profile_id": capture.profile_id, "workload_point": point, "window": window}
+                )
+        # Planner evidence stays tied to the primary workload; never pool timings
+        # across distinct workload points or repetitions into one denominator.
+        return primary_profiler, replace(
+            primary,
+            artifacts=tuple(artifacts),
+            metadata={
+                **primary.metadata,
+                "captures": captures,
+            },
+        )
+
+    def _capture_one_service_profile(
+        self,
+        config: OptimizationConfig,
+        context: StageContext,
+        workspace: Path,
+        handle: ServiceHandle,
+        *,
+        role: str,
+        candidate_id: str,
+    ) -> tuple[SGLangProfiler, ProfileResult]:
         profiling = config.optimization.profiling
         profiler = self._profiler or SGLangProfiler(profiling)
         point = next(
             item for item in config.workload_suite.points if item.name == profiling.workload_point
+        )
+        point = replace(
+            point, num_prompts=max(point.num_prompts, point.concurrency * profiling.request_waves)
         )
         runtime_environment = {
             "EUBOULIA_TARGET_ENDPOINT": handle.endpoint,
@@ -1081,15 +1154,23 @@ class OptimizationRunner:
                 raise OptimizationRuntimeError(
                     f"profile warmup failed; inspect {warmup.stderr_path}"
                 )
+        workload_metadata = {
+            **asdict(point),
+            "dataset": config.workload_suite.dataset,
+            "benchmark_parameters": dict(config.benchmark.parameters),
+        }
         profile = profiler.capture(
             ProfileRequest(
                 candidate_id=candidate_id,
                 source_revision=config.baseline.source_revision,
-                workload_digest=_workload_digest(config),
+                workload_digest=hashlib.sha256(
+                    json.dumps(workload_metadata, sort_keys=True).encode()
+                ).hexdigest(),
                 max_bytes=profiling.max_raw_bytes,
             ),
             context,
             endpoint=handle.endpoint,
+            workload_metadata=cast(Mapping[str, JSONValue], workload_metadata),
             run_workload=lambda: _run_profile_command(
                 command,
                 workspace,
@@ -2415,12 +2496,24 @@ def _profile_target_spec(
 ) -> TargetSpec:
     base = _target_spec(config, runtime_record, source_paths=source_paths)
     profiling = config.optimization.profiling
+    argv = base.launch_argv
+    if profiling.semantic_scopes:
+        if "sglang.launch_server" not in argv or "-m" not in argv:
+            raise OptimizationRuntimeError(
+                "semantic_scopes requires python -m sglang.launch_server"
+            )
+        argv = tuple(
+            "euboulia.profilers.sglang_launcher" if token == "sglang.launch_server" else token
+            for token in argv
+        )
     return replace(
         base,
+        launch_argv=argv,
         launch_env={
             **base.launch_env,
             "SGLANG_PROFILE_WITH_STACK": str(profiling.with_stack).lower(),
             "SGLANG_PROFILE_RECORD_SHAPES": str(profiling.record_shapes).lower(),
+            "EUBOULIA_SEMANTIC_SCOPES": "1" if profiling.semantic_scopes else "0",
         },
     )
 

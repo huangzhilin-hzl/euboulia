@@ -1,0 +1,285 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <title>Euboulia · Profile Observatory</title>
+    <link rel="stylesheet" href="/profile.css" />
+  </head>
+  <body>
+    <header>
+      <a href="/" class="brand"
+        ><b>EU</b><span>EUBOULIA<small>INFERENCE LAB</small></span></a
+      ><span class="header-label">PROFILE OBSERVATORY</span
+      ><a class="button" href="/">← 实验列表</a>
+    </header>
+    <div class="layout">
+      <aside class="rail">
+        <div class="eyebrow">EXPERIMENT</div>
+        <label for="run">选择实验</label
+        ><select id="run"></select>
+        <div class="eyebrow capture-label">CAPTURE COLLECTION</div>
+        <div id="captures"></div>
+        <div class="rail-note">
+          <i></i> EVIDENCE FIRST
+          <p>沿真实事件理解计算。<br />保留未知，验证假设。</p>
+        </div>
+      </aside>
+      <main>
+        <div class="heading">
+          <div>
+            <div class="eyebrow">BASELINE → PROFILE → HYPOTHESIS</div>
+            <h1>让推理过程，变得可见。</h1>
+            <p id="subtitle">选择采样，探索 GPU 时间线、热点和代码关联。</p>
+          </div>
+          <button id="refresh">刷新证据</button>
+        </div>
+        <div id="message" role="status" aria-live="polite"></div>
+        <div id="empty" class="empty" hidden></div>
+        <div id="workspace" hidden>
+          <section id="metrics" class="metrics"></section>
+          <div class="scope" id="scope"></div>
+          <section class="panel stage-panel">
+            <div class="panel-heading">
+              <div>
+                <div class="eyebrow">INFERENCE STAGES / RECORDED EVIDENCE</div>
+                <h2>先定位阶段，再追踪热点</h2>
+              </div>
+              <span class="tag" id="stage-state"></span>
+            </div>
+            <div id="stage-coverage"></div>
+            <div id="stage-cards" class="stage-cards"></div>
+            <div class="toolbar semantic-toolbar">
+              <label
+                >阶段
+                <select id="phase">
+                  <option value="">全窗口</option>
+                </select></label
+              >
+              <label
+                >模块
+                <select id="module">
+                  <option value="">全部模块</option>
+                </select></label
+              >
+              <label
+                >Step
+                <select id="step">
+                  <option value="">全部 step</option>
+                </select></label
+              >
+              <button id="reset-stage">重置范围</button>
+            </div>
+            <details class="capture-help" id="module-tree-shell" hidden>
+              <summary>按模块层级探索</summary>
+              <div id="module-tree"></div>
+            </details>
+            <p id="stage-note" class="note"></p>
+            <details class="capture-help">
+              <summary>如何补齐阶段证据</summary>
+              <p>
+                下一次采样启用 CPU + GPU 和 semantic_scopes，保留原始
+                trace。阶段、step 和模块由显式标记与唯一 CUDA launch
+                关联；混合批次保留为 mixed，未建立模块关系的 CUDA Graph kernel
+                保留未知。
+              </p>
+              <p>
+                短窗口不保证覆盖完整 prefill /
+                decode。请检查实际阶段覆盖，再调整 start_step 与
+                num_steps。理解采样可额外启用 stack / shape；收益用无 profiler
+                的 A/B 测试验证。
+              </p>
+            </details>
+          </section>
+          <div class="workbench">
+            <div class="evidence">
+              <section class="panel">
+                <div class="panel-heading">
+                  <div>
+                    <div class="eyebrow">01 / EXECUTION TIMELINE</div>
+                    <h2>计算时间线 <span id="index-state"></span></h2>
+                  </div>
+                  <button id="perfetto">Perfetto ↗</button>
+                </div>
+                <div class="toolbar">
+                  <label
+                    >Rank
+                    <select id="rank">
+                      <option value="">全部</option>
+                    </select></label
+                  ><label
+                    >活动
+                    <select id="kind">
+                      <option value="">全部活动</option>
+                      <option value="gpu_kernel">GPU kernel</option>
+                      <option value="communication">通信 kernel</option>
+                      <option value="cuda_api">CUDA API</option>
+                      <option value="cpu_operator">CPU 算子</option>
+                      <option value="annotation">标注</option>
+                      <option value="memory_transfer">内存传输</option>
+                    </select></label
+                  ><button id="zoom-in" aria-label="缩小时间窗口">＋</button
+                  ><button id="zoom-out" aria-label="扩大时间窗口">−</button
+                  ><button id="reset-time">全窗口</button>
+                </div>
+                <div id="timeline-shell">
+                  <canvas
+                    id="timeline"
+                    aria-label="计算事件时间线；使用下方事件列表进行键盘操作"
+                  ></canvas>
+                  <div id="tooltip" hidden></div>
+                  <div id="timeline-empty" hidden></div>
+                </div>
+                <div class="time-footer">
+                  <label for="position">移动窗口</label
+                  ><input
+                    type="range"
+                    id="position"
+                    min="0"
+                    max="1000"
+                    value="0"
+                  /><span id="time-label"></span>
+                </div>
+                <p id="timeline-note" class="note"></p>
+                <button
+                  id="event-list-toggle"
+                  class="text-button"
+                  aria-expanded="false"
+                >
+                  展开可访问事件列表
+                </button>
+                <div id="event-list" hidden></div>
+              </section>
+              <section class="panel hotspots-panel">
+                <div class="panel-heading">
+                  <div>
+                    <div class="eyebrow">02 / HOTSPOT EXPLORER</div>
+                    <h2 id="hotspot-title">全窗口热点</h2>
+                  </div>
+                  <span id="hotspot-count" class="tag"></span>
+                </div>
+                <div class="toolbar">
+                  <input
+                    id="search"
+                    type="search"
+                    placeholder="搜索 kernel、算子或模块"
+                    aria-label="搜索热点"
+                  /><select id="sort" aria-label="热点排序">
+                    <option value="total_ns">最大 Rank 累计耗时</option>
+                    <option value="mean_ns">平均耗时</option>
+                    <option value="count">调用次数</option></select
+                  ><button id="clear-filter">清除筛选</button>
+                </div>
+                <div class="table-scroll">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Kernel / Operator</th>
+                        <th>调用次数<br />所有 Rank</th>
+                        <th>最大 Rank<br />累计 ms</th>
+                        <th>均值 µs<br />所有调用</th>
+                        <th>Rank 热力图 · 累计 ms</th>
+                      </tr>
+                    </thead>
+                    <tbody id="hotspots"></tbody>
+                  </table>
+                </div>
+                <p class="note">
+                  每行合并同名 kernel，颜色按本行各 Rank 的实际累计 ms
+                  对比；点击色块查看事件证据。展开可查看各 Rank
+                  的次数和活动占比。当前表覆盖选定阶段 / 模块 / step
+                  的全采样窗口，与上方时间线缩放独立。
+                </p>
+              </section>
+            </div>
+            <aside class="inspector panel">
+              <div class="panel-heading">
+                <div>
+                  <div class="eyebrow">03 / EVIDENCE INSPECTOR</div>
+                  <h2>从热点到解释</h2>
+                </div>
+              </div>
+              <div id="inspector"></div>
+            </aside>
+          </div>
+          <section class="panel provenance">
+            <div class="panel-heading">
+              <div>
+                <div class="eyebrow">04 / CAPTURE QUALITY & PROVENANCE</div>
+                <h2>这份证据能说明什么</h2>
+              </div>
+            </div>
+            <div id="quality"></div>
+            <div id="files"></div>
+          </section>
+          <section class="panel">
+            <div class="panel-heading">
+              <div>
+                <div class="eyebrow">05 / OPTIMIZATION NOTEBOOK</div>
+                <h2>让观察成为可验证的假设</h2>
+              </div>
+              <button id="new-hypothesis" class="primary">＋ 记录假设</button>
+            </div>
+            <div class="analysis-grid">
+              <div>
+                <h3>收益假设计算</h3>
+                <p class="note">
+                  手工假设的关键路径模型，未从热点占比推断；不表示实测收益。
+                </p>
+                <label for="fraction"
+                  >关键路径中可优化部分 <span id="fraction-value"></span></label
+                ><input
+                  id="fraction"
+                  type="range"
+                  min="0"
+                  max="100"
+                  value="20"
+                /><label for="speedup"
+                  >该部分的局部加速 <span id="speedup-value"></span></label
+                ><input
+                  id="speedup"
+                  type="range"
+                  min="1"
+                  max="5"
+                  step="0.1"
+                  value="2"
+                />
+                <div id="estimate"></div>
+              </div>
+              <div>
+                <h3>待验证的优化假设</h3>
+                <div id="hypotheses"></div>
+              </div>
+            </div>
+          </section>
+        </div>
+        <footer>
+          诊断通道 · 不用于性能晋升判定 · 实际收益需要无 Profile 的 A/B 验证
+        </footer>
+      </main>
+    </div>
+    <dialog id="draft-dialog">
+      <form id="draft-form">
+        <div class="eyebrow">EVIDENCE → HYPOTHESIS</div>
+        <h2>记录优化假设</h2>
+        <p>保存为本实验的本地草案，不会自动执行 GPU 任务。</p>
+        <label for="draft-title">要验证的改变</label
+        ><input id="draft-title" maxlength="300" required /><label
+          for="draft-evidence"
+          >证据与观察</label
+        ><textarea id="draft-evidence" required></textarea
+        ><label for="draft-validation">验证办法</label
+        ><textarea id="draft-validation" required></textarea
+        ><label for="draft-rejection">否定条件</label
+        ><textarea id="draft-rejection" required></textarea>
+        <div class="dialog-actions">
+          <button type="button" id="close-draft">取消</button
+          ><button class="primary" type="submit">保存本地草案</button>
+        </div>
+        <p id="draft-error" role="alert"></p>
+      </form>
+    </dialog>
+    <script type="module" src="/profile-app.mjs"></script>
+  </body>
+</html>
