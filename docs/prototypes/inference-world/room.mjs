@@ -1,5 +1,15 @@
 import {
   STORAGE_KEY,
+  LEGACY_STORAGE_KEY,
+  SEED_GOAL,
+  currentGoal,
+  scopeKey,
+  inScope,
+  enterRoom,
+  createResearchRoom,
+  createResearchGoal,
+  updateGoalStatus,
+  reviseResearchGoal,
   MEMBERS,
   ARTIFACTS,
   createRoom,
@@ -46,6 +56,7 @@ const avatar = (id) => {
 const person = (id) => MEMBERS.find((x) => x.id === id)?.name || id;
 const status = {
   done: "已交付",
+  cancelled: "已取消",
   running: "进行中",
   queued: "待接力",
   paused: "已暂停",
@@ -53,11 +64,14 @@ const status = {
 };
 let state;
 try {
-  state = restoreRoom(localStorage.getItem(STORAGE_KEY));
+  state = restoreRoom(
+    localStorage.getItem(STORAGE_KEY) ||
+      localStorage.getItem(LEGACY_STORAGE_KEY),
+  );
 } catch {
   state = createRoom();
 }
-let page = "room",
+let page = state.page,
   panel = null,
   refs = [],
   noticeTimer,
@@ -68,6 +82,7 @@ function notice(text) {
   noticeTimer = setTimeout(() => ($("#notice").textContent = ""), 5500);
 }
 function persist() {
+  state.page = page;
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
   } catch {
@@ -87,7 +102,7 @@ function messageMarkup(m) {
   if (m.author === "system")
     return `<div class="system-message" id="${esc(m.id)}">${esc(m.text)}<div class="reference-row">${m.refs.map(reference).join("")}</div></div>`;
   const member = MEMBERS.find((x) => x.id === m.author);
-  return `<article class="message" id="${esc(m.id)}">${avatar(m.author)}<div class="message-body"><div class="message-meta"><strong>${esc(person(m.author))}</strong>${member?.role.includes("Agent") ? '<span class="agent-tag">AGENT</span>' : ""}<time>${esc(m.time)}</time><span class="message-actions"><button data-reply="${esc(m.id)}">回复</button><button data-task-from="${esc(m.id)}">交给队友</button></span></div><p>${esc(m.text)}</p><div class="reference-row">${m.refs.map(reference).join("")}${m.task ? `<button class="reference" data-task="${esc(m.task)}">✓ 查看工作</button>` : ""}</div>${m.kind === "result" ? resultCard() : ""}</div></article>`;
+  return `<article class="message" id="${esc(m.id)}">${avatar(m.author)}<div class="message-body"><div class="message-meta"><strong>${esc(person(m.author))}</strong>${member?.role.includes("Agent") ? '<span class="agent-tag">AGENT</span>' : ""}<time>${esc(m.time)}</time><span class="message-actions"><button data-reply="${esc(m.id)}">回复</button><button data-task-from="${esc(m.id)}">交给队友</button>${m.derivedGoal || m.kind === "goal" ? `<button data-goal="${esc(m.derivedGoal || m.goal)}">查看目标 ↗</button>` : `<button data-goal-from="${esc(m.id)}">转为目标</button>`}</span></div><p>${esc(m.text)}</p><div class="reference-row">${m.refs.map(reference).join("")}${m.task ? `<button class="reference" data-task="${esc(m.task)}">✓ 查看工作</button>` : ""}</div>${m.kind === "result" ? resultCard() : ""}</div></article>`;
 }
 function decisionMarkup() {
   return state.decision
@@ -95,21 +110,24 @@ function decisionMarkup() {
     : `<section class="decision"><div class="decision-label"><span>◌</span> 需要你的方向</div><h3>下一步，先验证哪条线索？</h3><p>Atlas 和 Prism 已把两条路径准备好。选一个重点，团队接着推进。</p><div class="decision-buttons"><button class="button primary" data-direction="ranks">补采多 rank <span>↗</span></button><button class="button" data-direction="mhc">验证 MHC 在高并发的收益</button><button class="text-button muted" data-action="custom-direction">我有别的想法</button></div></section>`;
 }
 function conversation() {
-  const messages = state.messages.filter((m) => m.room === state.room);
+  const messages = state.messages.filter((m) => inScope(state, m));
   if (!messages.length)
-    return `<div class="empty"><div class="empty-icon">#</div><h2>从一个具体问题开始</h2><p>贴一段代码、引用已有证据，或者说说你想验证什么。这个研究室的讨论和工作会保留在一起。</p><button class="button" data-action="seed-kernel">试试：分析这个 kernel 的访存</button></div>`;
-  return `<div class="conversation"><div class="day-rule">今天 · 演示研究记录</div>${messages.map(messageMarkup).join("")}${state.room === "dsv4" ? decisionMarkup() : ""}</div>`;
+    return `<div class="empty"><div class="empty-icon">#</div><h2>从一个具体问题开始</h2><p>贴一段代码、引用已有证据，或者说说你想验证什么。这个研究室的讨论和工作会保留在一起。</p><button class="button" data-action="new-goal">把问题整理成目标</button></div>`;
+  return `<div class="conversation"><div class="day-rule">今天 · 演示研究记录</div>${messages.map(messageMarkup).join("")}${currentGoal(state)?.id === SEED_GOAL && currentGoal(state).status === "active" ? decisionMarkup() : ""}</div>`;
 }
 function taskMarkup(t) {
-  return `<button class="task-row" data-task="${esc(t.id)}"><span class="task-symbol ${esc(t.state)}">${{ done: "✓", running: "◌", paused: "Ⅱ", blocked: "!", queued: "·" }[t.state]}</span><span><strong>${esc(t.title)}</strong><small>${esc(person(t.owner))} · ${t.gpu ? "H20 × 8 / Pod" : "Computer 上的分析工作"}</small></span><span class="task-state">${status[t.state]}</span>${avatar(t.owner)}</button>`;
+  return `<button class="task-row" data-task="${esc(t.id)}"><span class="task-symbol ${esc(t.state)}">${{ done: "✓", running: "◌", paused: "Ⅱ", blocked: "!", queued: "·", cancelled: "−" }[t.state]}</span><span><strong>${esc(t.title)}</strong><small>${esc(person(t.owner))} · ${t.gpu ? "H20 × 8 / Pod" : "Computer 上的分析工作"}</small></span><span class="task-state">${status[t.state]}</span>${avatar(t.owner)}</button>`;
 }
 function work() {
-  const tasks = state.tasks.filter((t) => t.room === state.room);
+  const tasks = state.tasks.filter((t) => inScope(state, t));
   return `<div class="page-body"><div class="page-intro"><div><h2>工作在这里接力</h2><p>从讨论中产生，带着上下文继续。</p></div><button class="button" data-action="new-task">${icon("plus")}交给队友</button></div><div class="filter-row">${[
     ["all", "全部"],
     ["running", "进行中"],
     ["queued", "待接力"],
     ["blocked", "受阻"],
+    ["paused", "已暂停"],
+    ["done", "已交付"],
+    ["cancelled", "已取消"],
   ]
     .map(
       ([v, l]) =>
@@ -125,10 +143,13 @@ function work() {
 }
 function artifacts() {
   const cited = new Set(
-    state.messages.filter((m) => m.room === state.room).flatMap((m) => m.refs),
+    state.messages.filter((m) => inScope(state, m)).flatMap((m) => m.refs),
   );
   const entries = Object.entries(ARTIFACTS).filter(
-    ([id]) => state.room === "dsv4" || cited.has(id),
+    ([id]) =>
+      currentGoal(state)?.id === SEED_GOAL ||
+      currentGoal(state)?.refs.includes(id) ||
+      cited.has(id),
   );
   return `<div class="page-body"><div class="page-intro"><div><h2>能继续工作的产物</h2><p>每份证据都能回到原来的讨论，也能被下一项工作引用。</p></div></div>${
     !entries.length
@@ -142,8 +163,7 @@ function artifacts() {
   }</div>`;
 }
 function mapView() {
-  if (state.room === "kernels")
-    return '<div class="empty"><h2>工作开始后，关系会在这里生长</h2><p>你可以先说想法，随后查看讨论、任务和证据如何连接。</p></div>';
+  if (currentGoal(state)?.id !== SEED_GOAL) return goalMap();
   return `<div class="page-body"><div class="page-intro"><div><h2>看看工作如何连接</h2><p>研究关系概览 · 点击打开对应证据或工作。</p></div></div><div class="relationship-map"><button class="map-node" data-action="context">把 DSV4 的解码再快一点<small>研究方向 · 正确性优先</small></button><span class="map-edge"></span><div class="map-split"><button class="map-node" data-artifact="compare">已有基线与 MHC 候选<small>无 profile 比较 · 正确性待补</small></button><button class="map-node" data-artifact="trace">Decode 等待线索<small>单 rank 观察 · 原因待验证</small></button></div><span class="map-edge"></span><button class="map-node" data-action="show-work">${state.decision === "ranks" ? "补齐多 rank 证据" : state.decision === "mhc" ? "验证 C1 / C16 的收益" : "两条路径，等待研究方向"}<small>${state.decision ? "来自你的决定 · 已进入工作队列" : "讨论决定下一步"}</small></button></div><p class="map-note">这张图从研究记录中整理，当前为示例概览。<br>精确任务依赖、版本和输入契约在执行层维护。</p><p class="map-note"><a href="network.html" target="_blank" rel="noopener">查看 v0.1 任务依赖原型 ↗</a></p></div>`;
 }
 function membersPage() {
@@ -156,18 +176,18 @@ function memoryPage() {
   return `<div class="page-body"><div class="page-intro"><div><h2>让下一次少走弯路</h2><p>保留适用条件、证据和反例，队友在新工作中按需引用。</p></div></div><article class="memory-card"><div class="eyebrow">团队经验 · 示例</div><h3>低并发下的收益，不能直接外推到高并发</h3><p>DSV4 / H20 上的历史反例提示，C1 的收益可能在 C16 消失。MHC 候选需要同时测量两种并发，才能讨论适用范围。</p><div class="tag-row"><span class="tag">DSV4</span><span class="tag">H20</span><span class="tag">C1 → C16</span><span class="tag">有反例</span></div><button class="button" data-artifact="memory">打开证据与适用范围 ↗</button><button class="button" data-action="use-memory">带进当前研究室</button></article>${state.savedMemory ? '<article class="memory-card"><div class="eyebrow">新草稿 · 尚未复现</div><h3>MHC 候选：TPOT 降低 7.7%</h3><p>示例数据，仅适用于当前 C1 测量。正确性和 C16 证据待补；不能作为已验证经验使用。</p><button class="button" data-artifact="compare">查看来源</button></article>' : ""}</div>`;
 }
 function activityPage() {
-  return `<div class="page-body"><div class="page-intro"><div><h2>回来的时候，知道该看哪里</h2><p>聚合发现、阻塞和你的决定。底层运行记录按需打开。</p></div></div>${!state.decision ? `<div class="activity-item"><small>dsv4-on-h20 · 需要你的方向</small>两条路径已经准备好：补采多 rank，或验证 MHC。<br><button class="button" data-action="attention">回到讨论</button></div>` : ""}${state.messages
+  return `<div class="page-body"><div class="page-intro"><div><h2>回来的时候，知道该看哪里</h2><p>聚合发现、阻塞和你的决定。底层运行记录按需打开。</p></div></div>${!state.decision && state.goals.find((g) => g.id === SEED_GOAL)?.status === "active" ? `<div class="activity-item"><small>dsv4-on-h20 · 需要你的方向</small>两条路径已经准备好：补采多 rank，或验证 MHC。<br><button class="button" data-action="attention">回到讨论</button></div>` : ""}${state.messages
     .slice()
     .reverse()
     .filter((m) => m.author === "system" || m.kind)
     .map(
       (m) =>
-        `<div class="activity-item"><small>${esc(m.time)} · ${m.room === "dsv4" ? "dsv4-on-h20" : "kernel-playground"} · ${m.author === "system" ? "研究记录" : esc(person(m.author))}</small>${esc(m.text)}<div class="reference-row">${m.refs.map(reference).join("")}</div></div>`,
+        `<div class="activity-item"><small>${esc(m.time)} · ${esc(state.rooms.find((r) => r.id === m.room)?.name || m.room)}${m.goal ? " / " + esc(state.goals.find((g) => g.id === m.goal)?.title || "") : " / 自由讨论"} · ${m.author === "system" ? "研究记录" : esc(person(m.author))}</small>${esc(m.text)}<div class="reference-row">${m.refs.map(reference).join("")}</div><button class="text-button" data-message-link="${esc(m.id)}">回到讨论 ↗</button></div>`,
     )
     .join("")}</div>`;
 }
 function saveDraft() {
-  state.drafts[state.room] = {
+  state.drafts[scopeKey(state)] = {
     text: $("#message").value,
     refs: [...refs],
     asTask: $("#as-task").checked,
@@ -176,7 +196,7 @@ function saveDraft() {
   persist();
 }
 function loadDraft() {
-  const d = state.drafts[state.room] || {};
+  const d = state.drafts[scopeKey(state)] || {};
   $("#message").value = typeof d.text === "string" ? d.text : "";
   refs = Array.isArray(d.refs) ? d.refs.filter((id) => ARTIFACTS[id]) : [];
   $("#as-task").checked = Boolean(d.asTask);
@@ -193,7 +213,13 @@ function renderComposer() {
     )
     .join("");
   $("#send").disabled = !$("#message").value.trim();
+  const inactive = currentGoal(state) && currentGoal(state).status !== "active";
+  $("#as-task").disabled = Boolean(inactive);
+  if (inactive) $("#as-task").checked = false;
   $("#task-owner").hidden = !$("#as-task").checked;
+  $("#message").placeholder = currentGoal(state)
+    ? `围绕这个目标继续讨论，@ 队友或引用证据…`
+    : "先聊一个问题，也可以把讨论转为目标…";
 }
 function render() {
   $$("[data-icon]").forEach((el) => (el.innerHTML = icon(el.dataset.icon)));
@@ -202,23 +228,26 @@ function render() {
       `<button class="member-button" data-member="${m.id}">${avatar(m.id)}<span><strong>${m.name}</strong><small>${m.role}</small></span><i class="presence ${m.id === "lin" ? "away" : m.id === "prism" ? "busy" : ""}"></i></button>`,
   ).join("");
   $$(".rail-button[data-page]").forEach((b) => {
-    b.classList.toggle("active", b.dataset.page === page);
-    b.setAttribute("aria-current", b.dataset.page === page ? "page" : "false");
+    const active =
+      b.dataset.page === page ||
+      (b.dataset.page === "rooms" && page === "room");
+    b.classList.toggle("active", active);
+    b.setAttribute("aria-current", active ? "page" : "false");
   });
-  $$(".room-link").forEach((b) =>
-    b.classList.toggle(
-      "selected",
-      b.dataset.room === state.room && page === "room",
-    ),
-  );
-  $(".unread").hidden = Boolean(state.decision);
-  $(".needs-direction").hidden = Boolean(state.decision);
+  $("#room-total").textContent = state.rooms.length;
+  $("#room-list").innerHTML = state.rooms
+    .map(
+      (r) =>
+        `<button class="room-link ${r.id === state.room && page === "room" ? "selected" : ""}" data-room="${esc(r.id)}"><span class="hash">#</span><span>${esc(r.name)}</span><small>${state.goals.filter((g) => g.room === r.id && g.status === "active").length || ""}</small></button>`,
+    )
+    .join("");
+  const room = state.rooms.find((r) => r.id === state.room);
+  const goal = currentGoal(state);
   $("#room-name").textContent =
     page === "room"
-      ? state.room === "dsv4"
-        ? "dsv4-on-h20"
-        : "kernel-playground"
+      ? room.name
       : {
+          rooms: "全部研究室",
           members: "团队",
           computers: "计算机",
           memory: "经验",
@@ -226,19 +255,26 @@ function render() {
         }[page];
   $("#room-heading").textContent =
     page === "room"
-      ? state.room === "dsv4"
-        ? "把 DSV4 的解码再快一点"
-        : "在小实验里，试出新的可能"
+      ? goal?.title || room.name
       : {
+          rooms: "今天，想推进什么问题？",
           members: "人和 Agent，共享一个研究室",
           computers: "连接工作环境，接着往下做",
           memory: "把一次研究变成下一次的起点",
           activity: "研究室正在发生什么",
         }[page];
   $("#room-controls").hidden = page !== "room";
-  $(".context-strip").hidden = state.room !== "dsv4";
-  $("#task-count").textContent = state.tasks.filter(
-    (t) => t.room === state.room,
+  $("#new-goal-trigger").hidden = page !== "room";
+  $('.header-actions [data-action="context"]').hidden = page !== "room";
+  $("#goal-strip").hidden = !goal;
+  $("#goal-strip").innerHTML = goal
+    ? `<button class="text-button" data-room="${esc(state.room)}">← 全部目标</button><span class="tag">${goalStatus[goal.status]}</span><span>${esc(person(goal.owner))} 负责</span><button class="text-button" data-action="goal-details">目标详情 ↗</button>`
+    : "";
+  $("#scope-context").hidden = state.view === "overview";
+  $("#scope-context").innerHTML =
+    `<button data-action="context">${esc(goal ? "目标上下文" : "研究室自由讨论 · 未关联目标")}${icon("chevron")}</button>${goal?.id === SEED_GOAL && goal.status === "active" && !state.decision ? '<button class="needs-direction" data-action="attention">◌ 1 个方向待定 ↗</button>' : ""}`;
+  $("#task-count").textContent = state.tasks.filter((t) =>
+    inScope(state, t),
   ).length;
   $$(".room-tabs button").forEach((b) => {
     const selected = b.dataset.view === state.view;
@@ -248,10 +284,16 @@ function render() {
   $("#content").innerHTML =
     page === "room"
       ? (
-          { conversation, tasks: work, artifacts, map: mapView }[state.view] ||
-          conversation
+          {
+            overview: roomOverview,
+            conversation,
+            tasks: work,
+            artifacts,
+            map: mapView,
+          }[state.view] || conversation
         )()
       : {
+          rooms: roomsPage,
           members: membersPage,
           computers: computersPage,
           memory: memoryPage,
@@ -262,7 +304,9 @@ function render() {
     $("#content").setAttribute("aria-labelledby", `tab-${state.view}`);
   else $("#content").removeAttribute("aria-labelledby");
   $("#composer-wrap").hidden = page !== "room" || state.view !== "conversation";
-  $("#suggestions").hidden = state.room !== "dsv4";
+  $("#suggestions").hidden =
+    currentGoal(state)?.id !== SEED_GOAL ||
+    currentGoal(state)?.status !== "active";
   renderComposer();
   persist();
 }
@@ -323,6 +367,8 @@ function openArtifact(id) {
 function openTask(id) {
   const t = state.tasks.find((t) => t.id === id);
   if (!t) return;
+  if (!inScope(state, t) || page !== "room")
+    navigate(t.room, t.goal || null, "tasks");
   panel = { kind: "task", id };
   showPanel(
     "工作 · 本地演示",
@@ -330,10 +376,22 @@ function openTask(id) {
       [
         ["负责人", person(t.owner)],
         ["当前状态", status[t.state]],
+        [
+          "关联目标",
+          state.goals.find((g) => g.id === t.goal)?.title || "研究室自由讨论",
+        ],
         ["执行环境", t.gpu ? "H20 × 8 / 隔离 Pod" : "Computer"],
         ["来源", t.source ? "研究室消息" : "已有研究记录"],
+        ...(t.goal
+          ? [
+              [
+                "依据的目标说明",
+                `第 ${t.goalRevision || 1} 版（当前第 ${state.goals.find((g) => g.id === t.goal)?.revision || 1} 版）`,
+              ],
+            ]
+          : []),
       ],
-    )}<div class="reference-row">${t.refs.map(reference).join("")}</div>${t.state === "blocked" ? '<div class="callout">H20 连接中断。真实执行恢复前须核对原 Pod；此原型只演示阻塞与回到队列。</div>' : ""}<div class="decision-buttons">${t.state === "queued" ? `<button class="button primary" data-task-action="start" data-id="${esc(t.id)}">演示开始</button>` : ""}${["queued", "running", "blocked"].includes(t.state) ? `<button class="button" data-task-action="pause" data-id="${esc(t.id)}">暂停演示任务</button>` : ""}${t.state === "paused" ? `<button class="button primary" data-task-action="resume" data-id="${esc(t.id)}">恢复演示任务</button>` : ""}<button class="button" data-steer-task="${esc(t.id)}">补充方向 ↗</button></div>`,
+    )}<div class="reference-row">${t.refs.map(reference).join("")}</div>${t.state === "blocked" ? '<div class="callout">H20 连接中断。真实执行恢复前须核对原 Pod；此原型只演示阻塞与回到队列。</div>' : ""}<div class="decision-buttons">${t.state === "queued" ? `<button class="button primary" data-task-action="start" data-id="${esc(t.id)}">演示开始</button>` : ""}${["queued", "running", "blocked"].includes(t.state) ? `<button class="button" data-task-action="pause" data-id="${esc(t.id)}">暂停演示任务</button>` : ""}${t.state === "paused" ? `<button class="button primary" data-task-action="resume" data-id="${esc(t.id)}">恢复演示任务</button>` : ""}${t.state === "running" ? `<button class="button primary" data-deliver="${esc(t.id)}">记录交付</button>` : ""}${!["done", "cancelled"].includes(t.state) ? `<button class="text-button" data-task-action="cancel" data-id="${esc(t.id)}">取消任务</button>` : ""}<button class="button" data-steer-task="${esc(t.id)}">补充方向 ↗</button>${t.source ? `<button class="text-button" data-message-link="${esc(t.source)}">回到来源消息 ↗</button>` : ""}</div>${t.result ? `<div class="document-block"><strong>交付说明 · 人工记录</strong><p>${esc(t.result)}</p></div>` : ""}`,
   );
 }
 function openMember(id) {
@@ -380,30 +438,15 @@ function openComputer(id) {
   );
 }
 function contextPanel() {
+  if (currentGoal(state)) return openGoalDetails();
+  const room = state.rooms.find((r) => r.id === state.room);
   panel = { kind: "context" };
-  if (state.room === "kernels") {
-    showPanel(
-      "研究上下文",
-      '<div class="eyebrow">KERNEL PLAYGROUND</div><h2>从一个 kernel 问题开始</h2><p>这个研究室尚未绑定模型、GPU 或 workload。先描述要验证的假设，队友接着补齐必要的上下文。</p><button class="button primary" data-action="seed-kernel">提出研究问题 ↗</button>',
-    );
-    return;
-  }
   showPanel(
-    "研究上下文",
-    '<div class="eyebrow">DSV4 / H20</div><h2>方向可以调整，证据有固定边界</h2><p>先解释 decode 瓶颈，再用独立实验判断改动。</p>' +
-      meta([
-        ["模型", "DSV4"],
-        ["GPU", "H20 × 8"],
-        ["运行时", "SGLang"],
-        ["工作负载", "16K / 256 · C1，待扩展 C16"],
-        ["主指标", "TPOT"],
-        ["验收", "正确性通过 + 无 profile A/B"],
-        ["预算", "2 GPU·h · 示例"],
-        ["执行范围", "分析、构建、隔离 Pod 验证"],
-      ]) +
-      '<p>在讨论中提出新方向，形成下一项工作。已测实验保留原 workload；新测试点使用新的场景身份。</p><button class="button primary" data-action="custom-direction">补充方向 ↗</button>',
+    "研究室上下文",
+    `<h2>${esc(room.name)}</h2><p>${esc(room.description || "在这里一起推进研究问题。")}</p><div class="document-block">${esc(room.context || "尚未设置模型、硬件或工作负载。新目标不会继承其他研究室的场景。")}</div><p>新目标会保存这份上下文的快照；每个目标的讨论、工作和结论独立保留。</p><button class="button primary" data-action="new-goal">发起目标 ↗</button>`,
   );
 }
+
 function cite(id) {
   if (!ARTIFACTS[id]) return;
   closePanel();
@@ -418,7 +461,7 @@ function moveToMessage(id) {
   const m = state.messages.find((m) => m.id === id);
   if (!m) return;
   saveDraft();
-  state.room = m.room;
+  enterRoom(state, m.room, m.goal || null);
   page = "room";
   state.view = "conversation";
   loadDraft();
@@ -432,9 +475,21 @@ function moveToMessage(id) {
 function search() {
   const query = $("#search-input").value.toLowerCase().trim();
   const results = [
+    ...state.rooms.map((r) => ({
+      label: r.name,
+      detail: `研究室 · ${r.description}`,
+      type: "room",
+      id: r.id,
+    })),
+    ...state.goals.map((g) => ({
+      label: g.title,
+      detail: `目标 · ${goalStatus[g.status]} · ${state.rooms.find((r) => r.id === g.room)?.name}`,
+      type: "goal",
+      id: g.id,
+    })),
     ...state.tasks.map((t) => ({
       label: t.title,
-      detail: `工作 · ${status[t.state]}`,
+      detail: `工作 · ${status[t.state]} · ${roomName(t.room)} / ${state.goals.find((g) => g.id === t.goal)?.title || "自由讨论"}`,
       type: "task",
       id: t.id,
     })),
@@ -448,7 +503,7 @@ function search() {
       .filter((m) => m.author !== "system")
       .map((m) => ({
         label: m.text,
-        detail: `讨论 · ${person(m.author)}`,
+        detail: `讨论 · ${person(m.author)} · ${roomName(m.room)} / ${state.goals.find((g) => g.id === m.goal)?.title || "自由讨论"}`,
         type: "message",
         id: m.id,
       })),
@@ -477,6 +532,8 @@ function inputText(
   text,
   { asTask = false, owner = "atlas", citations = [] } = {},
 ) {
+  if (asTask && currentGoal(state) && currentGoal(state).status !== "active")
+    throw Error("请先恢复目标，再交办工作。");
   page = "room";
   state.view = "conversation";
   $("#message").value = text;
@@ -505,7 +562,7 @@ function showMention() {
 }
 function attention() {
   saveDraft();
-  state.room = "dsv4";
+  enterRoom(state, "dsv4", SEED_GOAL);
   page = "room";
   state.view = "conversation";
   loadDraft();
@@ -517,14 +574,20 @@ function attention() {
 }
 const actions = {
   search: openSearch,
+  "new-room": () => openFlow("room"),
+  "new-goal": () => openFlow("goal"),
+  "close-flow": () => $("#flow-dialog").close(),
+  "goal-details": openGoalDetails,
+  "free-discussion": () => navigate(state.room, null, "conversation"),
   "close-dialog": () => $("#search-dialog").close(),
   "close-panel": closePanel,
   sidebar: () => $(".sidebar").classList.toggle("show"),
   context: contextPanel,
   reset: () => {
     state = createRoom();
-    page = "room";
+    page = "rooms";
     refs = [];
+    $(".sidebar").classList.remove("show");
     closePanel();
     loadDraft();
     render();
@@ -594,19 +657,42 @@ document.addEventListener("click", (e) => {
     if (d.page) {
       saveDraft();
       page = d.page;
+      $(".sidebar").classList.remove("show");
       closePanel();
       render();
     } else if (d.room) {
-      saveDraft();
-      state.room = d.room;
-      page = "room";
-      state.view = "conversation";
-      closePanel();
-      $(".sidebar").classList.remove("show");
-      loadDraft();
-      render();
-      $("#content").scrollTop = 0;
+      navigate(d.room);
+    } else if (d.goal) {
+      const goal = state.goals.find((g) => g.id === d.goal);
+      if (goal) navigate(goal.room, goal.id);
+    } else if (d.goalFrom) {
+      const origin = state.messages.find((m) => m.id === d.goalFrom);
+      if (origin) {
+        if (!inScope(state, origin)) navigate(origin.room, origin.goal || null);
+        openFlow("goal", origin.id);
+      }
+    } else if (d.messageLink) moveToMessage(d.messageLink);
+    else if (d.goalAction) {
+      if (d.goalAction === "complete") openFlow("conclusion", state.goal);
+      else if (d.goalAction === "revise") openFlow("revise", state.goal);
+      else {
+        updateGoalStatus(state, state.goal, d.goalAction);
+        render();
+        openGoalDetails();
+      }
+    } else if (d.deliver) openFlow("delivery", d.deliver);
+    else if (d.goalExample) {
+      $("#goal-prompt").value =
+        d.goalExample === "bottleneck"
+          ? "弄清当前推理场景的主要瓶颈，给出有证据的解释和下一步建议。"
+          : "验证一个优化改动是否有效，检查正确性与不同负载下的表现。";
+      saveFlowDraft();
+      $("#goal-prompt").focus();
     } else if (d.view) {
+      if (d.view === "overview") {
+        navigate(state.room);
+        return;
+      }
       state.view = d.view;
       closePanel();
       render();
@@ -673,7 +759,11 @@ document.addEventListener("click", (e) => {
       $("#search-dialog").close();
       if (d.searchType === "task") openTask(d.searchId);
       else if (d.searchType === "artifact") openArtifact(d.searchId);
-      else moveToMessage(d.searchId);
+      else if (d.searchType === "room") navigate(d.searchId);
+      else if (d.searchType === "goal") {
+        const goal = state.goals.find((g) => g.id === d.searchId);
+        if (goal) navigate(goal.room, goal.id);
+      } else moveToMessage(d.searchId);
     }
   } catch (error) {
     notice(error.message);
@@ -681,12 +771,18 @@ document.addEventListener("click", (e) => {
 });
 $("#composer").addEventListener("submit", (e) => {
   e.preventDefault();
-  const m = sendMessage(state, {
-    text: $("#message").value,
-    refs,
-    asTask: $("#as-task").checked,
-    owner: $("#task-owner").value,
-  });
+  let m;
+  try {
+    m = sendMessage(state, {
+      text: $("#message").value,
+      refs,
+      asTask: $("#as-task").checked,
+      owner: $("#task-owner").value,
+    });
+  } catch (error) {
+    notice(error.message);
+    return;
+  }
   if (!m) return;
   $("#message").value = "";
   $("#as-task").checked = false;
@@ -736,12 +832,15 @@ $(".room-tabs").addEventListener("keydown", (e) => {
       : e.key === "End"
         ? tabs.length - 1
         : (i + (e.key === "ArrowRight" ? 1 : -1) + tabs.length) % tabs.length;
-  state.view = tabs[i].dataset.view;
-  render();
+  if (tabs[i].dataset.view === "overview") navigate(state.room);
+  else {
+    state.view = tabs[i].dataset.view;
+    render();
+  }
   tabs[i].focus();
 });
 document.addEventListener("keydown", (e) => {
-  if ($("#appearance-dialog")?.open) return;
+  if ($("#appearance-dialog")?.open || $("#flow-dialog").open) return;
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
     e.preventDefault();
     if (!$("#search-dialog").open) openSearch();
@@ -752,5 +851,185 @@ document.addEventListener("keydown", (e) => {
     $(".sidebar").classList.remove("show");
   }
 });
+const goalStatus = { active: "研究中", paused: "已暂停", completed: "已结束" };
+const roomName = (id) => state.rooms.find((r) => r.id === id)?.name || id;
+let flow = null;
+function navigate(room, goal = null, view = null) {
+  saveDraft();
+  enterRoom(state, room, goal);
+  if (view) state.view = view;
+  page = "room";
+  closePanel();
+  $(".sidebar").classList.remove("show");
+  loadDraft();
+  render();
+  $("#content").scrollTop = 0;
+}
+function goalCard(g) {
+  const tasks = state.tasks.filter((t) => t.goal === g.id);
+  const done = tasks.filter((t) => t.state === "done").length;
+  return `<button class="goal-card" data-goal="${esc(g.id)}"><div class="goal-card-top"><span class="goal-dot ${esc(g.status)}"></span><span>${goalStatus[g.status]}</span><small>${esc(person(g.owner))} 负责</small></div><h3>${esc(g.title)}</h3><p>${esc(g.status === "completed" ? g.conclusion : g.criterion || "完成标准待讨论，可先梳理问题与证据。")}</p><div class="goal-card-foot"><span>${tasks.length ? `${done} / ${tasks.length} 项工作已交付` : "还没有工作，先从讨论开始"}</span><span>进入目标 ↗</span></div></button>`;
+}
+function roomsPage() {
+  const active = state.goals.filter((g) => g.status === "active");
+  return `<div class="page-body rooms-home"><div class="entry-intro"><div><span class="eyebrow">JULIAN’S LAB · 共享研究空间</span><p>进入一个研究室，接着推进已有目标；也可以为新的问题留出空间。</p></div><button class="button primary" data-action="new-room">${icon("plus")} 创建研究室</button></div><div class="entry-summary"><span><strong>${state.rooms.length}</strong> 个研究室</span><span><strong>${active.length}</strong> 个目标正在研究</span><span>人和 Agent，一起把问题弄清楚。</span></div><div class="room-grid">${state.rooms
+    .map((r) => {
+      const goals = state.goals.filter((g) => g.room === r.id);
+      const latest = goals.filter((g) => g.status === "active").at(-1);
+      return `<button class="room-entry" data-room="${esc(r.id)}"><div class="room-entry-top"><span class="room-entry-icon">#</span><span>${goals.filter((g) => g.status === "active").length} 个目标研究中</span></div><h2>${esc(r.name)}</h2><p>${esc(r.description || "新的研究空间，等一个值得探索的问题。")}</p><div class="room-entry-context">${esc(r.context || "从问题开始，逐步补齐上下文")}</div><div class="room-entry-foot"><span>${latest ? "最近目标 · " + esc(latest.title) : "可以先讨论，也可以直接发起目标"}</span><span>进入 ↗</span></div></button>`;
+    })
+    .join(
+      "",
+    )}</div><div class="entry-note">研究室保留团队与上下文，目标记录每一次研究的进展和结论。<br>当前为本地交互原型，队友与资源使用示例配置。</div></div>`;
+}
+function roomOverview() {
+  const room = state.rooms.find((r) => r.id === state.room);
+  const goals = state.goals.filter((g) => g.room === state.room);
+  const open = goals.filter((g) => g.status !== "completed");
+  const completed = goals.filter((g) => g.status === "completed");
+  const general = state.messages.filter(
+    (m) => m.room === state.room && !m.goal && m.author !== "system",
+  );
+  return `<div class="page-body room-overview"><div class="room-welcome"><span class="eyebrow">共享研究室</span><p>${esc(room.description || "把值得研究的问题带进来，和队友一起推进。")}</p><div class="tag-row">${MEMBERS.map((m) => `<button class="room-person" data-member="${m.id}">${avatar(m.id)}${m.name}</button>`).join("")}</div></div>${!goals.length ? `<section class="goal-empty"><span class="empty-icon">◎</span><h2>你想研究什么？</h2><p>一句目标、一段观察或一个疑问，都可以是起点。<br>先建立目标，随着研究逐步补齐完成标准。</p><button class="button primary" data-action="new-goal">${icon("plus")} 发起第一个目标</button></section>` : `<div class="section-title"><h2>正在推进 <span>${open.length}</span></h2><button class="text-button" data-action="new-goal">＋ 发起目标</button></div><div class="goal-grid">${open.map(goalCard).join("") || '<p class="muted">当前目标都已结束。新的问题出现时，随时开始。</p>'}</div>${completed.length ? `<div class="section-title"><h2>研究记录 <span>${completed.length}</span></h2></div><div class="goal-grid">${completed.map(goalCard).join("")}</div>` : ""}`}<button class="free-discussion" data-action="free-discussion">${icon("chat")}<span><strong>先聊聊，不急着确定目标</strong><small>${general.length ? `${general.length} 条讨论 · ` + esc(general.at(-1).text.slice(0, 60)) : "分享一个想法，之后可以把讨论转为目标"}</small></span><span>↗</span></button></div>`;
+}
+function goalMap() {
+  const goal = currentGoal(state);
+  if (!goal)
+    return '<div class="empty"><h2>从一个研究目标开始</h2><p>目标产生后，可以在这里追溯工作和讨论的联系。</p><button class="button primary" data-action="new-goal">发起目标</button></div>';
+  const tasks = state.tasks.filter((t) => inScope(state, t));
+  return `<div class="page-body"><div class="page-intro"><div><h2>这次研究如何推进</h2><p>由实际的目标、工作与引用生成；不表示任务执行依赖。</p></div></div><div class="relationship-map"><button class="map-node" data-action="goal-details">${esc(goal.title)}<small>${goalStatus[goal.status]} · ${esc(person(goal.owner))}</small></button><span class="map-edge"></span><div class="goal-map-tasks">${tasks.map(taskMarkup).join("") || '<p class="muted">可以先讨论，再交办具体工作。</p>'}</div><div class="reference-row">${goal.refs.map(reference).join("")}</div></div></div>`;
+}
+function openGoalDetails() {
+  const goal = currentGoal(state);
+  if (!goal) return contextPanel();
+  panel = { kind: "goal", id: goal.id };
+  const history = (goal.history || []).length
+    ? `<details class="flow-details"><summary>历史目标说明 · ${goal.history.length} 次修改</summary>${goal.history
+        .map(
+          (r) =>
+            `<div class="document-block"><strong>第 ${r.revision} 版 · ${esc(r.title)}</strong><p>${esc(r.prompt)}</p>${meta(
+              [
+                ["完成标准", r.criterion || "待讨论"],
+                ["预算与边界", r.budget || "未设置"],
+              ],
+            )}</div>`,
+        )
+        .join("")}</details>`
+    : "";
+  const unfinished = state.tasks.filter(
+    (t) => t.goal === goal.id && !["done", "cancelled"].includes(t.state),
+  ).length;
+  showPanel(
+    "研究目标",
+    `<div class="eyebrow">${esc(roomName(goal.room))} · ${goalStatus[goal.status]} · 第 ${goal.revision || 1} 版</div><h2>${esc(goal.title)}</h2><p>${esc(goal.prompt)}</p>${meta(
+      [
+        ["负责人", person(goal.owner)],
+        ["完成标准", goal.criterion || "待讨论；尚未制定验收条件"],
+        ["预算与边界", goal.budget || "尚未设置，不代表无限执行授权"],
+      ],
+    )}<div class="document-block"><strong>继承的研究上下文</strong><p>${esc(goal.context || "尚未绑定模型、硬件或工作负载。")}</p></div><div class="reference-row">${goal.refs.map(reference).join("")}</div>${goal.source ? `<button class="button" data-message-link="${esc(goal.source)}">回到发起目标的讨论 ↗</button>` : ""}${goal.conclusion ? `<div class="document-block"><strong>${goal.status === "completed" ? "研究结论" : "上次结束时的结论"} · 人工记录</strong><p>${esc(goal.conclusion)}</p></div>` : ""}<div class="decision-buttons">${goal.status === "active" ? '<button class="button" data-goal-action="pause">暂停研究</button>' : goal.status === "paused" ? '<button class="button primary" data-goal-action="resume">恢复研究</button>' : '<button class="button" data-goal-action="reopen">重新开放目标</button>'}${goal.status !== "completed" ? '<button class="button" data-goal-action="revise">补充目标说明</button><button class="button" data-goal-action="complete">结束研究并记录结论</button>' : ""}</div><p>${unfinished ? `还有 ${unfinished} 项工作未结束。结束研究前请先交付或取消这些工作。` : "工作记录会随目标保留。研究结束不等于性能验收通过。"}</p>${history}`,
+  );
+}
+function openFlow(kind, id = null) {
+  saveDraft();
+  const room = state.rooms.find((r) => r.id === state.room);
+  flow = {
+    kind,
+    id,
+    key: `${kind}:${kind === "room" ? "new" : id || state.room}`,
+  };
+  const d = state.forms[flow.key] || {};
+  const source =
+    kind === "goal" && id ? state.messages.find((m) => m.id === id) : null;
+  let fields = "";
+  if (kind === "room") {
+    fields = `<p>给一个长期研究方向留出共同工作的空间。</p><label class="field">研究室名称<input name="name" required maxlength="48" placeholder="例如：长上下文推理" value="${esc(d.name || "")}" autofocus></label><label class="field">简单介绍 <span>选填</span><textarea name="description" rows="2" maxlength="240" placeholder="这个研究室关注什么？">${esc(d.description || "")}</textarea></label><details class="flow-details" ${d.context ? "open" : ""}><summary>添加研究上下文 · 选填</summary><label class="field">模型、代码或资源线索<textarea name="context" rows="3" maxlength="1000" placeholder="已有的模型、代码库、硬件和工作负载…">${esc(d.context || "")}</textarea></label></details><p class="form-note">演示中沿用 Julian、Atlas、Prism 与 Lin 四位队友。资源线索只用于保存上下文。</p>`;
+  } else if (kind === "goal") {
+    const selected = [...new Set([...(d.refs || []), ...(source?.refs || [])])];
+    fields = `<p>在 <strong>${esc(room.name)}</strong> 中发起研究。先说清想弄明白什么，实施路线可以边做边完善。</p>${source ? `<div class="source-preview"><small>来自 ${esc(person(source.author))} 的讨论 · 原消息与证据会保留</small><p>${esc(source.text.slice(0, 180))}</p></div>` : ""}<label class="field">你想研究什么？<textarea id="goal-prompt" name="prompt" rows="4" required maxlength="4000" placeholder="例如：弄清 DSV4 在 H20 上的 decode 瓶颈，先复用已有证据。" autofocus>${esc(d.prompt ?? source?.text ?? "")}</textarea></label><div class="goal-examples"><span>也可以从这里开始</span><button type="button" data-goal-example="bottleneck">理解瓶颈 ↗</button><button type="button" data-goal-example="change">验证改动 ↗</button></div><details class="flow-details" ${d.criterion || d.budget || selected.length ? "open" : ""}><summary>完成标准、边界和证据 · 选填</summary><label class="field">怎样算有结果？<textarea name="criterion" rows="2" maxlength="2000" placeholder="解释清楚一个原因，或验证某项改动的效果…">${esc(d.criterion || "")}</textarea></label><label class="field">预算与研究边界<input name="budget" maxlength="240" placeholder="例如：先分析已有 trace，暂不启动 GPU 实验" value="${esc(d.budget || "")}"></label><fieldset class="evidence-choices"><legend>带入已有证据 · 演示样例</legend>${Object.entries(
+      ARTIFACTS,
+    )
+      .map(
+        ([key, a]) =>
+          `<label><input type="checkbox" name="refs" value="${key}" ${selected.includes(key) ? "checked" : ""} ${source?.refs.includes(key) ? "disabled" : ""}>${esc(a.title)}${source?.refs.includes(key) ? " · 原讨论引用" : ""}</label>`,
+      )
+      .join(
+        "",
+      )}</fieldset></details><div class="goal-start-options"><label class="field">负责接力的队友<select name="owner">${MEMBERS.map((m) => `<option value="${m.id}" ${(d.owner || source?.author || "atlas") === m.id ? "selected" : ""}>${m.name} · ${m.role}</option>`).join("")}</select></label><label class="checkbox-field"><input type="checkbox" name="firstTask" ${d.firstTask !== false ? "checked" : ""}>创建第一项工作：梳理证据与下一步</label></div><p class="form-note">继承的上下文：${esc(room.context || "尚未设置，可以从整理问题开始。")}</p>`;
+  } else if (kind === "revise") {
+    const goal = state.goals.find((g) => g.id === id);
+    fields = `<p>补齐研究问题、完成标准或边界。修改会留在历史记录里；已有工作继续保留原说明，新交办的工作引用更新后的说明。</p><label class="field">研究问题<textarea name="prompt" rows="3" required maxlength="4000" autofocus>${esc(d.prompt ?? goal.prompt)}</textarea></label><label class="field">怎样算有结果？<textarea name="criterion" rows="3" maxlength="2000">${esc(d.criterion ?? goal.criterion)}</textarea></label><label class="field">预算与研究边界<input name="budget" maxlength="240" value="${esc(d.budget ?? goal.budget)}"></label>`;
+  } else {
+    const task = state.tasks.find((t) => t.id === id);
+    const goal = state.goals.find((g) => g.id === id);
+    fields = `<p>${esc(kind === "delivery" ? task?.title : goal?.title)}</p><label class="field">${kind === "delivery" ? "交付说明" : "研究结论"}<textarea name="result" rows="6" required maxlength="4000" autofocus placeholder="记录做了什么、依据是什么、还有哪些不确定；也可以说明尚未得出结论。">${esc(d.result || "")}</textarea></label><p class="form-note">这是人工填写的本地记录，不会自动生成性能判定或真实实验结果。</p>`;
+  }
+  $("#flow-title").textContent = {
+    room: "创建研究室",
+    goal: "发起目标",
+    revise: "补充目标说明",
+    delivery: "记录任务交付",
+    conclusion: "结束研究",
+  }[kind];
+  $("#flow-fields").innerHTML = fields;
+  $("#flow-submit").textContent = {
+    room: "创建并进入",
+    goal: "开始研究",
+    revise: "保存目标说明",
+    delivery: "保存交付",
+    conclusion: "保存结论并结束",
+  }[kind];
+  $("#flow-error").textContent = "";
+  $("#flow-dialog").showModal();
+  $("#flow-fields [autofocus]")?.focus();
+}
+function saveFlowDraft() {
+  if (!flow) return;
+  const form = new FormData($("#flow-form"));
+  state.forms[flow.key] = {
+    ...Object.fromEntries(form),
+    refs: form.getAll("refs"),
+    firstTask: form.has("firstTask"),
+  };
+  persist();
+}
+$("#flow-form").addEventListener("input", saveFlowDraft);
+$("#flow-form").addEventListener("change", saveFlowDraft);
+$("#flow-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  if (!flow) return;
+  saveFlowDraft();
+  const d = state.forms[flow.key];
+  try {
+    const { kind, id, key } = flow;
+    if (kind === "room") createResearchRoom(state, d);
+    else if (kind === "goal") createResearchGoal(state, { ...d, source: id });
+    else if (kind === "revise") reviseResearchGoal(state, id, d);
+    else if (kind === "delivery") updateTask(state, id, "complete", d.result);
+    else updateGoalStatus(state, id, "complete", d.result);
+    delete state.forms[key];
+    $("#flow-dialog").close();
+    flow = null;
+    page = "room";
+    closePanel();
+    loadDraft();
+    render();
+    if (kind === "delivery") openTask(id);
+    if (["conclusion", "revise"].includes(kind)) openGoalDetails();
+    $(".sidebar").classList.remove("show");
+    notice(
+      {
+        room: "研究室已创建，可以先讨论，也可以发起目标。",
+        goal: "目标已建立，讨论与工作会独立保留。",
+        revise: "目标说明已保存，已有工作的版本与状态保留。",
+        delivery: "交付说明已保存到对应目标的讨论。",
+        conclusion: "研究已结束，结论与原始工作记录已保留。",
+      }[kind],
+    );
+  } catch (error) {
+    $("#flow-error").textContent = error.message;
+  }
+});
+
 loadDraft();
 render();

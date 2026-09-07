@@ -69,11 +69,15 @@ test("empty submissions create no work; local drafts and history survive reload"
     count = s.messages.length;
   assert.equal(sendMessage(s, { text: "  ", asTask: true }), null);
   assert.equal(s.messages.length, count);
-  s.drafts.dsv4 = { text: "未发出的方向", refs: ["trace"], asTask: true };
+  s.drafts["dsv4:general"] = {
+    text: "未发出的方向",
+    refs: ["trace"],
+    asTask: true,
+  };
   sendMessage(s, { text: "<script>literal text</script>" });
   const restored = restoreRoom(JSON.stringify(s));
   assert.deepEqual(restored, s);
   assert.equal(restored.messages.at(-2).text, "<script>literal text</script>");
-  assert.equal(restoreRoom("{broken").schema, 2);
+  assert.equal(restoreRoom("{broken").schema, 3);
   assert.equal(restoreRoom('{"schema":1}').tasks.length, 3);
 });
