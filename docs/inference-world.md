@@ -1,8 +1,10 @@
 # Euboulia：团队共同进化的推理优化世界
 
+> 当前原型已收敛为 [v0.4 本地研究工作台](local-research-workbench.md)：方向、实验、分支讨论、验证和经验沉淀。多人及远程 Agent 连接暂缓，默认入口不要求创建研究室或登录。下文保留 v0.3 的团队产品设计，作为历史背景。
+
 状态：产品设计提案 v0.3，2026-09-07。本文定义目标形态；不表示这些能力已经在生产运行。
 
-原始需求见 [draft.md](draft.md)。[共享研究室原型](prototypes/inference-world/index.html) 验证讨论、证据引用、任务接力和介入体验；[v0.1 任务图原型](prototypes/inference-world/network.html) 保留用于检查执行契约。两者使用独立演示状态，都没有连接真实 Agent、GPU 或模型 API。
+原始需求见 [draft.md](draft.md)。[历史共享研究室原型](prototypes/inference-world/team.html) 验证讨论、证据引用、任务接力和介入体验；[v0.1 任务图原型](prototypes/inference-world/network.html) 保留用于检查执行契约。它们的演示状态独立；历史研究室在 Lab 服务中另有需要鉴权的真实连接入口。
 
 ## 0. 这次重新设计的起点
 

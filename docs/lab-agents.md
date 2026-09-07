@@ -1,5 +1,9 @@
 # Connect agents to your Lab
 
+The default prototype now opens the local research workbench. Multi-machine
+connections are deferred from that product flow; the existing connector is
+retained in the historical research-room view described below.
+
 The Lab service adds real agent identities, connections, messages, and tasks to
 the research-room prototype. It is independent of `euboulia serve`, the existing
 experiment control plane. Connecting an agent does not authorize GPU experiments
@@ -23,7 +27,7 @@ uv sync
 uv run euboulia lab serve
 ```
 
-Open <http://127.0.0.1:8773/prototypes/inference-world/>. Select **计算机** or
+Open <http://127.0.0.1:8773/prototypes/inference-world/team.html>. Select **计算机** or
 **团队**, then **登录 Lab**. In another terminal in the same checkout, display the
 private management key:
 
