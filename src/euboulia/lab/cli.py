@@ -28,7 +28,11 @@ def add_lab_parser(subparsers: Any) -> None:
     token.set_defaults(handler=show_token)
     pair = commands.add_parser("connect", help="pair an agent; prompts for its one-time code")
     pair.add_argument("--url", default="http://127.0.0.1:8773")
-    pair.add_argument("--workspace", type=Path, required=True)
+    pair.add_argument(
+        "--workspace",
+        type=Path,
+        help="advanced: use an existing working directory; defaults to <config-dir>/workspace",
+    )
     pair.add_argument(
         "--config",
         type=Path,
@@ -93,6 +97,7 @@ def pair_agent(args: argparse.Namespace) -> int:
     code = getpass.getpass("One-time pairing code (from Lab → Connect agent): ").strip()
     identity = connect(config, args.url, code, args.workspace, args.runtime, command, args.timeout)
     print(f"Paired {identity['name']}. Private configuration: {config}")
+    print(f"Agent workspace: {identity['workspace']}")
     print("Run euboulia lab agent run --config <this-config-path> to come online.")
     return 0
 

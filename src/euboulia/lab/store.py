@@ -109,7 +109,9 @@ class LabStore:
     def create_agent(self, data: dict[str, Any]) -> dict[str, Any]:
         name = text_field(data, "name", 80)
         role = text_field(data, "role", 1000)
-        capabilities = text_field(data, "capabilities", 1000)
+        # Keep the legacy field for existing identities and adapters. New agents
+        # need only a name and a role description.
+        capabilities = text_field(data, "capabilities", 1000, optional=True)
         agent_id, code = secrets.token_hex(12), secrets.token_urlsafe(24)
         with self.db() as db:
             db.execute(
@@ -198,6 +200,7 @@ class LabStore:
         context = data.get("context", {})
         if not isinstance(context, dict):
             raise ValueError("Invalid context")
+        resources = text_field(context, "resources", 8000, optional=True)
         context = {
             key: text_field(context, key, limit, optional=True)
             for key, limit in (
@@ -209,6 +212,10 @@ class LabStore:
                 ("conversation_id", 100),
             )
         }
+        # Omit empty references so retries of pre-upgrade requests keep their
+        # original canonical context and idempotency key.
+        if resources:
+            context["resources"] = resources
         encoded = json.dumps(context, ensure_ascii=False, sort_keys=True)
         with self.db() as db:
             agent = db.execute("SELECT * FROM agents WHERE id=? AND revoked=0", (agent_id,))

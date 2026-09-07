@@ -725,6 +725,9 @@
   font-weight: 600;
   line-height: 1.7;
 }
+.lab-resource-settings summary .lab-field-hint {
+  margin-left: 6px;
+}
 .lab-dialog details > :last-child {
   margin-bottom: 0;
 }
@@ -930,6 +933,11 @@
 }
 .lab-agent-facts code {
   font-size: 11px;
+}
+.lab-agent-facts .lab-field-hint {
+  display: block;
+  margin-top: 6px;
+  line-height: 1.7;
 }
 .lab-agent-actions {
   justify-content: space-between;

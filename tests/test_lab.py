@@ -1,5 +1,6 @@
 """Connectivity contracts use real HTTP, SQLite, and bounded owned subprocesses."""
 
+import argparse
 import json
 import secrets
 import sys
@@ -8,9 +9,11 @@ import time
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import pytest
 
+from euboulia.lab.cli import add_lab_parser, pair_agent
 from euboulia.lab.connector import Connector, LabClient, connect, save_private
 from euboulia.lab.server import LabServer
 from euboulia.lab.store import LabStore
@@ -100,6 +103,45 @@ def test_pairing_is_single_use_expiring_and_private(tmp_path):
     assert store.path.stat().st_mode & 0o777 == 0o600
 
 
+def test_minimal_identity_keeps_legacy_capabilities_compatible(lab):
+    store, _, url = lab
+    with request(
+        url,
+        "/api/lab/agents",
+        {"name": "Scout", "role": "Compare repositories"},
+        token=store.admin_key,
+    ) as response:
+        created = json.load(response)
+    minimal = store.pair(
+        {
+            "code": created["pairing_code"],
+            "host": "test",
+            "workspace": "/agent",
+            "runtime": "command",
+        }
+    )
+    legacy = identity(store, "Legacy")
+    assert minimal["role"] == "Compare repositories"
+    assert minimal["capabilities"] == ""
+    assert legacy["capabilities"] == "Read traces"
+    assert len(LabStore(store.path.parent).snapshot()["agents"]) == 2
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"name": "", "role": "Research"},
+        {"name": "Scout", "role": " "},
+        {"name": "Scout", "role": "Research", "capabilities": []},
+    ],
+)
+def test_minimal_identity_rejects_invalid_fields(tmp_path, fields):
+    store = LabStore(tmp_path)
+    with pytest.raises(ValueError):
+        store.create_agent(fields)
+    assert store.snapshot()["agents"] == []
+
+
 def test_authentication_roles_origins_and_static_path(lab):
     store, _, url = lab
     agent = identity(store)
@@ -178,6 +220,31 @@ def test_dispatch_idempotency_and_restart_persistence(tmp_path):
     assert reopened.poll(agent["agent_id"], "process")["job"]["id"] == first["id"]
 
 
+def test_references_are_per_dispatch_and_preserve_legacy_retries(tmp_path):
+    store = LabStore(tmp_path)
+    agent = identity(store)
+    original_context = {"room_id": "room-a", "goal_id": "goal-a"}
+    legacy = job(store, agent, request_id="legacy", context=original_context)
+    assert "resources" not in legacy["context"]
+    retry = job(store, agent, request_id="legacy", context={**original_context, "resources": " "})
+    assert retry["id"] == legacy["id"]
+    references = "/repos/one\n/repos/two\nhttps://example.org/research"
+    current = job(
+        store, agent, request_id="references", context={**original_context, "resources": references}
+    )
+    assert current["context"]["resources"] == references
+    with pytest.raises(ValueError, match="different content"):
+        job(
+            store,
+            agent,
+            request_id="references",
+            context={**original_context, "resources": "/repos/other"},
+        )
+    later = job(store, agent, context={**original_context, "resources": "/repos/other"})
+    assert later["context"]["resources"] == "/repos/other"
+    assert LabStore(tmp_path).detail(current["id"])["job"]["context"]["resources"] == references
+
+
 def test_lease_expiry_never_requeues_execution(tmp_path):
     store = LabStore(tmp_path)
     agent = identity(store)
@@ -232,6 +299,8 @@ def test_event_deduplication_cancellation_and_revoke(tmp_path):
         {"kind": "execute-shell"},
         {"context": "bad"},
         {"context": {"room_id": []}},
+        {"context": {"resources": []}},
+        {"context": {"resources": "x" * 8001}},
     ],
 )
 def test_malformed_jobs_fail_closed(lab, data):
@@ -288,6 +357,111 @@ def configured_connector(lab, tmp_path, script, timeout=10):
         timeout,
     )
     return Connector(config)
+
+
+def test_cli_default_workspace_reads_multiple_external_references(
+    lab, tmp_path, monkeypatch, capsys
+):
+    store, _, url = lab
+    created = store.create_agent({"name": "Researcher", "role": "Compare source repositories"})
+    sources = [tmp_path / "repo-one" / "source.txt", tmp_path / "repo-two" / "source.txt"]
+    for index, source in enumerate(sources):
+        source.parent.mkdir()
+        source.write_text(f"source {index}")
+    adapter = tmp_path / "adapter.py"
+    adapter.write_text("""
+import json, os
+from pathlib import Path
+import sys
+data = json.load(sys.stdin)
+sources = data['job']['context']['resources'].splitlines()
+result = {'cwd': os.getcwd(), 'sources': [Path(p).read_text() for p in sources]}
+print(json.dumps({'type': 'completed', 'text': json.dumps(result)}), flush=True)
+""")
+    command_file = tmp_path / "argv.json"
+    command_file.write_text(json.dumps([sys.executable, str(adapter)]))
+    config = tmp_path / "researcher" / "agent.json"
+    parser = argparse.ArgumentParser()
+    add_lab_parser(parser.add_subparsers())
+    args = parser.parse_args(
+        [
+            "lab",
+            "connect",
+            "--url",
+            url,
+            "--config",
+            str(config),
+            "--runtime",
+            "command",
+            "--command-file",
+            str(command_file),
+        ]
+    )
+    assert args.workspace is None
+    monkeypatch.setattr("euboulia.lab.cli.getpass.getpass", lambda _: created["pairing_code"])
+    assert pair_agent(args) == 0
+    connector = Connector(config)
+    workspace = config.parent / "workspace"
+    assert connector.settings["workspace"] == str(workspace)
+    assert workspace.stat().st_mode & 0o777 == 0o700
+    output = capsys.readouterr().out
+    assert str(workspace) in output
+    assert created["pairing_code"] not in output
+    assert connector.settings["token"] not in output
+    assert store.snapshot()["agents"][0]["workspace"] == str(workspace)
+    current = job(store, connector.settings, context={"resources": "\n".join(map(str, sources))})
+    connector.run(once=True)
+    result = json.loads(store.detail(current["id"])["job"]["result"])
+    assert result == {"cwd": str(workspace), "sources": ["source 0", "source 1"]}
+    assert Connector(config).settings["workspace"] == str(workspace)
+
+
+def test_default_workspaces_are_separate_and_existing_contents_survive(lab, tmp_path):
+    store, _, url = lab
+    workspaces = []
+    for name in ("one", "two"):
+        config = tmp_path / name / "agent.json"
+        workspace = config.parent / "workspace"
+        workspace.mkdir(parents=True)
+        note = workspace / "note.txt"
+        note.write_text(name)
+        created = store.create_agent({"name": name, "role": "Research"})
+        settings = connect(
+            config, url, created["pairing_code"], None, "command", [sys.executable], 10
+        )
+        assert Path(settings["workspace"]) == workspace
+        assert note.read_text() == name
+        with pytest.raises(ValueError, match="already exists"):
+            connect(config, url, created["pairing_code"], None, "command", [sys.executable], 10)
+        assert note.read_text() == name
+        workspaces.append(workspace)
+    assert workspaces[0] != workspaces[1]
+
+
+@pytest.mark.parametrize("invalid_kind", ["file", "symlink"])
+def test_invalid_default_workspace_does_not_consume_pairing_code(lab, tmp_path, invalid_kind):
+    store, _, url = lab
+    config = tmp_path / "agent" / "agent.json"
+    config.parent.mkdir()
+    workspace = config.parent / "workspace"
+    target = tmp_path / "existing-repository"
+    target.mkdir(mode=0o755)
+    if invalid_kind == "file":
+        workspace.write_text("preserve")
+    else:
+        workspace.symlink_to(target, target_is_directory=True)
+    created = store.create_agent({"name": "Researcher", "role": "Research"})
+    with pytest.raises(ValueError, match="regular directory"):
+        connect(config, url, created["pairing_code"], None, "command", [sys.executable], 10)
+    assert not config.exists()
+    assert target.stat().st_mode & 0o777 == 0o755
+    assert store.snapshot()["agents"][0]["status"] == "unpaired"
+    # Explicit paths remain supported and retain their permissions and contents.
+    settings = connect(
+        config, url, created["pairing_code"], target, "command", [sys.executable], 10
+    )
+    assert settings["workspace"] == str(target)
+    assert target.stat().st_mode & 0o777 == 0o755
 
 
 def test_connector_executes_real_process_with_context_and_returns_result(lab, tmp_path):
