@@ -17,7 +17,7 @@
     <a class="skip" href="#main">跳到研究室</a>
     <div class="shell">
       <nav class="rail" aria-label="工作空间">
-        <button class="brand" data-page="room" aria-label="Euboulia 研究室">
+        <button class="brand" data-page="rooms" aria-label="Euboulia 研究室">
           e<span>·</span>
         </button>
         <button
@@ -30,7 +30,7 @@
         </button>
         <button
           class="rail-button active"
-          data-page="room"
+          data-page="rooms"
           title="研究室"
           aria-label="研究室"
         >
@@ -103,13 +103,19 @@
         <button class="quick-search" data-action="search">
           <span data-icon="search"></span>搜索工作与证据 <kbd>⌘K</kbd>
         </button>
-        <div class="side-label">研究室 <span>2</span></div>
-        <button class="room-link selected" data-room="dsv4">
-          <span class="hash">#</span><span>dsv4-on-h20</span
-          ><span class="unread">1</span>
-        </button>
-        <button class="room-link" data-room="kernels">
-          <span class="hash">#</span><span>kernel-playground</span>
+        <div class="side-label">
+          研究室 <span id="room-total">2</span
+          ><button
+            class="icon-button"
+            data-action="new-room"
+            aria-label="创建研究室"
+          >
+            ＋
+          </button>
+        </div>
+        <div id="room-list"></div>
+        <button class="text-button browse-rooms" data-page="rooms">
+          查看全部研究室 ↗
         </button>
         <div class="room-description">
           人和 Agent 在这里一起工作。<br />进展、判断和证据留在同一处。
@@ -136,7 +142,13 @@
             <h1 id="room-heading">把 DSV4 的解码再快一点</h1>
           </div>
           <div class="header-actions">
-            <span class="demo-pill">DEMO</span
+            <button
+              id="new-goal-trigger"
+              class="button primary"
+              data-action="new-goal"
+            >
+              ＋ 发起目标</button
+            ><span class="demo-pill">DEMO</span
             ><button
               class="icon-button mobile-nav"
               data-action="sidebar"
@@ -154,7 +166,16 @@
           </div>
         </header>
         <div id="room-controls">
+          <div id="goal-strip" class="goal-strip" hidden></div>
           <div class="room-tabs" role="tablist" aria-label="研究室视图">
+            <button
+              id="tab-overview"
+              role="tab"
+              data-view="overview"
+              aria-selected="false"
+            >
+              目标
+            </button>
             <button
               id="tab-conversation"
               role="tab"
@@ -189,14 +210,7 @@
               ><span class="tiny-dot"></span>仅本地演示</span
             >
           </div>
-          <div class="context-strip">
-            <button data-action="context">
-              DSV4 <span>/</span> H20 × 8 <span>/</span> SGLang
-              <span data-icon="chevron"></span></button
-            ><button class="needs-direction" data-action="attention">
-              <i class="tiny-dot"></i>1 个方向待定 ↗
-            </button>
-          </div>
+          <div class="context-strip" id="scope-context"></div>
         </div>
         <div
           id="content"
@@ -292,12 +306,39 @@
       </div>
       <input
         id="search-input"
-        aria-label="搜索消息、任务或证据"
-        placeholder="搜索消息、任务或证据…"
+        aria-label="搜索研究室、目标、消息或证据"
+        placeholder="搜索研究室、目标、消息或证据…"
         autocomplete="off"
       />
       <div id="search-results"></div>
-      <div class="dialog-footnote">⌘K 打开 · Esc 关闭 · 搜索两个研究室</div>
+      <div class="dialog-footnote">
+        ⌘K 打开 · Esc 关闭 · 搜索所有研究室与目标
+      </div>
+    </dialog>
+    <dialog id="flow-dialog" aria-labelledby="flow-title">
+      <form id="flow-form">
+        <div class="dialog-heading">
+          <h2 id="flow-title"></h2>
+          <button
+            type="button"
+            class="icon-button"
+            data-action="close-flow"
+            aria-label="关闭表单"
+          >
+            ×
+          </button>
+        </div>
+        <div id="flow-fields"></div>
+        <p id="flow-error" class="form-error" role="alert"></p>
+        <div class="flow-footer">
+          <span id="flow-hint">仅保存在本地演示</span
+          ><button type="button" class="button" data-action="close-flow">
+            暂时收起</button
+          ><button id="flow-submit" class="button primary" type="submit">
+            创建
+          </button>
+        </div>
+      </form>
     </dialog>
     <div id="notice" class="notice" role="status" aria-live="polite"></div>
     <dialog
