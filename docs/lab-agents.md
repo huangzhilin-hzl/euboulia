@@ -42,9 +42,23 @@ them. The static demo at port 8772 can remain running separately.
 
 ## 2. Create an identity and connect a local Codex agent
 
-In **连接 Agent**, give the agent a name, role, and capability description. The
+The **Agent 与计算机** page shows a single **连接第一位 Agent** action when the
+Lab is empty. Local and remote setup guides are available below it. Once agents
+have been added, the page shows their roles, connection states, runtimes, and
+recent work; use **连接 Agent** above the roster to add another teammate.
+
+Give the agent a name, role, and capability description. The
 Lab displays a single-use pairing code valid for ten minutes and a command using
-the new agent's ID. Run that command on the agent machine.
+the new agent's ID. The setup panel separates identity creation, environment
+connection, and waiting for the connector to come online. Copy the connection
+and startup commands separately; replace the workspace placeholder before
+running the connection command on the agent machine. Remote SSH instructions
+expand in the same panel. Closing the panel does not mark the agent connected;
+the roster updates when the connector polls the service.
+
+Open an agent card for its full details, dispatch actions, and pairing controls.
+Use **数据与权限** in the page footer for storage and execution boundaries. The
+connection workspace supports the same four themes as the rest of the prototype.
 
 Install Codex CLI and log in **on that machine** first. The adapter uses its saved
 authentication and does not copy Codex credentials into the Lab. Check the setup

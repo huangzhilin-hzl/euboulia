@@ -226,6 +226,7 @@ function renderComposer() {
     : "先聊一个问题，也可以把讨论转为目标…";
 }
 function render() {
+  document.body.dataset.page = page;
   $$("[data-icon]").forEach((el) => (el.innerHTML = icon(el.dataset.icon)));
   $("#member-list").innerHTML = MEMBERS.map(
     (m) =>
@@ -262,13 +263,13 @@ function render() {
       ? goal?.title || room.name
       : {
           rooms: "今天，想推进什么问题？",
-          members: "人和 Agent，共享一个研究室",
-          computers: "连接工作环境，接着往下做",
+          members: "研究团队",
+          computers: "Agent 与计算机",
           memory: "把一次研究变成下一次的起点",
           activity: "研究室正在发生什么",
         }[page];
   $("#room-controls").hidden = page !== "room";
-  $("#new-goal-trigger").hidden = page !== "room";
+  $("#new-goal-trigger").hidden = page !== "room" || state.view === "overview";
   $('.header-actions [data-action="context"]').hidden = page !== "room";
   $("#goal-strip").hidden = !goal;
   $("#goal-strip").innerHTML = goal
@@ -306,7 +307,10 @@ function render() {
   $("#content").setAttribute("role", page === "room" ? "tabpanel" : "region");
   if (page === "computers" && lab?.mode === "demo")
     $("#content").insertAdjacentHTML("afterbegin", lab.page());
-  if (page === "room" && ["overview", "conversation", "tasks"].includes(state.view))
+  if (
+    page === "room" &&
+    ["overview", "conversation", "tasks"].includes(state.view)
+  )
     $("#content").insertAdjacentHTML("beforeend", lab?.feed() || "");
   if (page === "room")
     $("#content").setAttribute("aria-labelledby", `tab-${state.view}`);
@@ -317,15 +321,30 @@ function render() {
     currentGoal(state)?.status !== "active";
   renderComposer();
   if (lab?.mode === "live") {
-    $("#member-list").innerHTML = lab.agents
-      .map((agent) =>
-        `<button class="member-button" data-lab="agent" data-id="${esc(agent.id)}"><span class="avatar blue">${esc(agent.name.slice(0, 1))}</span><span><strong>${esc(agent.name)}</strong><small>${esc(agentStates[agent.status])}</small></span></button>`,
-      )
-      .join("") + '<button class="text-button" data-lab="create">＋ 连接 Agent</button>';
+    $("#member-list").innerHTML =
+      lab.agents
+        .map(
+          (agent) =>
+            `<button class="member-button" data-lab="agent" data-id="${esc(agent.id)}"><span class="avatar blue">${esc(agent.name.slice(0, 1))}</span><span><strong>${esc(agent.name)}</strong><small>${esc(agentStates[agent.status])}</small></span></button>`,
+        )
+        .join("") ||
+      '<div class="sidebar-empty"><span>尚无 Agent</span><small>连接后，在这里联系研究队友</small></div>';
+    if (!["members", "computers"].includes(page))
+      $("#member-list").insertAdjacentHTML(
+        "beforeend",
+        '<button class="text-button sidebar-connect" data-lab="create">＋ 连接 Agent</button>',
+      );
+  } else if (lab?.mode === "locked") {
+    $("#member-list").innerHTML =
+      '<div class="sidebar-empty"><span>登录后查看队友</span><small>使用本机 Lab 管理密钥</small></div>';
   }
   $("#lab-contact").hidden = page !== "room" || lab?.mode !== "live";
   $("#team-total").textContent =
-    lab?.mode === "live" ? lab.agents.length : MEMBERS.length;
+    lab?.mode === "live"
+      ? lab.agents.length
+      : lab?.mode === "locked"
+        ? "—"
+        : MEMBERS.length;
   lab?.decorate();
   persist();
 }
@@ -909,7 +928,7 @@ function roomOverview() {
   const general = state.messages.filter(
     (m) => m.room === state.room && !m.goal && m.author !== "system",
   );
-  return `<div class="page-body room-overview"><div class="room-welcome"><span class="eyebrow">共享研究室</span><p>${esc(room.description || "把值得研究的问题带进来，和队友一起推进。")}</p><div class="tag-row">${MEMBERS.map((m) => `<button class="room-person" data-member="${m.id}">${avatar(m.id)}${m.name}</button>`).join("")}</div></div>${!goals.length ? `<section class="goal-empty"><span class="empty-icon">◎</span><h2>你想研究什么？</h2><p>一句目标、一段观察或一个疑问，都可以是起点。<br>先建立目标，随着研究逐步补齐完成标准。</p><button class="button primary" data-action="new-goal">${icon("plus")} 发起第一个目标</button></section>` : `<div class="section-title"><h2>正在推进 <span>${open.length}</span></h2><button class="text-button" data-action="new-goal">＋ 发起目标</button></div><div class="goal-grid">${open.map(goalCard).join("") || '<p class="muted">当前目标都已结束。新的问题出现时，随时开始。</p>'}</div>${completed.length ? `<div class="section-title"><h2>研究记录 <span>${completed.length}</span></h2></div><div class="goal-grid">${completed.map(goalCard).join("")}</div>` : ""}`}<button class="free-discussion" data-action="free-discussion">${icon("chat")}<span><strong>先聊聊，不急着确定目标</strong><small>${general.length ? `${general.length} 条讨论 · ` + esc(general.at(-1).text.slice(0, 60)) : "分享一个想法，之后可以把讨论转为目标"}</small></span><span>↗</span></button></div>`;
+  return `<div class="page-body room-overview"><div class="room-welcome"><span class="eyebrow">共享研究室</span><p>${esc(room.description || "把值得研究的问题带进来，和队友一起推进。")}</p><div class="tag-row">${MEMBERS.map((m) => `<button class="room-person" data-member="${m.id}">${avatar(m.id)}${m.name}</button>`).join("")}</div></div>${!goals.length ? `<section class="goal-empty"><span class="empty-icon">◎</span><h2>你想研究什么？</h2><p>一句目标、一段观察或一个疑问，都可以是起点。<br>先建立目标，随着研究逐步补齐完成标准。</p><button class="button primary" data-action="new-goal">${icon("plus")} 发起第一个目标</button></section>` : `<div class="section-title"><h2>正在推进 <span>${open.length}</span></h2><button class="button primary" data-action="new-goal">＋ 发起目标</button></div><div class="goal-grid">${open.map(goalCard).join("") || '<p class="muted">当前目标都已结束。新的问题出现时，随时开始。</p>'}</div>${completed.length ? `<div class="section-title"><h2>研究记录 <span>${completed.length}</span></h2></div><div class="goal-grid">${completed.map(goalCard).join("")}</div>` : ""}`}<button class="free-discussion" data-action="free-discussion">${icon("chat")}<span><strong>先聊聊，不急着确定目标</strong><small>${general.length ? `${general.length} 条讨论 · ` + esc(general.at(-1).text.slice(0, 60)) : "分享一个想法，之后可以把讨论转为目标"}</small></span><span>↗</span></button></div>`;
 }
 function goalMap() {
   const goal = currentGoal(state);
@@ -1054,10 +1073,15 @@ loadDraft();
 render();
 lab = createLabBridge({
   getContext() {
-    if (page !== "room") return {
-      room_id: "", room_name: "", goal_id: "", goal_title: "",
-      goal_context: "", conversation_id: "direct",
-    };
+    if (page !== "room")
+      return {
+        room_id: "",
+        room_name: "",
+        goal_id: "",
+        goal_title: "",
+        goal_context: "",
+        conversation_id: "direct",
+      };
     const room = state.rooms.find((r) => r.id === state.room);
     const goal = currentGoal(state);
     return {
@@ -1066,13 +1090,15 @@ lab = createLabBridge({
       goal_id: goal?.id || "",
       goal_title: goal?.title || "",
       goal_status: goal?.status || "",
-      goal_context: goal ? JSON.stringify({
-        prompt: goal.prompt,
-        criterion: goal.criterion,
-        budget: goal.budget,
-        context: goal.context,
-        revision: goal.revision,
-      }) : room.context || "",
+      goal_context: goal
+        ? JSON.stringify({
+            prompt: goal.prompt,
+            criterion: goal.criterion,
+            budget: goal.budget,
+            context: goal.context,
+            revision: goal.revision,
+          })
+        : room.context || "",
       conversation_id: "room",
     };
   },
