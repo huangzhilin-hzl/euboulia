@@ -625,7 +625,7 @@ function renderQuality() {
           : "未知",
       ],
       [
-        "Recorded phases",
+        "Attributed phases",
         q ? Object.keys(q.phases).join(", ") || "未标记" : "未知",
       ],
       [

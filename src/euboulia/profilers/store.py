@@ -238,7 +238,6 @@ class ProfileStore:
             count = 0
             skipped = 0
             records_seen = 0
-            phases: Counter[str] = Counter()
             kinds: Counter[str] = Counter()
             stack_count = shape_count = correlation_count = flow_count = 0
             truncated = False
@@ -349,8 +348,6 @@ class ProfileStore:
                         [(count, record["id"], domain, value) for domain, value in corr.items()],
                     )
                     kinds[kind] += 1
-                    if phase:
-                        phases[phase] += 1
                     correlation_count += bool(corr)
                     stack_count += any("stack" in k.lower() for k in args)
                     shape_count += any("dim" in k.lower() or "shape" in k.lower() for k in args)
@@ -377,7 +374,11 @@ class ProfileStore:
                 "origin_ns": str(origin),
                 "duration_ns": end - origin,
                 "kinds": dict(kinds),
-                "phases": dict(phases),
+                "phases": dict(
+                    db.execute(
+                        "SELECT phase,COUNT(*) FROM events WHERE phase IS NOT NULL GROUP BY phase"
+                    ).fetchall()
+                ),
                 "skipped_events": skipped,
                 "stack_events": stack_count,
                 "shape_events": shape_count,

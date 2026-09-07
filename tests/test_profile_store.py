@@ -266,6 +266,7 @@ def test_stage_attribution_follows_launch_after_cpu_range_and_retains_evidence(t
     )
     result = ready(store, key)
     assert result["stages"]["coverage"] == 2 / 3
+    assert set(result["quality"]["phases"]) == {"decode", "prefill"}
     phase = next(r for r in result["stages"]["ranks"] if r["phase"] == "decode")
     assert phase["activity_ns"] == 40_000
     assert phase["busy_ns"] == 25_000  # overlapping GPU intervals counted once
