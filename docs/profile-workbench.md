@@ -8,15 +8,23 @@ is not evidence that baseline qualification passed.
 
 ## Explore the evidence
 
-1. Select a capture and rank. The default view shows GPU kernels. Change the
+1. Select a capture, then a recorded phase, module subtree, and/or forward step.
+   The stage overview reports the fraction of indexed GPU events with an explicit
+   phase assignment. Unassigned events remain independently selectable. The
+   module tree includes parent paths; selecting a parent includes its descendants.
+   Select a timeline rank. The default view shows GPU kernels. Change the
    activity filter to inspect CUDA APIs, CPU operators, communication kernels,
    memory transfers, or recorded annotations.
 2. Hover over a timeline event to see its name, rank, start time, and duration.
    Zoom and move the time window to separate short kernels. An expandable event
    list provides keyboard access to the same event inspector.
-3. Select a hotspot to locate its occurrences. The table supports search and
-   sorting by total duration, mean duration, or count. The inspector compares the
-   same hotspot across ranks within this capture.
+3. Hotspots collapse exact kernel signatures across ranks. The default ranking
+   uses the largest per-rank cumulative duration, not a sum of rank clocks. The
+   heatmap shows each rank's cumulative milliseconds, normalized within that row;
+   expand a row for rank counts, means, and activity shares. Search and sort do not
+   change denominators. Selecting a heatmap cell opens a real sample event.
+   Hotspots cover the complete selected phase/module/step scope; the timeline's
+   time-window slider only controls the timeline.
 4. Select an individual event to inspect launch/external/request/batch IDs,
    enclosing ranges in the same thread, explicit flow endpoints, native arguments,
    recorded stacks, and shapes. The inspector keeps the full kernel signature
@@ -26,7 +34,8 @@ is not evidence that baseline qualification passed.
    execute an experiment or promote a candidate.
 
 GPU activity shares use the sum of kernel, communication, and memory activity
-for the same rank. CPU activity shares use their own category and rank. The
+for the same rank and selected phase/module/step. CPU activity shares use their
+own category and rank in that scope. The
 search filter does not change these denominators. Neither is a fraction of
 request latency: streams can overlap and CPU ranges can nest. Communication
 classification uses kernel-name patterns and cannot separate communication from
@@ -60,6 +69,7 @@ optimization:
     start_step: 1
     num_steps: 3
     activities: [CPU, GPU]
+    semantic_scopes: true
     with_stack: false
     record_shapes: false
     merge_profiles: false
@@ -104,6 +114,46 @@ capture, unprofiled qualification, stop. This PR adds analysis of baseline
 artifacts and richer collection in that path. It does not add a separate
 post-baseline GPU job scheduler or automatically recapture an old run from the UI.
 
+## Semantic capture and attribution
+
+`semantic_scopes: true` requires CPU + GPU activities and a managed
+`python -m sglang.launch_server` target. Only the profiling launch uses
+`euboulia.profilers.sglang_launcher`. A spawn-compatible import hook wraps
+`ModelRunner.forward`; it does not edit the pinned SGLang checkout. Old resolved
+recipes retain their old settings. The DSV4 template enables this option for new
+resolutions. No old trace gains annotations retroactively.
+
+The wrapper emits `euboulia::{...}` Torch annotations containing the exact
+`ForwardMode`, a per-model-runner profiled forward sequence (`target:N` or
+`draft:N`), and batch size. These step IDs are not request IDs or scheduler engine
+step numbers. During an active profiler call only, transient module hooks record
+Python module paths and available class-definition file/line metadata. Hooks are
+removed on return or exception. The off-profile path bypasses hook registration.
+
+Capture instrumentation can perturb Python execution and compilation, so this is
+code-understanding/diagnostic evidence, never a performance verdict. CUDA Graph
+replay may retain phase/step attribution through the graph launch but generally
+has no inner Python module calls. Missing graph-node/module links stay unknown;
+we do not disable graphs or apportion fused kernels to requests. Module definition
+locations are not kernel implementation locations. Unsupported worker execution
+paths that bypass `ModelRunner.forward` remain unannotated.
+
+The index recognizes explicit phase/module/step fields, canonical Euboulia scope
+annotations, and SGLang's recorded `step[MODE bs=N ...]` annotations. CPU events
+inherit containing scopes in the same file/process/thread. GPU events inherit
+only through a unique recorded CUDA launch correlation in the same raw file;
+GPU timestamps need not lie inside the CPU scope. Reused launch IDs and conflicting
+crossing scopes do not establish an attribution. Kernel-name guesses, request/batch
+ID matches, and time adjacency are not used to assign a phase.
+
+Each event inspector lists the actual annotation and launch event IDs supporting
+its assignment. Findings distinguish observed facts from unverified bottleneck
+hypotheses and unverified experimental gains. Stage summaries keep per-rank
+cumulative GPU activity, the union of GPU activity intervals, and first-to-last
+GPU event span separate. None is automatically a request's latency or critical
+path. Coverage counts indexed GPU events, not requests or complete inference
+phases, and is explicitly partial when files are missing or the index is capped.
+
 ## Retention and indexing
 
 Capture and synchronization have independent retention controls:
@@ -139,7 +189,10 @@ million duration events and six million input records. The UI explicitly reports
 truncation; narrow the window when a response reaches its limit. The timeline
 renders at most 36 lanes and the accessible list at most 150 events per response.
 The hotspot API returns the 5,000 largest groups and the table displays its first
-160 filtered groups; search narrows this list. Raw traces remain available for
+80 filtered groups after collapsing ranks; search narrows this list. Phase,
+module-subtree and step filters run in SQL before ranking/capping; their GPU
+shares use all matching activity in the denominator. At the 5,000-row cap the
+UI explicitly asks for a narrower scope. Raw traces remain available for
 full exploration. Missing raw files, checksum failures, malformed traces, absent
 stacks/shapes, and summary-only captures remain explicit states.
 

@@ -209,6 +209,7 @@ class SGLangProfilingConfig:
     merge_profiles: bool = False
     with_stack: bool = False
     record_shapes: bool = False
+    semantic_scopes: bool = False
     timeout_seconds: float = 1800.0
     settle_timeout_seconds: float = 30.0
     max_raw_bytes: int = 8 * 1024 * 1024 * 1024
@@ -1018,6 +1019,7 @@ def _parse_profiling(
             "merge_profiles",
             "with_stack",
             "record_shapes",
+            "semantic_scopes",
             "timeout_seconds",
             "settle_timeout_seconds",
             "max_raw_bytes",
@@ -1092,6 +1094,9 @@ def _parse_profiling(
     )
     if min_free_disk_bytes < max_raw_bytes:
         raise OptimizationConfigError(f"{path}.min_free_disk_bytes must be >= max_raw_bytes")
+    semantic_scopes = _boolean(raw.get("semantic_scopes", False), f"{path}.semantic_scopes")
+    if semantic_scopes and not {"CPU", "GPU"}.issubset(activities):
+        raise OptimizationConfigError(f"{path}.semantic_scopes requires CPU and GPU activities")
     return SGLangProfilingConfig(
         provider=provider,
         workload_point=workload_point,
@@ -1106,6 +1111,7 @@ def _parse_profiling(
         merge_profiles=merge_profiles,
         with_stack=_boolean(raw.get("with_stack", False), f"{path}.with_stack"),
         record_shapes=_boolean(raw.get("record_shapes", False), f"{path}.record_shapes"),
+        semantic_scopes=semantic_scopes,
         timeout_seconds=_number(
             raw.get("timeout_seconds", 1800), f"{path}.timeout_seconds", minimum=0.001
         ),

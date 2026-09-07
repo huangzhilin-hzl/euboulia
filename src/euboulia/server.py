@@ -196,7 +196,12 @@ class EubouliaRequestHandler(BaseHTTPRequestHandler):
                 if len(parts) == 4:
                     payload = {"profiles": store.list_captures()}
                 elif len(parts) == 5:
-                    payload = store.detail(parts[4])
+                    payload = store.detail(
+                        parts[4],
+                        phase=_single_query_value(query, "phase", default=""),
+                        module=_single_query_value(query, "module", default=""),
+                        step=_single_query_value(query, "step", default=""),
+                    )
                 elif len(parts) == 6 and parts[5] == "timeline":
                     payload = store.timeline(
                         parts[4],
@@ -205,6 +210,9 @@ class EubouliaRequestHandler(BaseHTTPRequestHandler):
                         rank=_single_query_value(query, "rank", default=""),
                         kind=_single_query_value(query, "kind", default=""),
                         name=_single_query_value(query, "name", default=""),
+                        phase=_single_query_value(query, "phase", default=""),
+                        module=_single_query_value(query, "module", default=""),
+                        step=_single_query_value(query, "step", default=""),
                     )
                 elif len(parts) == 7 and parts[5] == "events":
                     payload = store.event(parts[4], int(parts[6]))

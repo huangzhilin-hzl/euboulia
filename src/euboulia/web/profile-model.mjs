@@ -69,6 +69,16 @@ export function explain(row) {
 }
 
 export function shortName(name) {
+  if (String(name).startsWith("euboulia::")) {
+    try {
+      const scope = JSON.parse(String(name).slice(10));
+      return (
+        scope.module || `${phaseLabel(scope.phase)} · Step ${scope.step ?? "?"}`
+      );
+    } catch {
+      /* Keep malformed names as raw evidence. */
+    }
+  }
   return (
     String(name)
       .replace(/^void /, "")
@@ -77,3 +87,54 @@ export function shortName(name) {
       .split("(")[0] || String(name).slice(0, 100)
   );
 }
+
+// Keep exact signatures separate; only collapse the rank dimension.
+export function groupHotspots(
+  rows,
+  { search = "", kind = "", sort = "total_ns" } = {},
+) {
+  const groups = new Map();
+  for (const row of filterHotspots(rows, { search, kind })) {
+    const key = JSON.stringify([
+      row.name,
+      row.kind,
+      row.phase,
+      row.module,
+      row.step,
+    ]);
+    if (!groups.has(key))
+      groups.set(key, {
+        ...row,
+        rows: [],
+        count: 0,
+        total_ns: 0,
+        max_rank_ns: 0,
+      });
+    const group = groups.get(key);
+    group.rows.push(row);
+    group.count += row.count;
+    group.total_ns += row.total_ns;
+    group.max_rank_ns = Math.max(group.max_rank_ns, row.total_ns);
+  }
+  return [...groups.values()]
+    .map((g) => ({
+      ...g,
+      mean_ns: g.total_ns / g.count,
+      rows: g.rows.sort((a, b) => Number(a.rank) - Number(b.rank)),
+    }))
+    .sort(
+      (a, b) =>
+        (b[sort === "total_ns" ? "max_rank_ns" : sort] ?? 0) -
+        (a[sort === "total_ns" ? "max_rank_ns" : sort] ?? 0),
+    );
+}
+export const phaseLabel = (value) =>
+  ({
+    prefill: "Prefill · 预填充",
+    extend: "Extend · 扩展",
+    decode: "Decode · 解码",
+    mixed: "Mixed · 混合批次",
+    __unknown__: "阶段未知",
+  })[value] ||
+  value ||
+  "阶段未知";

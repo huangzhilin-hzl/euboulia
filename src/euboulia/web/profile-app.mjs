@@ -1,6 +1,7 @@
 import {
   labels,
-  filterHotspots,
+  groupHotspots,
+  phaseLabel,
   estimate,
   hitTest,
   explain,
@@ -45,6 +46,8 @@ let run = "",
   capture = "",
   data = null,
   rows = [],
+  groups = [],
+  expanded = new Set(),
   selected = null,
   events = [],
   rects = [],
@@ -127,6 +130,8 @@ async function selectCapture(id) {
   selected = null;
   nameFilter = "";
   $("#search").value = "";
+  for (const id of ["phase", "module", "step"]) $("#" + id).value = "";
+  expanded.clear();
   $("#rank").value = "";
   $("#kind").value = "";
   start = 0;
@@ -139,7 +144,7 @@ async function selectCapture(id) {
 async function loadCapture(token = ++generation, reset = false) {
   if (!capture) return;
   try {
-    const r = await api(base());
+    const r = await api(base() + "?" + semanticParams());
     if (token !== generation) return;
     const newlyIndexed = !data?.quality && !!r.quality;
     data = r;
@@ -181,6 +186,7 @@ async function loadCapture(token = ++generation, reset = false) {
           (h) => h.kind === "gpu_kernel" && String(h.rank) === $("#rank").value,
         ) || null;
     renderOverview();
+    renderStages();
     renderHotspots();
     renderInspector();
     renderQuality();
@@ -241,24 +247,140 @@ function renderOverview() {
   }[data.index.state];
   $("#perfetto").disabled = !available;
 }
+function semanticParams() {
+  return new URLSearchParams(
+    Object.fromEntries(
+      ["phase", "module", "step"].map((id) => [id, $("#" + id).value]),
+    ),
+  );
+}
+function renderStages() {
+  const stage = data.stages,
+    coverage = stage?.coverage;
+  const ranks = stage?.ranks || [],
+    phases = [...new Set(ranks.map((r) => r.phase || "__unknown__"))];
+  $("#stage-state").textContent =
+    coverage == null
+      ? "证据不可用"
+      : coverage === 0
+        ? "阶段归属未知"
+        : "观测事实 · 显式关联";
+  $("#stage-coverage").innerHTML =
+    `<div class="coverage-heading"><span>阶段归属覆盖率 <strong>${coverage == null ? "—" : num(coverage * 100, 1) + "%"}</strong></span><small>${num(stage?.assigned_gpu_events, 0)} / ${num(stage?.gpu_events, 0)} 个 GPU 活动事件 · 按事件数统计</small></div><div class="coverage-track"><i style="width:${(coverage || 0) * 100}%"></i></div>`;
+  for (const [id, values, label] of [
+    ["phase", phases, "全窗口"],
+    ["module", stage?.modules || [], "全部模块"],
+    ["step", stage?.steps || [], "全部 step"],
+  ]) {
+    const old = $("#" + id).value;
+    $("#" + id).innerHTML =
+      `<option value="">${label}</option>` +
+      [...new Set([...values, ...(old ? [old] : []), "__unknown__"])]
+        .map(
+          (v) =>
+            `<option value="${esc(v)}">${esc(id === "phase" ? phaseLabel(v) : v === "__unknown__" ? "未记录" : v)}</option>`,
+        )
+        .join("");
+    $("#" + id).value = old;
+    $("#" + id).disabled = !stage;
+  }
+  $("#stage-cards").innerHTML = [
+    { phase: "", label: "全窗口", count: stage?.gpu_events },
+    ...phases.map((phase) => ({
+      phase,
+      label: phaseLabel(phase),
+      count: ranks
+        .filter((r) => (r.phase || "__unknown__") === phase)
+        .reduce((n, r) => n + r.count, 0),
+    })),
+  ]
+    .map(
+      (item) =>
+        `<button data-phase="${esc(item.phase)}" class="stage-card ${$("#phase").value === item.phase ? "active" : ""}" ${!stage ? "disabled" : ""}><small>${item.phase === "__unknown__" ? "UNASSIGNED" : item.phase ? "RECORDED" : "CAPTURE"}</small><strong>${esc(item.label)}</strong><span>${num(item.count, 0)} 个 GPU 事件</span></button>`,
+    )
+    .join("");
+  const modules = stage?.modules || [],
+    tree = new Map();
+  for (const path of modules) {
+    const parts = path.split(".");
+    for (let i = 1; i <= parts.length; i++)
+      tree.set(parts.slice(0, i).join("."), i - 1);
+  }
+  $("#module-tree-shell").hidden = !tree.size;
+  $("#module-tree").innerHTML = [...tree]
+    .sort((a, b) => a[0].localeCompare(b[0], undefined, { numeric: true }))
+    .slice(0, 1500)
+    .map(
+      ([path, depth]) =>
+        `<button data-module="${esc(path)}" style="padding-left:${12 + Math.min(depth, 8) * 14}px" class="${$("#module").value === path ? "active" : ""}">${esc(path.split(".").at(-1))}<small>${esc(path)}</small></button>`,
+    )
+    .join("");
+  const currentModule = $("#module").value;
+  const moduleOptions = new Set([...$("#module").options].map((o) => o.value));
+  for (const [path] of tree)
+    if (!moduleOptions.has(path)) $("#module").add(new Option(path, path));
+  $("#module").value = currentModule;
+  const filtered = ranks.filter(
+    (r) =>
+      !$("#phase").value || (r.phase || "__unknown__") === $("#phase").value,
+  );
+  const busiest = [...filtered].sort(
+    (a, b) => b.activity_ns - a.activity_ns,
+  )[0];
+  $("#stage-note").textContent =
+    coverage === 0
+      ? "这份 trace 没有可用于阶段归属的证据。当前展示全窗口 kernel 活动，无法证明 Prefill / Decode 的热点。"
+      : "阶段由记录字段、CPU 包含范围及 CUDA launch 关联建立；不按 kernel 名推测。";
+  if (busiest && $("#phase").value)
+    $("#stage-note").textContent +=
+      ` 阶段概览 · Rank ${busiest.rank}：累计活动 ${num(busiest.activity_ns / 1e6)} ms，去重活动 ${num(busiest.busy_ns / 1e6)} ms，首末 GPU 事件跨度 ${num(busiest.projected_span_ns / 1e6)} ms。概览包含该阶段所有模块 / step；这些数值不等于请求延迟。`;
+  if (data.quality?.truncated || data.files.some((f) => !f.available))
+    $("#stage-note").textContent += " 数据不完整，覆盖率仅针对已索引事件。";
+}
+async function changeScope() {
+  selected = null;
+  nameFilter = "";
+  expanded.clear();
+  eventGeneration++;
+  start = 0;
+  span = total;
+  await loadCapture(++generation);
+}
 function renderHotspots() {
-  const filtered = filterHotspots(rows, {
-    rank: $("#rank").value,
+  groups = groupHotspots(rows, {
     kind: $("#kind").value,
     search: $("#search").value,
     sort: $("#sort").value,
   });
+  $("#hotspot-title").textContent =
+    ($("#phase").value ? phaseLabel($("#phase").value) : "全窗口") +
+    " · 热点证据";
   $("#hotspot-count").textContent =
-    `${filtered.length} 个分组${filtered.length > 160 ? " · 显示前 160 项" : ""}`;
+    `${groups.length} 个热点 · Rank 已合并${groups.length > 80 ? " · 显示前 80 项" : ""}${data.hotspots_limited ? " · 查询已达上限，请选择更小范围" : ""}`;
+  const heatRanks = [
+    ...new Set([
+      ...data.files.map((f) => String(f.rank)),
+      ...rows.map((r) => String(r.rank)),
+    ]),
+  ].sort((a, b) => Number(a) - Number(b));
   $("#hotspots").innerHTML =
-    filtered
-      .slice(0, 160)
-      .map((r) => {
-        const i = rows.indexOf(r);
-        return `<tr class="${selected === r ? "selected" : ""}"><td><button data-hotspot="${i}" title="${esc(r.name)}"><i style="background:${colors[r.kind] || colors.other}"></i>${esc(shortName(r.name))}</button><small>${esc(labels[r.kind] || r.kind)}${r.phase ? " · " + esc(r.phase) : ""}</small></td><td>${esc(r.rank ?? "—")}</td><td>${num(r.count, 0)}</td><td>${num(r.total_ns / 1e6)}</td><td>${num(r.mean_ns / 1e3)}</td><td title="${esc(r.share_basis)}"><span class="share"><i style="width:${Math.min(100, r.share * 100)}%"></i></span>${num(r.share * 100, 1)}%</td></tr>`;
+    groups
+      .slice(0, 80)
+      .map((g, i) => {
+        const key = JSON.stringify([g.name, g.kind]),
+          open = expanded.has(key);
+        const heat = heatRanks
+          .map((rank) => {
+            const r = g.rows.find((row) => String(row.rank) === rank);
+            if (!r)
+              return `<span class="heat-cell absent" title="Rank ${esc(rank)}：当前查询中未观察到；不计为零耗时"><small>R${esc(rank)}</small><strong>—</strong></span>`;
+            return `<button class="heat-cell" data-hotspot="${rows.indexOf(r)}" style="--heat:${0.12 + (0.65 * r.total_ns) / Math.max(1, g.max_rank_ns)}" title="Rank ${esc(r.rank)} · ${num(r.total_ns / 1e6)} ms · ${num(r.count, 0)} 次 · ${num(r.share * 100, 1)}% 本 Rank 所选范围活动"><small>R${esc(r.rank)}</small><strong>${num(r.total_ns / 1e6)}</strong></button>`;
+          })
+          .join("");
+        return `<tr class="${g.rows.includes(selected) ? "selected" : ""}"><td><button class="hotspot-name" data-group="${i}" title="${esc(g.name)}">${esc(shortName(g.name))}</button><small>${esc(labels[g.kind] || g.kind)} · <button class="expand-ranks" data-expand="${i}" aria-expanded="${open}">${open ? "收起" : "展开"} ${g.rows.length} 个 Rank</button></small></td><td>${num(g.count, 0)}</td><td>${num(g.max_rank_ns / 1e6)}</td><td>${num(g.mean_ns / 1e3)}</td><td><div class="heat-row">${heat}</div></td></tr>${open ? `<tr class="rank-detail"><td colspan="5"><div class="rank-detail-grid">${g.rows.map((r) => `<button data-hotspot="${rows.indexOf(r)}"><b>Rank ${esc(r.rank)}</b><span>${num(r.total_ns / 1e6)} ms · ${num(r.count, 0)} 次</span><small>${num(r.share * 100, 1)}% 本 Rank 活动 · ${num(r.mean_ns / 1e3)} µs / 次</small></button>`).join("")}</div><p class="note">占比的分母为同 Rank、同活动域、当前阶段 / 模块 / step 的累计活动；不代表关键路径或预期收益。</p></td></tr>` : ""}`;
       })
       .join("") ||
-    '<tr><td colspan="6">没有匹配的热点。调整 rank、活动类型或搜索条件。</td></tr>';
+    '<tr><td colspan="5">这个范围没有匹配的热点。调整阶段、模块、step、活动或搜索条件。</td></tr>';
 }
 async function loadTimeline() {
   const token = ++timelineGeneration;
@@ -274,6 +396,7 @@ async function loadTimeline() {
     rank: $("#rank").value,
     kind: $("#kind").value,
     name: nameFilter,
+    ...Object.fromEntries(semanticParams()),
   });
   try {
     const r = await api(base() + "/timeline?" + params);
@@ -416,6 +539,26 @@ function renderInspector(eventDetail = null) {
         .sort((a, b) => Number(a.rank) - Number(b.rank))
     : [];
   const maxDuration = Math.max(1, ...distribution.map((r) => r.total_ns));
+  const evidence = event?.evidence || {};
+  const moduleSources = (eventDetail?.attribution_sources || []).flatMap(
+    (source) => {
+      try {
+        const marker = JSON.parse(
+          source.name.startsWith("euboulia::") ? source.name.slice(10) : "{}",
+        );
+        return marker.source?.file ? [marker.source] : [];
+      } catch {
+        return [];
+      }
+    },
+  );
+  const recordedSource = moduleSources
+    .map(
+      (source) =>
+        `<p class="note">模块定义：${esc(source.file)}:${esc(source.line)}<br />${esc(source.symbol)} · 采集时记录；不等同于 kernel 实现位置。</p>`,
+    )
+    .join("");
+  const semanticChain = `<div class="evidence-levels"><span class="tag">观测事实</span><span>瓶颈假设 · 待验证</span><span>实验收益 · 未验证</span></div><h4>阶段归属依据</h4>${["phase", "module", "step"].map((field) => `<div class="attribution-field"><small>${esc({ phase: "阶段", module: "模块", step: "Step" }[field])}</small><strong>${esc(evidence[field]?.value || "未知")}</strong><span>${esc({ recorded: "事件显式记录", cpu_scope: "同线程 CPU 包含范围", cuda_launch: "唯一 CUDA launch → GPU 关联" }[evidence[field]?.method] || "缺少归属证据")}</span></div>`).join("")}${(eventDetail?.attribution_sources || []).map((source) => `<button class="related" data-event="${source.id}">#${source.id} · ${esc(shortName(source.name))}<small>${num(source.ts / 1e6, 4)} ms · ${num(source.dur / 1e3)} µs</small></button>`).join("")}${!event ? `<p class="note">点击热点或 Rank 色块，查看一个真实事件及其归属链。</p>` : `<p class="note">证据定位：文件 ${esc(event.file)} / Rank ${esc(event.rank)} / 事件 #${event.id}。记录所属关系不等于已证明关键路径。</p>`}`;
   const rankChart = distribution.length
     ? `<h4>同一热点 · 各 rank 累计活动</h4><div class="rank-bars">${distribution.map((r) => `<div title="Rank ${esc(r.rank)}: ${num(r.total_ns / 1e6)} ms; ${num(r.count, 0)} 次"><span>${num(r.total_ns / 1e6, 1)}</span><i style="height:${Math.max(2, (60 * r.total_ns) / maxDuration)}px"></i><small>R${esc(r.rank)}</small></div>`).join("")}</div><p class="note">单位 ms；分别累计，不代表跨 rank 的关键路径或等待时间。</p>`
     : "";
@@ -443,7 +586,7 @@ function renderInspector(eventDetail = null) {
     ? `<details><summary>记录的 flow 端点 (${eventDetail.flows.length})</summary><p class="note">同一文件、类别和 scope 的显式 flow；端点与此事件在同一线程时间范围内。</p><pre>${esc(JSON.stringify(eventDetail.flows, null, 2))}</pre></details>`
     : "";
   $("#inspector").innerHTML =
-    `<span class="tag">${event ? "EVENT " + event.id : h ? "HOTSPOT" : "SELECT EVIDENCE"}</span><h3 class="kernel-name">${esc(shortName(event?.name || h?.name || "选择一个 kernel 或时间线事件"))}</h3>${h ? `<div class="mini-metrics"><div><small>累计活动耗时</small><strong>${num(h.total_ns / 1e6)} ms</strong></div><div><small>调用次数</small><strong>${num(h.count, 0)}</strong></div><div><small>最短 / 最长</small><strong>${num(h.min_ns == null ? null : h.min_ns / 1e3)} / ${num(h.max_ns == null ? null : h.max_ns / 1e3)} µs</strong></div></div>` : ""}${rankChart}<div class="finding"><span>观察</span><p>${esc(info[0])}</p><span>下一步证据</span><p>${esc(info[1])}</p></div><h4>计算关联 <small>RECORDED RELATIONS</small></h4>${launchChain}${event ? `<div class="chain"><span>${esc(labels[event.kind] || event.kind)}</span> → <strong>${esc(event.name.slice(0, 60))}</strong></div>${eventDetail.correlated.length ? eventDetail.correlated.map((e) => `<button class="related" data-event="${e.id}">${esc(labels[e.kind] || e.kind)} → ${esc(e.name)}<small>相同 scope 中的关联 ID，需结合时间与语义判断</small></button>`).join("") : '<p class="note">未找到显式关联事件。不会凭时间相邻建立调用关系。</p>'}${eventDetail.enclosing.length ? '<p class="note">同一线程中的包含范围：</p>' + eventDetail.enclosing.map((e) => `<button class="related" data-event="${e.id}">${esc(e.name)}</button>`).join("") : ""}<pre>${esc(JSON.stringify(corr, null, 2))}</pre>` : '<p class="note">点击时间线中的具体事件，查看 CPU/GPU 关联和包含范围。</p>'}${flow}<h4>源码与 shape <small>CAPTURED CONTEXT</small></h4><p class="note">Revision ${esc(data?.manifest.source_revision || "未记录")}</p>${stack.length ? `<pre>${esc(stack.map(([k, v]) => k + "\n" + JSON.stringify(v, null, 2)).join("\n"))}</pre>` : '<p class="missing">未记录源码调用栈。使用 CPU + GPU、with_stack 的理解采样补充证据；不能从 kernel 名推断代码行。</p>'}${shapes.length ? `<pre>${esc(JSON.stringify(Object.fromEntries(shapes), null, 2))}</pre>` : '<p class="note">Shape 未记录；针对选定工作点补采 record_shapes。</p>'}${h ? `<details><summary>完整 kernel / 算子名称</summary><pre>${esc(h.name)}</pre></details>` : ""}${event ? `<details><summary>完整事件参数</summary><pre>${esc(JSON.stringify(args, null, 2))}</pre></details>` : ""}`;
+    `<span class="tag">${event ? "EVENT " + event.id : h ? "HOTSPOT" : "SELECT EVIDENCE"}</span><h3 class="kernel-name">${esc(shortName(event?.name || h?.name || "选择一个 kernel 或时间线事件"))}</h3>${h ? `<div class="mini-metrics"><div><small>累计活动耗时</small><strong>${num(h.total_ns / 1e6)} ms</strong></div><div><small>调用次数</small><strong>${num(h.count, 0)}</strong></div><div><small>最短 / 最长</small><strong>${num(h.min_ns == null ? null : h.min_ns / 1e3)} / ${num(h.max_ns == null ? null : h.max_ns / 1e3)} µs</strong></div></div>` : ""}${semanticChain}${rankChart}<div class="finding"><span>观察</span><p>${esc(info[0])}</p><span>下一步证据</span><p>${esc(info[1])}</p></div><h4>计算关联 <small>RECORDED RELATIONS</small></h4>${launchChain}${event ? `<div class="chain"><span>${esc(labels[event.kind] || event.kind)}</span> → <strong>${esc(event.name.slice(0, 60))}</strong></div>${eventDetail.correlated.length ? eventDetail.correlated.map((e) => `<button class="related" data-event="${e.id}">${esc(labels[e.kind] || e.kind)} → ${esc(e.name)}<small>相同 scope 中的关联 ID，需结合时间与语义判断</small></button>`).join("") : '<p class="note">未找到显式关联事件。不会凭时间相邻建立调用关系。</p>'}${eventDetail.enclosing.length ? '<p class="note">同一线程中的包含范围：</p>' + eventDetail.enclosing.map((e) => `<button class="related" data-event="${e.id}">${esc(e.name)}</button>`).join("") : ""}<pre>${esc(JSON.stringify(corr, null, 2))}</pre>` : '<p class="note">点击时间线中的具体事件，查看 CPU/GPU 关联和包含范围。</p>'}${flow}<h4>源码与 shape <small>CAPTURED CONTEXT</small></h4>${recordedSource}<p class="note">Revision ${esc(data?.manifest.source_revision || "未记录")}</p>${stack.length ? `<pre>${esc(stack.map(([k, v]) => k + "\n" + JSON.stringify(v, null, 2)).join("\n"))}</pre>` : '<p class="missing">未记录源码调用栈。使用 CPU + GPU、with_stack 的理解采样补充证据；不能从 kernel 名推断代码行。</p>'}${shapes.length ? `<pre>${esc(JSON.stringify(Object.fromEntries(shapes), null, 2))}</pre>` : '<p class="note">Shape 未记录；针对选定工作点补采 record_shapes。</p>'}${h ? `<details><summary>完整 kernel / 算子名称</summary><pre>${esc(h.name)}</pre></details>` : ""}${event ? `<details><summary>完整事件参数</summary><pre>${esc(JSON.stringify(args, null, 2))}</pre></details>` : ""}`;
 }
 async function selectEvent(id) {
   const token = generation,
@@ -617,10 +760,23 @@ $("#clear-filter").onclick = () => {
   renderInspector();
   loadTimeline();
 };
-$("#hotspots").onclick = (e) => {
-  const b = e.target.closest("[data-hotspot]");
+$("#hotspots").onclick = async (e) => {
+  const b = e.target.closest("button");
   if (!b) return;
-  selected = rows[Number(b.dataset.hotspot)];
+  if (b.dataset.expand != null) {
+    const g = groups[Number(b.dataset.expand)],
+      key = JSON.stringify([g.name, g.kind]);
+    expanded.has(key) ? expanded.delete(key) : expanded.add(key);
+    renderHotspots();
+    return;
+  }
+  if (b.dataset.group != null)
+    selected = [...groups[Number(b.dataset.group)].rows].sort(
+      (a, b) => b.total_ns - a.total_ns,
+    )[0];
+  else if (b.dataset.hotspot != null)
+    selected = rows[Number(b.dataset.hotspot)];
+  else return;
   nameFilter = selected.name;
   $("#rank").value = String(selected.rank ?? "");
   renderHotspots();
@@ -628,6 +784,27 @@ $("#hotspots").onclick = (e) => {
   start = 0;
   span = total;
   loadTimeline();
+  if (selected?.event_id) await selectEvent(selected.event_id);
+};
+for (const id of ["phase", "module", "step"])
+  $("#" + id).onchange = changeScope;
+$("#stage-cards").onclick = (e) => {
+  const b = e.target.closest("[data-phase]");
+  if (b) {
+    $("#phase").value = b.dataset.phase;
+    changeScope();
+  }
+};
+$("#module-tree").onclick = (e) => {
+  const b = e.target.closest("[data-module]");
+  if (b) {
+    $("#module").value = b.dataset.module;
+    changeScope();
+  }
+};
+$("#reset-stage").onclick = () => {
+  for (const id of ["phase", "module", "step"]) $("#" + id).value = "";
+  changeScope();
 };
 $("#zoom-in").onclick = () => {
   span = Math.min(total, Math.max(1, span / 2));

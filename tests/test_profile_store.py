@@ -212,3 +212,93 @@ def test_hypotheses_are_durable_scoped_drafts(tmp_path: Path) -> None:
     assert reloaded[0]["gate_eligible"] is False
     assert reloaded[0]["state"] == "draft"
     assert Path(first["path"]).is_relative_to(store.root)
+
+
+def semantic_profile(root: Path, events: list[dict]) -> tuple[ProfileStore, str]:
+    folder = root / "artifacts" / "target-validation" / "profile"
+    (folder / "raw").mkdir(parents=True)
+    path = folder / "raw" / "rank-0.trace.json"
+    path.write_text(json.dumps({"traceEvents": events}))
+    (folder / "manifest.json").write_text(
+        json.dumps(
+            {
+                "raw_traces": [
+                    {
+                        "path": str(path),
+                        "rank": "0",
+                        "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                    }
+                ]
+            }
+        )
+    )
+    store = ProfileStore(root, root.parent / "semantic-cache")
+    return store, store.list_captures()[0]["id"]
+
+
+def duration(name, ts, dur, cat="user_annotation", tid=1, args=None):
+    return {
+        "ph": "X",
+        "name": name,
+        "ts": ts,
+        "dur": dur,
+        "cat": cat,
+        "pid": 1 if cat != "kernel" else 2,
+        "tid": tid,
+        "args": args or {},
+    }
+
+
+def test_stage_attribution_follows_launch_after_cpu_range_and_retains_evidence(tmp_path):
+    # GPU execution occurs AFTER both CPU annotations ended. Timestamp containment
+    # would misattribute this event to the next phase.
+    store, key = semantic_profile(
+        tmp_path / "run",
+        [
+            duration('euboulia::{"phase":"decode","step":"7"}', 0, 10),
+            duration('euboulia::{"module":"layers.12.moe"}', 1, 8),
+            duration("cudaLaunchKernel", 3, 1, "cuda_runtime", args={"correlation": 42}),
+            duration('euboulia::{"phase":"prefill","step":"8"}', 15, 40),
+            duration("gemm", 20, 20, "kernel", args={"correlation": 42}),
+            duration("gemm", 25, 20, "kernel", tid=2, args={"correlation": 42}),
+            duration("decode_named_kernel", 50, 5, "kernel"),
+        ],
+    )
+    result = ready(store, key)
+    assert result["stages"]["coverage"] == 2 / 3
+    phase = next(r for r in result["stages"]["ranks"] if r["phase"] == "decode")
+    assert phase["activity_ns"] == 40_000
+    assert phase["busy_ns"] == 25_000  # overlapping GPU intervals counted once
+    event = store.timeline(key, phase="decode", module="layers.12", step="7")["events"][-1]
+    assert event["phase"] == "decode" and event["module"] == "layers.12.moe"
+    assert event["evidence"]["phase"]["method"] == "cuda_launch"
+    detail = store.event(key, event["id"])
+    assert {r["name"] for r in detail["attribution_sources"]} == {
+        'euboulia::{"phase":"decode","step":"7"}',
+        'euboulia::{"module":"layers.12.moe"}',
+        "cudaLaunchKernel",
+    }
+    scoped = store.detail(key, phase="decode", module="layers.12", step="7")
+    gpu = [r for r in scoped["hotspots"] if r["kind"] == "gpu_kernel"]
+    assert len(gpu) == 1 and gpu[0]["share"] == 1
+    unknown = store.timeline(key, phase="__unknown__", kind="gpu_kernel")["events"]
+    assert [r["name"] for r in unknown] == ["decode_named_kernel"]
+    assert store.detail(key, phase="' OR 1=1 --")["hotspots"] == []
+
+
+def test_ambiguous_launches_and_crossing_scopes_do_not_prove_phase(tmp_path):
+    store, key = semantic_profile(
+        tmp_path / "run",
+        [
+            duration("decode", 0, 20),
+            duration("prefill", 10, 20),
+            duration("cudaLaunchKernel", 12, 1, "cuda_runtime", args={"correlation": 1}),
+            duration("kernel", 40, 5, "kernel", args={"correlation": 1}),
+            duration("step[DECODE bs=1]", 50, 10),
+            duration("cudaLaunchKernel", 52, 1, "cuda_runtime", args={"correlation": 2}),
+            duration("cudaLaunchKernel", 70, 1, "cuda_runtime", args={"correlation": 2}),
+            duration("kernel", 80, 5, "kernel", args={"correlation": 2}),
+        ],
+    )
+    assert ready(store, key)["stages"]["coverage"] == 0
+    assert all(not e["phase"] for e in store.timeline(key, kind="gpu_kernel")["events"])

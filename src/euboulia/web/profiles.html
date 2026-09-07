@@ -40,6 +40,58 @@
         <div id="workspace" hidden>
           <section id="metrics" class="metrics"></section>
           <div class="scope" id="scope"></div>
+          <section class="panel stage-panel">
+            <div class="panel-heading">
+              <div>
+                <div class="eyebrow">INFERENCE STAGES / RECORDED EVIDENCE</div>
+                <h2>先定位阶段，再追踪热点</h2>
+              </div>
+              <span class="tag" id="stage-state"></span>
+            </div>
+            <div id="stage-coverage"></div>
+            <div id="stage-cards" class="stage-cards"></div>
+            <div class="toolbar semantic-toolbar">
+              <label
+                >阶段
+                <select id="phase">
+                  <option value="">全窗口</option>
+                </select></label
+              >
+              <label
+                >模块
+                <select id="module">
+                  <option value="">全部模块</option>
+                </select></label
+              >
+              <label
+                >Step
+                <select id="step">
+                  <option value="">全部 step</option>
+                </select></label
+              >
+              <button id="reset-stage">重置范围</button>
+            </div>
+            <details class="capture-help" id="module-tree-shell" hidden>
+              <summary>按模块层级探索</summary>
+              <div id="module-tree"></div>
+            </details>
+            <p id="stage-note" class="note"></p>
+            <details class="capture-help">
+              <summary>如何补齐阶段证据</summary>
+              <p>
+                下一次采样启用 CPU + GPU 和 semantic_scopes，保留原始
+                trace。阶段、step 和模块由显式标记与唯一 CUDA launch
+                关联；混合批次保留为 mixed，未建立模块关系的 CUDA Graph kernel
+                保留未知。
+              </p>
+              <p>
+                短窗口不保证覆盖完整 prefill /
+                decode。请检查实际阶段覆盖，再调整 start_step 与
+                num_steps。理解采样可额外启用 stack / shape；收益用无 profiler
+                的 A/B 测试验证。
+              </p>
+            </details>
+          </section>
           <div class="workbench">
             <div class="evidence">
               <section class="panel">
@@ -103,7 +155,7 @@
                 <div class="panel-heading">
                   <div>
                     <div class="eyebrow">02 / HOTSPOT EXPLORER</div>
-                    <h2>热点在哪里</h2>
+                    <h2 id="hotspot-title">全窗口热点</h2>
                   </div>
                   <span id="hotspot-count" class="tag"></span>
                 </div>
@@ -114,7 +166,7 @@
                     placeholder="搜索 kernel、算子或模块"
                     aria-label="搜索热点"
                   /><select id="sort" aria-label="热点排序">
-                    <option value="total_ns">累计活动耗时</option>
+                    <option value="total_ns">最大 Rank 累计耗时</option>
                     <option value="mean_ns">平均耗时</option>
                     <option value="count">调用次数</option></select
                   ><button id="clear-filter">清除筛选</button>
@@ -124,19 +176,20 @@
                     <thead>
                       <tr>
                         <th>Kernel / Operator</th>
-                        <th>Rank</th>
-                        <th>次数</th>
-                        <th>累计 ms</th>
-                        <th>均值 µs</th>
-                        <th>活动占比</th>
+                        <th>调用次数<br />所有 Rank</th>
+                        <th>最大 Rank<br />累计 ms</th>
+                        <th>均值 µs<br />所有调用</th>
+                        <th>Rank 热力图 · 累计 ms</th>
                       </tr>
                     </thead>
                     <tbody id="hotspots"></tbody>
                   </table>
                 </div>
                 <p class="note">
-                  活动占比按活动类别与 rank
-                  计算。它不是请求延迟占比，也不等于可获得的加速。
+                  每行合并同名 kernel，颜色按本行各 Rank 的实际累计 ms
+                  对比；点击色块查看事件证据。展开可查看各 Rank
+                  的次数和活动占比。当前表覆盖选定阶段 / 模块 / step
+                  的全采样窗口，与上方时间线缩放独立。
                 </p>
               </section>
             </div>

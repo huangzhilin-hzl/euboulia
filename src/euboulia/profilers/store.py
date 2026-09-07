@@ -18,8 +18,9 @@ from pathlib import Path
 from typing import Any, cast
 
 from euboulia.profilers.parsers import iter_trace_records
+from euboulia.profilers.semantics import attribute_events, phase_overview
 
-_INDEX_VERSION = 1
+_INDEX_VERSION = 3
 _MAX_EVENTS = 2_000_000
 _MAX_RECORDS = 6_000_000
 _MAX_TIME = 2**53 - 1
@@ -228,7 +229,8 @@ class ProfileStore:
                 PRAGMA journal_mode=OFF;
                 CREATE TABLE events(id INTEGER PRIMARY KEY, file TEXT, rank TEXT,
                     pid TEXT, tid TEXT, stream TEXT, phase TEXT, kind TEXT, name TEXT,
-                    ts INTEGER, dur INTEGER, args TEXT, corr TEXT);
+                    ts INTEGER, dur INTEGER, args TEXT, corr TEXT,
+                    module TEXT, step TEXT, evidence TEXT);
                 CREATE TABLE links(event INTEGER, file TEXT, domain TEXT, value TEXT);
                 CREATE TABLE flow(file TEXT, flow_id TEXT, ph TEXT, ts INTEGER, pid TEXT, tid TEXT);
                 CREATE TABLE meta(value TEXT);
@@ -324,7 +326,9 @@ class ProfileStore:
                     stream = _ident(args, "stream", "Stream", "stream id")
                     count += 1
                     db.execute(
-                        "INSERT INTO events VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        "INSERT INTO events(id,file,rank,pid,tid,stream,phase,kind,name,"
+                        "ts,dur,args,corr) "
+                        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
                         (
                             count,
                             record["id"],
@@ -367,6 +371,7 @@ class ProfileStore:
                 CREATE INDEX link_idx ON links(file,domain,value);
                 CREATE INDEX flow_idx ON flow(file,flow_id);
             """)
+            attribute_events(db)
             meta = {
                 "events": count,
                 "origin_ns": str(origin),
@@ -381,6 +386,7 @@ class ProfileStore:
                 "truncated": truncated,
                 "checksum_verified": all(r["sha256"] for r in raw if r["available"]),
             }
+            meta["stages"] = phase_overview(db)
             db.execute("INSERT INTO meta VALUES(?)", (json.dumps(meta),))
             db.commit()
             db.close()
@@ -405,7 +411,9 @@ class ProfileStore:
         db.row_factory = sqlite3.Row
         return db, data, state
 
-    def detail(self, key: str) -> dict[str, Any]:
+    def detail(
+        self, key: str, *, phase: str = "", module: str = "", step: str = ""
+    ) -> dict[str, Any]:
         manifest, data = self._capture(key)
         raw = self._raw(manifest, data)
         db, _, state = self._open(key)
@@ -456,7 +464,9 @@ class ProfileStore:
                         "ORDER BY rank,kind"
                     )
                 ]
-                result["hotspots"] = self._hotspots(db)
+                result["hotspots"] = self._hotspots(db, phase=phase, module=module, step=step)
+                result["hotspots_limited"] = len(result["hotspots"]) >= 5000
+                result["stages"] = result["quality"].pop("stages", {})
             db.close()
         return result
 
@@ -508,19 +518,39 @@ class ProfileStore:
         return sorted(rows, key=lambda r: r["total_ns"], reverse=True)[:5000]
 
     @staticmethod
-    def _hotspots(db: sqlite3.Connection) -> list[dict[str, Any]]:
+    def _hotspots(
+        db: sqlite3.Connection, *, phase: str = "", module: str = "", step: str = ""
+    ) -> list[dict[str, Any]]:
+        where = "1=1"
+        args: list[Any] = []
+        for field, value in (("phase", phase), ("module", module), ("step", step)):
+            if value == "__unknown__":
+                where += f" AND {field} IS NULL"
+            elif value:
+                if field == "module":
+                    where += " AND (module=? OR substr(module,1,?)=?)"
+                    args.extend((value, len(value) + 1, value + "."))
+                else:
+                    where += f" AND {field}=?"
+                    args.append(value)
         rows = [
             dict(r)
             for r in db.execute(
-                "SELECT name,kind,rank,phase,COUNT(*) AS count,SUM(dur) AS total_ns,"
+                "SELECT name,kind,rank,MIN(id) AS event_id,COUNT(*) AS count,SUM(dur) AS total_ns,"
                 "AVG(dur) AS mean_ns,MIN(dur) AS min_ns,MAX(dur) AS max_ns "
-                "FROM events GROUP BY name,kind,rank,phase ORDER BY total_ns DESC LIMIT 5000"
+                f"FROM events WHERE {where} GROUP BY name,kind,rank "
+                "ORDER BY total_ns DESC LIMIT 5000",
+                args,
             )
         ]
         totals: Counter[tuple[str, str]] = Counter()
-        for row in db.execute("SELECT kind,rank,SUM(dur) AS total FROM events GROUP BY kind,rank"):
+        for row in db.execute(
+            f"SELECT kind,rank,SUM(dur) AS total FROM events WHERE {where} GROUP BY kind,rank", args
+        ):
             domain = "gpu_activity" if row["kind"] in _GPU else str(row["kind"])
             totals[(domain, str(row["rank"]))] += row["total"]
+        for row in rows:
+            row.update(phase=phase or None, module=module or None, step=step or None)
         return ProfileStore._shares(rows, totals)
 
     def timeline(
@@ -532,6 +562,9 @@ class ProfileStore:
         rank: str = "",
         kind: str = "",
         name: str = "",
+        phase: str = "",
+        module: str = "",
+        step: str = "",
         limit: int = 2500,
     ) -> dict[str, Any]:
         if (
@@ -550,10 +583,23 @@ class ProfileStore:
             end = meta["duration_ns"] if end is None else end
             where = "ts+dur>=? AND ts<=?"
             args: list[Any] = [origin + start, origin + end]
-            for field, value in (("rank", rank), ("kind", kind), ("name", name)):
+            for field, value in (
+                ("rank", rank),
+                ("kind", kind),
+                ("name", name),
+                ("phase", phase),
+                ("module", module),
+                ("step", step),
+            ):
                 if value:
-                    where += f" AND {field}=?"
-                    args.append(value)
+                    if value == "__unknown__" and field in {"phase", "module", "step"}:
+                        where += f" AND {field} IS NULL"
+                    elif field == "module":
+                        where += " AND (module=? OR substr(module,1,?)=?)"
+                        args.extend((value, len(value) + 1, value + "."))
+                    else:
+                        where += f" AND {field}=?"
+                        args.append(value)
             rows = db.execute(
                 f"SELECT * FROM events WHERE {where} ORDER BY ts,id LIMIT ?", (*args, limit + 1)
             ).fetchall()
@@ -575,6 +621,7 @@ class ProfileStore:
         result["ts"] -= origin
         result["args"] = json.loads(result["args"])
         result["corr"] = json.loads(result["corr"])
+        result["evidence"] = json.loads(result["evidence"] or "{}")
         return result
 
     def event(self, key: str, event_id: int) -> dict[str, Any]:
@@ -615,7 +662,16 @@ class ProfileStore:
                 "AND a.ts>=? AND a.ts<=? ORDER BY b.ts LIMIT 100",
                 (row["file"], row["pid"], row["tid"], row["ts"], row["ts"] + row["dur"]),
             ).fetchall()
+            evidence = json.loads(row["evidence"] or "{}")
+            ids = {i for field in evidence.values() for i in field.get("scope_ids", [])}
+            ids.update(field["launch_id"] for field in evidence.values() if "launch_id" in field)
+            sources = [
+                self._event(source, origin)
+                for i in sorted(ids)
+                if (source := db.execute("SELECT * FROM events WHERE id=?", (i,)).fetchone())
+            ]
             return {
+                "attribution_sources": sources,
                 "event": self._event(row, origin),
                 "flows": [{**dict(r), "ts": r["ts"] - origin} for r in flows],
                 "correlated": [self._event(r, origin) for r in matches],

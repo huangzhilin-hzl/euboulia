@@ -187,6 +187,13 @@ class SGLangProfiler:
                 "purpose": self.config.purpose,
                 "workload": dict(workload_metadata or {}),
                 "clock_alignment": "unverified",
+                "semantic_scopes": {
+                    "enabled": self.config.semantic_scopes,
+                    "schema": "euboulia::json/v1",
+                    "step_basis": "per-model-runner profiled forward sequence",
+                    "module_basis": "Python module forward hooks during profiling",
+                    "cuda_graph_modules": "unavailable unless separately recorded",
+                },
                 "measurement_lane": "profile_diagnostic",
                 "gate_eligible": False,
                 "workload_digest": request.workload_digest,

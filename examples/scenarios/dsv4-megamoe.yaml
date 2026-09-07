@@ -257,6 +257,7 @@ optimization:
     start_step: 1
     num_steps: 3
     activities: [CPU, GPU]
+    semantic_scopes: true
     merge_profiles: false
     with_stack: false
     record_shapes: false

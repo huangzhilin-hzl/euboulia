@@ -527,6 +527,7 @@ class OptimizationRunner:
                 "merge_profiles": profiling.merge_profiles,
                 "with_stack": profiling.with_stack,
                 "record_shapes": profiling.record_shapes,
+                "semantic_scopes": profiling.semantic_scopes,
                 "timeout_seconds": profiling.timeout_seconds,
                 "settle_timeout_seconds": profiling.settle_timeout_seconds,
                 "max_raw_bytes": profiling.max_raw_bytes,
@@ -2495,12 +2496,24 @@ def _profile_target_spec(
 ) -> TargetSpec:
     base = _target_spec(config, runtime_record, source_paths=source_paths)
     profiling = config.optimization.profiling
+    argv = base.launch_argv
+    if profiling.semantic_scopes:
+        if "sglang.launch_server" not in argv or "-m" not in argv:
+            raise OptimizationRuntimeError(
+                "semantic_scopes requires python -m sglang.launch_server"
+            )
+        argv = tuple(
+            "euboulia.profilers.sglang_launcher" if token == "sglang.launch_server" else token
+            for token in argv
+        )
     return replace(
         base,
+        launch_argv=argv,
         launch_env={
             **base.launch_env,
             "SGLANG_PROFILE_WITH_STACK": str(profiling.with_stack).lower(),
             "SGLANG_PROFILE_RECORD_SHAPES": str(profiling.record_shapes).lower(),
+            "EUBOULIA_SEMANTIC_SCOPES": "1" if profiling.semantic_scopes else "0",
         },
     )
 

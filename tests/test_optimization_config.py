@@ -431,7 +431,9 @@ def test_loads_exact_dsv4_megamoe_target_validation_scenario(tmp_path: Path) -> 
     accuracy = config.optimization.evaluation.accuracy
     assert accuracy is not None
     assert accuracy.command.argv[:3] == (
-        "{workspace}/.euboulia-lm-eval/bin/python", "-m", "euboulia.harnesses.lm_eval"
+        "{workspace}/.euboulia-lm-eval/bin/python",
+        "-m",
+        "euboulia.harnesses.lm_eval",
     )
     assert accuracy.command.argv[accuracy.command.argv.index("--gsm8k-dataset-path") + 1] == (
         "openai/gsm8k"
@@ -1249,3 +1251,22 @@ def test_profile_collection_rejects_invalid_policy(
     config_path.write_text(yaml.safe_dump(document))
     with pytest.raises(OptimizationConfigError, match="profiling"):
         load_optimization_config(config_path)
+
+
+def test_semantic_scopes_require_cpu_gpu_and_only_wrap_profile_target(tmp_path):
+    from euboulia.optimization.runner import _profile_target_spec, _target_spec
+
+    document = v3_managed_document(tmp_path)
+    document["optimization"]["profiling"].update(semantic_scopes=True, activities=["GPU"])
+    path = tmp_path / "scopes.yaml"
+    path.write_text(yaml.safe_dump(document))
+    with pytest.raises(OptimizationConfigError, match="requires CPU and GPU"):
+        load_optimization_config(path)
+    document["optimization"]["profiling"]["activities"] = ["CPU", "GPU"]
+    path.write_text(yaml.safe_dump(document))
+    config = load_optimization_config(path)
+    profile, baseline = _profile_target_spec(config), _target_spec(config)
+    assert "euboulia.profilers.sglang_launcher" in profile.launch_argv
+    assert "sglang.launch_server" in baseline.launch_argv
+    assert profile.launch_env["EUBOULIA_SEMANTIC_SCOPES"] == "1"
+    assert "EUBOULIA_SEMANTIC_SCOPES" not in baseline.launch_env
