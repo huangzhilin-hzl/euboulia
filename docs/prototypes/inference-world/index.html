@@ -3,168 +3,417 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1" />
-    <meta name="color-scheme" content="dark" />
+    <meta name="color-scheme" content="light" />
     <meta
       name="description"
-      content="Euboulia 推理优化世界：人、Agent、任务、证据与经验的可交互产品原型。"
+      content="Euboulia 共享研究室：与人和 Agent 一起推进推理优化。"
     />
-    <title>Euboulia · 推理优化世界</title>
-    <link rel="stylesheet" href="styles.css" />
+    <title>Euboulia · 共享研究室</title>
+    <script src="appearance.js"></script>
+    <link rel="stylesheet" href="room.css" />
+    <link rel="stylesheet" href="themes.css" />
   </head>
   <body>
-    <header class="topbar">
-      <a class="brand" href="../../inference-world.md"
-        ><span class="brand-symbol">EU</span
-        ><span>EUBOULIA<small>INFERENCE WORLD</small></span></a
-      >
-      <div class="world-name">
-        Julian 的推理实验室 <span class="dot"></span>
-      </div>
-      <div class="top-meta">
-        <span class="demo-label">产品原型 · 全部执行为演示</span
-        ><button id="reset">重置演示</button>
-      </div>
-    </header>
-    <div class="app-layout">
-      <nav class="sidebar" aria-label="世界导航">
-        <div class="nav-label">WORKSPACE</div>
-        <button data-page="network" aria-current="page">
-          <span>◈</span> 任务网络
+    <a class="skip" href="#main">跳到研究室</a>
+    <div class="shell">
+      <nav class="rail" aria-label="工作空间">
+        <button class="brand" data-page="room" aria-label="Euboulia 研究室">
+          e<span>·</span>
         </button>
-        <button data-page="resources"><span>▦</span> 成员与资源</button>
-        <button data-page="learning"><span>✧</span> 经验与 RSI</button>
-        <div class="nav-label goals-label">当前目标</div>
-        <div class="goal-card">
-          <span class="goal-orbit"></span><strong>DSV4 / H20</strong
-          ><small>长上下文推理优化</small>
-          <div class="goal-progress"><span></span></div>
-          <small>正确性优先 · 保留所有反例</small>
-        </div>
-        <div class="sidebar-note">
-          <span class="dot"></span> 人与 Agent 共同参与<small
-            >图决定依赖<br />证据决定结论</small
+        <button
+          class="rail-button"
+          data-action="search"
+          title="搜索 · ⌘K"
+          aria-label="搜索"
+        >
+          <span data-icon="search"></span>
+        </button>
+        <button
+          class="rail-button active"
+          data-page="room"
+          title="研究室"
+          aria-label="研究室"
+        >
+          <span data-icon="chat"></span>
+        </button>
+        <button
+          class="rail-button"
+          data-page="activity"
+          title="动态"
+          aria-label="动态"
+        >
+          <span data-icon="activity"></span>
+        </button>
+        <button
+          class="rail-button"
+          data-page="members"
+          title="团队"
+          aria-label="团队"
+        >
+          <span data-icon="users"></span>
+        </button>
+        <button
+          class="rail-button"
+          data-page="computers"
+          title="计算机"
+          aria-label="计算机"
+        >
+          <span data-icon="computer"></span>
+        </button>
+        <button
+          class="rail-button"
+          data-page="memory"
+          title="经验"
+          aria-label="经验"
+        >
+          <span data-icon="book"></span>
+        </button>
+        <div class="rail-bottom">
+          <button
+            id="appearance-trigger"
+            class="appearance-trigger"
+            aria-label="切换外观"
+            aria-haspopup="dialog"
+            aria-controls="appearance-dialog"
+            title="切换外观"
           >
+            <svg
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.5"
+              aria-hidden="true"
+            >
+              <path
+                d="M12 3a9 9 0 1 0 0 18h1.4a2 2 0 0 0 1.5-3.3 1.6 1.6 0 0 1 1.2-2.7H18a3 3 0 0 0 3-3 9 9 0 0 0-9-9Z"
+              />
+              <circle cx="7.5" cy="10" r=".8" />
+              <circle cx="10.5" cy="6.8" r=".8" />
+              <circle cx="15" cy="7.5" r=".8" />
+              <circle cx="7.5" cy="14.5" r=".8" /></svg
+            ><span>外观</span>
+          </button>
+          <span class="avatar sand" title="Julian · 本地演示">J</span>
         </div>
       </nav>
-      <main>
-        <section class="page-heading">
+      <aside class="sidebar">
+        <div class="workspace-name">
+          <span>Julian’s lab</span><span class="tiny-dot"></span>
+        </div>
+        <button class="quick-search" data-action="search">
+          <span data-icon="search"></span>搜索工作与证据 <kbd>⌘K</kbd>
+        </button>
+        <div class="side-label">研究室 <span>2</span></div>
+        <button class="room-link selected" data-room="dsv4">
+          <span class="hash">#</span><span>dsv4-on-h20</span
+          ><span class="unread">1</span>
+        </button>
+        <button class="room-link" data-room="kernels">
+          <span class="hash">#</span><span>kernel-playground</span>
+        </button>
+        <div class="room-description">
+          人和 Agent 在这里一起工作。<br />进展、判断和证据留在同一处。
+        </div>
+        <div class="side-label">一起工作 <span>4</span></div>
+        <div id="member-list"></div>
+        <div class="sidebar-bottom">
+          <div class="connection">
+            <span class="tiny-dot"></span
+            ><span id="connection-label">2 台 Computer 已连接</span>
+          </div>
+          <div class="prototype-label">交互原型 · 示例数据</div>
+          <button class="text-button muted" data-action="reset">
+            重置本地演示
+          </button>
+        </div>
+      </aside>
+      <main id="main" tabindex="-1">
+        <header class="room-header">
           <div>
-            <div class="eyebrow">GOAL 01 / DEEPSEEK V4</div>
-            <h1 id="page-title">让每次试验，连接下一次突破</h1>
-            <p id="page-subtitle">
-              沿任务网络观察工作如何分叉、汇合，并成为团队可复用的经验。
-            </p>
-          </div>
-          <button class="primary" id="add-hypothesis">＋ 提出优化假设</button>
-        </section>
-        <section id="network-page">
-          <div class="network-toolbar">
-            <div class="segments" aria-label="网络关系">
-              <button data-view="tasks" aria-pressed="true">任务依赖</button
-              ><button data-view="lineage" aria-pressed="false">版本谱系</button
-              ><button data-view="memory" aria-pressed="false">经验关联</button>
+            <div class="breadcrumb">
+              研究室 <span>/</span> <span id="room-name">dsv4-on-h20</span>
             </div>
-            <div class="toolbar-right">
-              <span id="graph-revision">图 v1</span
-              ><button id="toggle-list" aria-pressed="false">列表</button
-              ><button id="edit-edge">连接任务</button>
-            </div>
+            <h1 id="room-heading">把 DSV4 的解码再快一点</h1>
           </div>
-          <div class="network-layout">
-            <div class="canvas-shell">
-              <div class="canvas-heading">
-                <span id="view-label">任务 DAG · 连线表示产物依赖</span
-                ><span class="canvas-caption">可拖动画布</span>
-              </div>
-              <div id="graph-viewport" aria-label="任务网络画布">
-                <div id="graph-world">
-                  <svg id="edges" aria-hidden="true"></svg>
-                  <div id="nodes"></div>
-                </div>
-              </div>
-              <div id="task-list" hidden></div>
-              <div class="canvas-bottom">
-                <div class="legend">
-                  <span><i class="completed"></i>已交付</span
-                  ><span><i class="running"></i>执行中</span
-                  ><span><i class="pending"></i>待接力</span
-                  ><span><i class="failed"></i>失败</span>
-                </div>
-                <div class="zoom">
-                  <button id="zoom-out" aria-label="缩小">−</button
-                  ><span id="zoom-value">100%</span
-                  ><button id="zoom-in" aria-label="放大">＋</button
-                  ><button id="zoom-reset">复位</button>
-                </div>
-              </div>
-              <div class="signal-feed">
-                <span class="signal-icon">↗</span>
-                <div id="latest-event"></div>
-                <span class="demo-tag">演示事件</span>
-              </div>
-            </div>
-            <aside class="inspector" aria-label="选中任务">
-              <div id="inspector-heading"></div>
-              <div class="inspector-tabs">
-                <button data-detail="task" aria-pressed="true">任务</button
-                ><button data-detail="discussion" aria-pressed="false">
-                  讨论</button
-                ><button data-detail="evidence" aria-pressed="false">
-                  证据
-                </button>
-              </div>
-              <div id="inspector-content"></div>
-            </aside>
+          <div class="header-actions">
+            <span class="demo-pill">DEMO</span
+            ><button
+              class="icon-button mobile-nav"
+              data-action="sidebar"
+              aria-label="展开导航"
+            >
+              <span data-icon="menu"></span></button
+            ><button
+              class="icon-button"
+              data-action="context"
+              title="研究上下文"
+              aria-label="研究上下文"
+            >
+              <span data-icon="panel"></span>
+            </button>
           </div>
-        </section>
-        <section id="resources-page" hidden></section>
-        <section id="learning-page" hidden></section>
-        <div class="notice" id="notice" role="status" aria-live="polite"></div>
-        <footer>
-          设计原型 · 状态只保存在本次页面中 · 不调用 Agent、模型 API 或
-          Kubernetes <a href="../../inference-world.md">阅读完整设计 ↗</a>
-        </footer>
+        </header>
+        <div id="room-controls">
+          <div class="room-tabs" role="tablist" aria-label="研究室视图">
+            <button
+              id="tab-conversation"
+              role="tab"
+              data-view="conversation"
+              aria-selected="true"
+            >
+              讨论</button
+            ><button
+              id="tab-tasks"
+              role="tab"
+              data-view="tasks"
+              aria-selected="false"
+            >
+              工作 <span id="task-count">3</span></button
+            ><button
+              id="tab-artifacts"
+              role="tab"
+              data-view="artifacts"
+              aria-selected="false"
+            >
+              产物</button
+            ><button
+              id="tab-map"
+              role="tab"
+              data-view="map"
+              aria-selected="false"
+            >
+              关系
+            </button>
+            <div class="tab-spacer"></div>
+            <span class="quiet-state"
+              ><span class="tiny-dot"></span>仅本地演示</span
+            >
+          </div>
+          <div class="context-strip">
+            <button data-action="context">
+              DSV4 <span>/</span> H20 × 8 <span>/</span> SGLang
+              <span data-icon="chevron"></span></button
+            ><button class="needs-direction" data-action="attention">
+              <i class="tiny-dot"></i>1 个方向待定 ↗
+            </button>
+          </div>
+        </div>
+        <div
+          id="content"
+          class="content"
+          role="tabpanel"
+          aria-labelledby="tab-conversation"
+        ></div>
+        <div id="composer-wrap" class="composer-wrap">
+          <div id="suggestions" class="suggestions">
+            <button data-preset="ranks">先查 rank 间等待 <span>↗</span></button
+            ><button data-preset="compare">
+              对比这两次实验 <span>↗</span></button
+            ><button data-preset="attention">
+              只看需要我处理的 <span>↗</span>
+            </button>
+          </div>
+          <form id="composer" class="composer">
+            <div id="context-chips" class="context-chips"></div>
+            <label class="sr-only" for="message">给研究室发消息</label
+            ><textarea
+              id="message"
+              rows="2"
+              placeholder="说说下一步，@ 一位队友，或引用一份证据…"
+              maxlength="4000"
+            ></textarea>
+            <div id="mention-menu" class="mention-menu" hidden></div>
+            <div class="composer-tools">
+              <button
+                type="button"
+                class="icon-button"
+                data-action="attach"
+                title="引用证据"
+                aria-label="引用证据"
+              >
+                <span data-icon="plus"></span></button
+              ><button
+                type="button"
+                class="icon-button"
+                data-action="mention"
+                title="提及队友"
+                aria-label="提及队友"
+              >
+                @</button
+              ><label class="task-toggle"
+                ><input id="as-task" type="checkbox" />交给队友办</label
+              ><select id="task-owner" aria-label="任务负责人" hidden>
+                <option value="atlas">Atlas</option>
+                <option value="prism">Prism</option>
+                <option value="lin">Lin</option>
+                <option value="julian">Julian</option></select
+              ><span class="composer-spacer"></span
+              ><span class="send-help">Enter 发送 · Shift Enter 换行</span
+              ><button
+                type="submit"
+                id="send"
+                class="send"
+                aria-label="发送到本地研究室"
+                disabled
+              >
+                ↑
+              </button>
+            </div>
+          </form>
+          <div class="composer-footnote">
+            消息保存在此浏览器 · AI 回复与执行尚未接入
+          </div>
+        </div>
       </main>
+      <aside id="inspector" class="inspector" aria-label="上下文详情" hidden>
+        <header>
+          <span id="inspector-type"></span
+          ><button
+            class="icon-button"
+            data-action="close-panel"
+            aria-label="关闭详情"
+          >
+            ×
+          </button>
+        </header>
+        <div id="inspector-content"></div>
+      </aside>
     </div>
-    <dialog id="hypothesis-dialog">
-      <form id="hypothesis-form">
-        <div class="eyebrow">NEW BRANCH</div>
-        <h2>把一个想法变成可验证的分支</h2>
-        <p>从热点分析 A0 派生物化、A/B、Profile、判定与经验任务。</p>
-        <label for="hypothesis-title">你想验证什么</label
-        ><input
-          id="hypothesis-title"
-          maxlength="90"
-          required
-          placeholder="例如：验证 MHC 融合能否减少中间张量开销"
-        /><label for="hypothesis-source">来源</label
-        ><select id="hypothesis-source">
-          <option value="human">真人提出</option>
-          <option value="agent">Agent 提出</option>
-          <option value="joint">共同讨论</option>
-        </select>
-        <div class="dialog-actions">
-          <button type="button" data-close="hypothesis-dialog">取消</button
-          ><button class="primary" type="submit">创建演示分支</button>
-        </div>
-      </form>
+    <dialog id="search-dialog" aria-labelledby="search-title">
+      <div class="dialog-heading">
+        <h2 id="search-title">搜索研究室</h2>
+        <button
+          class="icon-button"
+          data-action="close-dialog"
+          aria-label="关闭搜索"
+        >
+          ×
+        </button>
+      </div>
+      <input
+        id="search-input"
+        aria-label="搜索消息、任务或证据"
+        placeholder="搜索消息、任务或证据…"
+        autocomplete="off"
+      />
+      <div id="search-results"></div>
+      <div class="dialog-footnote">⌘K 打开 · Esc 关闭 · 搜索两个研究室</div>
     </dialog>
-    <dialog id="edge-dialog">
-      <form id="edge-form">
-        <div class="eyebrow">GRAPH REVISION</div>
-        <h2>连接任务产物</h2>
-        <p>新增依赖会进行环检测；已执行的任务输入保持不变。</p>
-        <label for="edge-from">前置任务</label
-        ><select id="edge-from"></select
-        ><label for="edge-to">下游任务</label
-        ><select id="edge-to"></select>
-        <div class="dialog-actions">
-          <button type="button" data-close="edge-dialog">取消</button
-          ><button class="primary" type="submit">提交依赖</button>
+    <div id="notice" class="notice" role="status" aria-live="polite"></div>
+    <dialog
+      id="appearance-dialog"
+      aria-labelledby="appearance-title"
+      aria-describedby="appearance-description"
+    >
+      <div class="appearance-heading">
+        <div>
+          <h2 id="appearance-title">选一套看着舒服的外观</h2>
+          <p id="appearance-description">
+            点选即可比较，整个研究室会一起变化。
+          </p>
         </div>
-        <div id="edge-error" role="alert"></div>
-      </form>
+        <button
+          class="icon-button"
+          data-appearance-close
+          aria-label="关闭外观设置"
+        >
+          ×
+        </button>
+      </div>
+      <fieldset class="theme-options">
+        <legend class="sr-only">研究室主题</legend>
+        <label class="theme-option"
+          ><input
+            type="radio"
+            name="appearance"
+            value="neutral"
+            aria-label="雾白"
+          /><span class="theme-preview" data-theme="neutral" aria-hidden="true"
+            ><span class="preview-rail"><i></i><i></i><i></i></span
+            ><span class="preview-side"><i></i><i></i><i></i></span
+            ><span class="preview-main"
+              ><i class="preview-title"></i
+              ><span class="preview-message"
+                ><i class="preview-avatar"></i
+                ><span class="preview-lines"><i></i><i></i></span></span
+              ><span class="preview-card"><i></i><i></i></span
+              ><span class="preview-composer"><i></i></span></span></span
+          ><span class="theme-caption"
+            ><strong>雾白</strong><em>推荐</em
+            ><span class="theme-check">✓</span></span
+          ><span class="theme-description">清晰中性 · 靛蓝点缀</span></label
+        >
+        <label class="theme-option"
+          ><input
+            type="radio"
+            name="appearance"
+            value="graphite"
+            aria-label="石墨"
+          /><span class="theme-preview" data-theme="graphite" aria-hidden="true"
+            ><span class="preview-rail"><i></i><i></i><i></i></span
+            ><span class="preview-side"><i></i><i></i><i></i></span
+            ><span class="preview-main"
+              ><i class="preview-title"></i
+              ><span class="preview-message"
+                ><i class="preview-avatar"></i
+                ><span class="preview-lines"><i></i><i></i></span></span
+              ><span class="preview-card"><i></i><i></i></span
+              ><span class="preview-composer"><i></i></span></span></span
+          ><span class="theme-caption"
+            ><strong>石墨</strong><em>深色</em
+            ><span class="theme-check">✓</span></span
+          ><span class="theme-description">冷灰深色 · 柔和紫色</span></label
+        >
+        <label class="theme-option"
+          ><input
+            type="radio"
+            name="appearance"
+            value="cream"
+            aria-label="奶油黄"
+          /><span class="theme-preview" data-theme="cream" aria-hidden="true"
+            ><span class="preview-rail"><i></i><i></i><i></i></span
+            ><span class="preview-side"><i></i><i></i><i></i></span
+            ><span class="preview-main"
+              ><i class="preview-title"></i
+              ><span class="preview-message"
+                ><i class="preview-avatar"></i
+                ><span class="preview-lines"><i></i><i></i></span></span
+              ><span class="preview-card"><i></i><i></i></span
+              ><span class="preview-composer"><i></i></span></span></span
+          ><span class="theme-caption"
+            ><strong>奶油黄</strong><em>鲜明</em
+            ><span class="theme-check">✓</span></span
+          ><span class="theme-description">暖纸底色 · 明快黄栏</span></label
+        >
+        <label class="theme-option"
+          ><input
+            type="radio"
+            name="appearance"
+            value="sage"
+            aria-label="暖绿"
+          /><span class="theme-preview" data-theme="sage" aria-hidden="true"
+            ><span class="preview-rail"><i></i><i></i><i></i></span
+            ><span class="preview-side"><i></i><i></i><i></i></span
+            ><span class="preview-main"
+              ><i class="preview-title"></i
+              ><span class="preview-message"
+                ><i class="preview-avatar"></i
+                ><span class="preview-lines"><i></i><i></i></span></span
+              ><span class="preview-card"><i></i><i></i></span
+              ><span class="preview-composer"><i></i></span></span></span
+          ><span class="theme-caption"
+            ><strong>暖绿</strong><em>原版</em
+            ><span class="theme-check">✓</span></span
+          ><span class="theme-description">低饱和绿 · 原有配色</span></label
+        >
+      </fieldset>
+      <div class="appearance-footer">
+        <p id="appearance-status" role="status" aria-live="polite">
+          选择会保存在此浏览器
+        </p>
+        <button class="button primary" data-appearance-close>完成</button>
+      </div>
     </dialog>
-    <script type="module" src="app.mjs"></script>
+    <script type="module" src="room.mjs"></script>
   </body>
 </html>
