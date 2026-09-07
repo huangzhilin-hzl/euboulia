@@ -19,6 +19,7 @@ import {
   updateTask,
   setGpuOnline,
 } from "./room-state.mjs";
+import { createLabBridge, agentStates } from "./lab.mjs";
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => [...document.querySelectorAll(s)];
 const esc = (value) =>
@@ -71,6 +72,7 @@ try {
 } catch {
   state = createRoom();
 }
+let lab = null;
 let page = state.page,
   panel = null,
   refs = [],
@@ -167,9 +169,11 @@ function mapView() {
   return `<div class="page-body"><div class="page-intro"><div><h2>看看工作如何连接</h2><p>研究关系概览 · 点击打开对应证据或工作。</p></div></div><div class="relationship-map"><button class="map-node" data-action="context">把 DSV4 的解码再快一点<small>研究方向 · 正确性优先</small></button><span class="map-edge"></span><div class="map-split"><button class="map-node" data-artifact="compare">已有基线与 MHC 候选<small>无 profile 比较 · 正确性待补</small></button><button class="map-node" data-artifact="trace">Decode 等待线索<small>单 rank 观察 · 原因待验证</small></button></div><span class="map-edge"></span><button class="map-node" data-action="show-work">${state.decision === "ranks" ? "补齐多 rank 证据" : state.decision === "mhc" ? "验证 C1 / C16 的收益" : "两条路径，等待研究方向"}<small>${state.decision ? "来自你的决定 · 已进入工作队列" : "讨论决定下一步"}</small></button></div><p class="map-note">这张图从研究记录中整理，当前为示例概览。<br>精确任务依赖、版本和输入契约在执行层维护。</p><p class="map-note"><a href="network.html" target="_blank" rel="noopener">查看 v0.1 任务依赖原型 ↗</a></p></div>`;
 }
 function membersPage() {
+  if (lab && ["live", "locked"].includes(lab.mode)) return lab.page();
   return `<div class="page-body"><div class="page-intro"><div><h2>认识一起工作的队友</h2><p>职责、上下文和经验跟着队友保留；运行时放在详情里。</p></div></div><div class="team-grid">${MEMBERS.map((m) => `<button class="person-card" data-member="${m.id}"><div class="person-meta">${avatar(m.id)}<div><strong>${m.name}</strong><p>${m.role}</p></div></div><p>${{ julian: "确定方向，判断哪些证据值得继续追。", atlas: "连接代码、环境与可复现的系统实验。", prism: "检查性能证据，区分观察和解释。", lin: "把热点分析变成值得验证的 kernel 假设。" }[m.id]}</p><div class="tag-row"><span class="tag">${m.computer}</span><span class="tag">${m.status} · 演示</span></div></button>`).join("")}</div></div>`;
 }
 function computersPage() {
+  if (lab && ["live", "locked"].includes(lab.mode)) return lab.page();
   return `<div class="page-body"><div class="page-intro"><div><h2>队友工作的地方</h2><p>Computer 承载 Agent 的代码、工具和记忆；GPU 实验通过 Pod 执行。</p></div></div><div class="computer-grid"><button class="computer-card" data-computer="local">${icon("computer")}<strong>Local Mac</strong><p>Atlas 的持续工作环境<br>代码与上下文就近保留</p><div class="tag-row"><span class="tag">Codex runtime</span><span class="tag">在线 · 演示</span></div></button><button class="computer-card" data-computer="lab">${icon("computer")}<strong>Lab connector</strong><p>Prism 的持续工作环境<br>经 Kubernetes 连接 H20 算力池</p><div class="tag-row"><span class="tag">Claude runtime</span><span class="tag">Computer 在线 · 演示</span></div></button></div><div class="memory-card"><div class="eyebrow">GPU 执行环境</div><h3>H20 × 8 <span class="tag">${state.gpuOnline ? "已连接" : "连接中断"} · 演示</span></h3><p>${state.gpuOnline ? "独占测量，基线与候选沿用同一 workload。" : "相关 GPU 工作暂停派发。真实系统必须先核实已有 Pod，再恢复调度。"}</p><button class="button" data-action="toggle-gpu">演示${state.gpuOnline ? "算力连接中断" : "连接恢复"}</button></div></div>`;
 }
 function memoryPage() {
@@ -300,6 +304,10 @@ function render() {
           activity: activityPage,
         }[page]();
   $("#content").setAttribute("role", page === "room" ? "tabpanel" : "region");
+  if (page === "computers" && lab?.mode === "demo")
+    $("#content").insertAdjacentHTML("afterbegin", lab.page());
+  if (page === "room" && ["overview", "conversation", "tasks"].includes(state.view))
+    $("#content").insertAdjacentHTML("beforeend", lab?.feed() || "");
   if (page === "room")
     $("#content").setAttribute("aria-labelledby", `tab-${state.view}`);
   else $("#content").removeAttribute("aria-labelledby");
@@ -308,6 +316,17 @@ function render() {
     currentGoal(state)?.id !== SEED_GOAL ||
     currentGoal(state)?.status !== "active";
   renderComposer();
+  if (lab?.mode === "live") {
+    $("#member-list").innerHTML = lab.agents
+      .map((agent) =>
+        `<button class="member-button" data-lab="agent" data-id="${esc(agent.id)}"><span class="avatar blue">${esc(agent.name.slice(0, 1))}</span><span><strong>${esc(agent.name)}</strong><small>${esc(agentStates[agent.status])}</small></span></button>`,
+      )
+      .join("") + '<button class="text-button" data-lab="create">＋ 连接 Agent</button>';
+  }
+  $("#lab-contact").hidden = page !== "room" || lab?.mode !== "live";
+  $("#team-total").textContent =
+    lab?.mode === "live" ? lab.agents.length : MEMBERS.length;
+  lab?.decorate();
   persist();
 }
 function showPanel(type, html) {
@@ -1033,3 +1052,31 @@ $("#flow-form").addEventListener("submit", (e) => {
 
 loadDraft();
 render();
+lab = createLabBridge({
+  getContext() {
+    if (page !== "room") return {
+      room_id: "", room_name: "", goal_id: "", goal_title: "",
+      goal_context: "", conversation_id: "direct",
+    };
+    const room = state.rooms.find((r) => r.id === state.room);
+    const goal = currentGoal(state);
+    return {
+      room_id: state.room,
+      room_name: room.name,
+      goal_id: goal?.id || "",
+      goal_title: goal?.title || "",
+      goal_status: goal?.status || "",
+      goal_context: goal ? JSON.stringify({
+        prompt: goal.prompt,
+        criterion: goal.criterion,
+        budget: goal.budget,
+        context: goal.context,
+        revision: goal.revision,
+      }) : room.context || "",
+      conversation_id: "room",
+    };
+  },
+  onChange: render,
+  notify: notice,
+});
+lab.start();

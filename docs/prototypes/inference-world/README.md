@@ -83,3 +83,10 @@ node --test tests/web/*.test.mjs
 32 项状态测试覆盖目标与讨论隔离、上下文快照、讨论转目标的幂等性、目标暂停和任务手动暂停的区别、GPU 独占、交付与结束条件、v0.2 迁移及草稿恢复；原有任务图与结果仪表盘测试继续保留。
 
 人工浏览器验收记录见 [qa.md](qa.md)。
+
+## Real agent connectivity
+
+Run `uv run euboulia lab serve` and open
+<http://127.0.0.1:8773/prototypes/inference-world/> to pair local or remote agents.
+See [the setup and adapter guide](../../lab-agents.md). Static hosting continues
+to show the demonstration; real connections require the authenticated Lab service.

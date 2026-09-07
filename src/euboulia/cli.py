@@ -15,6 +15,7 @@ from euboulia import __version__
 from euboulia.adapters import AdapterError
 from euboulia.control import ControlError, ControlStore, TaskManager
 from euboulia.doctor import required_checks_pass, run_doctor
+from euboulia.lab.cli import add_lab_parser
 from euboulia.ledger import ExperimentLedger, LedgerCorruptionError
 from euboulia.optimization.config import (
     OptimizationConfigError,
@@ -64,6 +65,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     subparsers = parser.add_subparsers(dest="command", required=True)
+    add_lab_parser(subparsers)
 
     doctor_parser = subparsers.add_parser("doctor", help="inspect local tools read-only")
     doctor_parser.add_argument("--json", action="store_true", help="emit machine-readable JSON")

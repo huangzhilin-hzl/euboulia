@@ -7,6 +7,10 @@ uses reproducible end-to-end results to decide whether a change is worth keeping
 It focuses on inference performance. Model training, production deployment, and
 general-purpose coding are outside its scope.
 
+The research-room prototype can connect agents on local and remote machines.
+Run `uv run euboulia lab serve` and follow the
+[Lab agent setup guide](docs/lab-agents.md) to pair a Codex agent or a custom adapter.
+
 ## How it thinks
 
 Euboulia follows five principles:

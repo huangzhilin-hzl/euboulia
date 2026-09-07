@@ -12,6 +12,7 @@
     <script src="appearance.js"></script>
     <link rel="stylesheet" href="room.css" />
     <link rel="stylesheet" href="themes.css" />
+    <link rel="stylesheet" href="lab.css" />
   </head>
   <body>
     <a class="skip" href="#main">跳到研究室</a>
@@ -120,7 +121,7 @@
         <div class="room-description">
           人和 Agent 在这里一起工作。<br />进展、判断和证据留在同一处。
         </div>
-        <div class="side-label">一起工作 <span>4</span></div>
+        <div class="side-label">一起工作 <span id="team-total">4</span></div>
         <div id="member-list"></div>
         <div class="sidebar-bottom">
           <div class="connection">
@@ -148,6 +149,8 @@
               data-action="new-goal"
             >
               ＋ 发起目标</button
+            ><button id="lab-contact" class="button" data-lab="send" hidden>
+              联系真实 Agent ↗</button
             ><span class="demo-pill">DEMO</span
             ><button
               class="icon-button mobile-nav"

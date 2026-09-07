@@ -1,0 +1,163 @@
+.lab-dialog {
+  width: min(640px, calc(100vw - 32px));
+  max-height: 88vh;
+  overflow: auto;
+  padding: 28px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--paper);
+  color: var(--ink);
+  box-shadow: 0 24px 90px #0003;
+}
+.lab-dialog::backdrop {
+  background: #1116;
+  backdrop-filter: blur(3px);
+}
+.lab-dialog-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: 18px;
+  align-items: start;
+  margin-bottom: 20px;
+}
+.lab-dialog-heading h2 {
+  margin: 0;
+  font-size: 22px;
+}
+.lab-dialog label {
+  display: grid;
+  gap: 8px;
+  margin: 18px 0;
+  font-weight: 600;
+}
+.lab-dialog input,
+.lab-dialog textarea,
+.lab-dialog select {
+  width: 100%;
+  padding: 11px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--paper);
+  color: var(--ink);
+  font: inherit;
+  box-sizing: border-box;
+}
+.lab-dialog textarea {
+  resize: vertical;
+}
+.lab-dialog p,
+.lab-dialog li {
+  line-height: 1.8;
+  overflow-wrap: anywhere;
+}
+.lab-dialog pre,
+.memory-card pre,
+.empty pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.8;
+  text-align: left;
+}
+.lab-dialog .document-block,
+.lab-events p {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.lab-dialog details {
+  margin: 20px 0;
+}
+.lab-dialog summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+.lab-error {
+  color: var(--danger, #b44235);
+}
+.lab-actions {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.lab-agent-card {
+  text-align: left;
+  align-items: start;
+  min-width: 0;
+}
+.lab-agent-card strong {
+  font-size: 20px;
+}
+.lab-agent-card p,
+.lab-agent-card small {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.lab-job-list {
+  display: grid;
+  gap: 12px;
+}
+.lab-job {
+  display: grid;
+  gap: 10px;
+  width: 100%;
+  padding: 18px 20px;
+  margin-bottom: 12px;
+  text-align: left;
+  color: var(--ink);
+  border: 1px solid var(--line);
+  background: var(--paper);
+  border-radius: 10px;
+  cursor: pointer;
+  font: inherit;
+}
+.lab-job:hover {
+  border-color: var(--muted);
+}
+.lab-job strong,
+.lab-result-preview {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.7;
+}
+.lab-job-meta {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.lab-job small,
+.lab-footnote {
+  color: var(--muted);
+  line-height: 1.8;
+}
+.lab-scope-feed {
+  margin: 28px 36px;
+  padding-top: 20px;
+  border-top: 1px solid var(--line);
+}
+.lab-scope-feed h2 {
+  font-size: 17px;
+}
+.lab-footnote {
+  margin-top: 32px;
+}
+@media (max-width: 600px) {
+  .lab-dialog {
+    padding: 20px;
+  }
+  .lab-scope-feed {
+    margin: 20px 16px;
+  }
+  .lab-scope-feed .section-title {
+    align-items: start;
+    flex-direction: column;
+    gap: 12px;
+  }
+}
