@@ -69,6 +69,14 @@ def parse_torch_chrome_trace(
     return tuple(iter_torch_chrome_trace(path, timestamp_unit=timestamp_unit))
 
 
+def iter_trace_records(path: str | Path) -> Iterator[dict[str, object]]:
+    """Stream original records, including flow and metadata events, without flattening."""
+    with _open_trace(Path(path)) as handle:
+        for event in _iter_chrome_events(handle):
+            if isinstance(event, dict):
+                yield event
+
+
 def iter_torch_chrome_trace(
     path: str | Path, *, timestamp_unit: str = "us"
 ) -> Iterator[Observation]:

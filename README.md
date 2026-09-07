@@ -126,3 +126,12 @@ See [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), and
 ## License
 
 Euboulia is available under the [MIT License](LICENSE).
+
+### Profile workbench
+
+Open **Profile** from a run detail page to explore retained traces with an interactive
+timeline, searchable hotspot table, per-rank duration chart, and event correlations.
+The workbench also shows summary-only captures and their evidence gaps. Save local
+optimization hypotheses and validate them with unprofiled A/B runs. See
+[the Profile workbench guide](docs/profile-workbench.md) for capture collections,
+raw retention, cache storage, and Perfetto handoff.

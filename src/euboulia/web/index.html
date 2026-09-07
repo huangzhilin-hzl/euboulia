@@ -726,6 +726,9 @@
         });
         tabs.appendChild(tab);
       });
+      const profileLink = element("a", "tab", "Profile ↗");
+      profileLink.href = "/profiles?run=" + encodeURIComponent(detail.run.run_uid);
+      tabs.appendChild(profileLink);
       host.appendChild(tabs);
       const content = element("div", "tab-content");
       if (state.tab === "activity") renderActivity(content, detail);

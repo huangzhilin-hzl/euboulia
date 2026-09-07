@@ -483,7 +483,11 @@ def test_loads_exact_dsv4_megamoe_target_validation_scenario(tmp_path: Path) -> 
     assert config.target.launch.env["SGLANG_OPT_USE_DEEPGEMM_MEGA_MOE"] == "1"
     assert config.optimization.profiling.workload_point == "isl16384-osl256-c1-n1"
     assert config.optimization.profiling.expected_rank_traces == 8
-    assert config.optimization.profiling.keep_raw is False
+    assert config.optimization.profiling.keep_raw is True
+    assert config.optimization.profiling.repetitions == 2
+    assert config.optimization.profiling.request_waves == 4
+    assert config.optimization.profiling.activities == ("CPU", "GPU")
+    assert len(config.optimization.profiling.workload_points) == 2
     assert config.optimization.profiling.required_kernel_pattern == "fp8_mxfp4_mega_moe"
     launch_facets = derive_sglang_launch_facets(config.target.launch.options)
     assert launch_facets["backends"] == {"moe_a2a": "megamoe"}
@@ -1223,3 +1227,25 @@ def test_execution_storage_and_workspace_root_are_host_defaults(
 
     assert managed.optimization.workspace is not None
     assert managed.optimization.workspace.root_dir == tmp_path / ".euboulia/worktrees"
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("workload_points", ["missing"]),
+        ("workload_points", ["short-c1", "short-c1"]),
+        ("repetitions", 0),
+        ("repetitions", 11),
+        ("request_waves", 33),
+        ("purpose", "performance-verdict"),
+    ],
+)
+def test_profile_collection_rejects_invalid_policy(
+    tmp_path: Path, field: str, value: object
+) -> None:
+    document = v3_managed_document(tmp_path)
+    document["optimization"]["profiling"][field] = value
+    config_path = tmp_path / "collection.yaml"
+    config_path.write_text(yaml.safe_dump(document))
+    with pytest.raises(OptimizationConfigError, match="profiling"):
+        load_optimization_config(config_path)

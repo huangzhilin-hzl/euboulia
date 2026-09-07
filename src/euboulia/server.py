@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import threading
 import webbrowser
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -22,6 +24,7 @@ from euboulia.control import (
     read_memory_entries,
 )
 from euboulia.models import JSONValue
+from euboulia.profilers.store import ProfileStore
 from euboulia.progress import RUN_PHASES, read_run_progress
 from euboulia.run_identity import normalize_run_uid
 
@@ -55,6 +58,23 @@ class ControlApplication:
 
     def __init__(self, manager: TaskManager) -> None:
         self.manager = manager
+        self._profile_stores: dict[str, ProfileStore] = {}
+        self._profile_lock = threading.Lock()
+
+    def profiles(self, run_uid: str) -> ProfileStore:
+        selected = normalize_run_uid(run_uid)
+        if self.manager.store.get(selected) is None:
+            raise KeyError(selected)
+        root = self.manager.runtime.storage.runs_dir
+        run_dir = root / selected
+        if run_dir.is_symlink() or run_dir.resolve().parent != root.resolve():
+            raise ValueError("redirected run directory")
+        with self._profile_lock:
+            if selected not in self._profile_stores:
+                self._profile_stores[selected] = ProfileStore(
+                    run_dir, self.manager.runtime.storage.root / "profile-indexes" / selected
+                )
+            return self._profile_stores[selected]
 
     def status(self) -> dict[str, JSONValue]:
         runtime = self.manager.runtime
@@ -151,6 +171,66 @@ class EubouliaRequestHandler(BaseHTTPRequestHandler):
             if path == "/":
                 self._send_bytes(HTTPStatus.OK, _index_html(), "text/html; charset=utf-8")
                 return
+            if path == "/profiles":
+                self._send_bytes(
+                    HTTPStatus.OK,
+                    files("euboulia.web").joinpath("profiles.html").read_bytes(),
+                    "text/html; charset=utf-8",
+                )
+                return
+            assets = {
+                "/profile-app.mjs": "profile-app.mjs",
+                "/profile-model.mjs": "profile-model.mjs",
+                "/profile.css": "profile.css",
+            }
+            if path in assets:
+                media = "text/css" if path.endswith(".css") else "text/javascript"
+                self._send_bytes(
+                    HTTPStatus.OK, files("euboulia.web").joinpath(assets[path]).read_bytes(), media
+                )
+                return
+            parts = path.strip("/").split("/")
+            if len(parts) >= 4 and parts[:2] == ["api", "runs"] and parts[3] == "profiles":
+                store = self.server.application.profiles(unquote(parts[2]))
+                query = parse_qs(request.query)
+                if len(parts) == 4:
+                    payload = {"profiles": store.list_captures()}
+                elif len(parts) == 5:
+                    payload = store.detail(parts[4])
+                elif len(parts) == 6 and parts[5] == "timeline":
+                    payload = store.timeline(
+                        parts[4],
+                        start=_non_negative_query_int(query, "start", default=0),
+                        end=_non_negative_query_int(query, "end", default=0) or None,
+                        rank=_single_query_value(query, "rank", default=""),
+                        kind=_single_query_value(query, "kind", default=""),
+                        name=_single_query_value(query, "name", default=""),
+                    )
+                elif len(parts) == 7 and parts[5] == "events":
+                    payload = store.event(parts[4], int(parts[6]))
+                elif len(parts) == 7 and parts[5] == "raw":
+                    raw = store.raw_path(parts[4], parts[6])
+                    with raw.open("rb") as handle:
+                        self.send_response(HTTPStatus.OK)
+                        self.send_header(
+                            "Content-Type",
+                            "application/gzip" if raw.suffix == ".gz" else "application/json",
+                        )
+                        self.send_header("Content-Length", str(raw.stat().st_size))
+                        self.send_header(
+                            "Content-Disposition",
+                            'attachment; filename="trace.json'
+                            + (".gz" if raw.suffix == ".gz" else "")
+                            + '"',
+                        )
+                        self.send_header("Cache-Control", "no-store")
+                        self.end_headers()
+                        shutil.copyfileobj(handle, self.wfile, 1024 * 1024)
+                    return
+                else:
+                    raise KeyError("profile route not found")
+                self._send_json(HTTPStatus.OK, cast(dict[str, JSONValue], payload))
+                return
             if path == "/api/status":
                 self._send_json(HTTPStatus.OK, self.server.application.status())
                 return
@@ -191,6 +271,17 @@ class EubouliaRequestHandler(BaseHTTPRequestHandler):
             return
         path = urlsplit(self.path).path
         try:
+            parts = path.strip("/").split("/")
+            if (
+                len(parts) == 6
+                and parts[:2] == ["api", "runs"]
+                and parts[3] == "profiles"
+                and parts[5] == "hypotheses"
+            ):
+                store = self.server.application.profiles(unquote(parts[2]))
+                result = store.save_hypothesis(parts[4], dict(self._read_json_body()))
+                self._send_json(HTTPStatus.CREATED, cast(dict[str, JSONValue], result))
+                return
             if path == "/api/runs":
                 result = self.server.application.submit(self._read_json_body())
                 self._send_json(HTTPStatus.CREATED, result)
