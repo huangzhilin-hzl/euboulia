@@ -53,6 +53,9 @@ euboulia = "euboulia.cli:main"
 [tool.hatch.build.targets.wheel]
 packages = ["src/euboulia"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"docs/prototypes/inference-world" = "euboulia/lab_web"
+
 [tool.pytest.ini_options]
 addopts = "-ra --strict-config --strict-markers"
 testpaths = ["tests"]

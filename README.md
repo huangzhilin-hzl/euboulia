@@ -7,6 +7,13 @@ uses reproducible end-to-end results to decide whether a change is worth keeping
 It focuses on inference performance. Model training, production deployment, and
 general-purpose coding are outside its scope.
 
+The [local research workbench prototype](docs/prototypes/inference-world/README.md)
+lets you start from a direction, discuss evidence, branch experiments, compare
+results, and keep scoped research memories. Open it with `uv run euboulia lab serve`;
+the workbench requires no login and uses clearly labelled simulated execution.
+Existing agent connections remain available in the historical research-room view;
+see the [Lab agent setup guide](docs/lab-agents.md).
+
 ## How it thinks
 
 Euboulia follows five principles:
