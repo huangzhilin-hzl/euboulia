@@ -158,12 +158,17 @@ def test_authentication_roles_origins_and_static_path(lab):
         assert error.value.code == 403
     with request(url, "/prototypes/inference-world/") as response:
         page = response.read()
-        assert b"research.mjs" in page and b"research.css" in page
+        assert b"loop.mjs" in page and b"loop.css" in page
         assert b'src="room.mjs"' not in page
         assert "frame-ancestors 'none'" in response.headers["Content-Security-Policy"]
     with request(url, "/prototypes/inference-world/team.html") as response:
         assert b"lab.css" in response.read()
-    for asset in ("research.mjs", "research-state.mjs", "research.css"):
+    with request(url, "/prototypes/inference-world/research.html") as response:
+        assert b"research.mjs" in response.read()
+    for asset in (
+        "research.mjs", "research-state.mjs", "research.css",
+        "loop.mjs", "loop-state.mjs", "loop.css",
+    ):
         with request(url, "/prototypes/inference-world/" + asset) as response:
             assert response.status == 200
             assert response.read()

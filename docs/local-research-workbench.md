@@ -1,5 +1,7 @@
 # 本地研究工作台 · v0.4
 
+此版本保留在 `prototypes/inference-world/research.html`。新方向见 [Loop 工作台 v0.5](loop-workbench.md)。
+
 当前产品方向：一个人和本地 Agent，围绕一个研究方向建立基线、讨论数据、形成假设、逐层分支验证，留下可回溯的经验。多人、远程机器连接和团队身份不再是默认工作流的前置条件。
 
 ## 核心流程
