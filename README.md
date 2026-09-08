@@ -7,12 +7,13 @@ uses reproducible end-to-end results to decide whether a change is worth keeping
 It focuses on inference performance. Model training, production deployment, and
 general-purpose coding are outside its scope.
 
-The [local research workbench prototype](docs/prototypes/inference-world/README.md)
-lets you start from a direction, discuss evidence, branch experiments, compare
-results, and keep scoped research memories. Open it with `uv run euboulia lab serve`;
-the workbench requires no login and uses clearly labelled simulated execution.
-Existing agent connections remain available in the historical research-room view;
-see the [Lab agent setup guide](docs/lab-agents.md).
+The [Loop workbench prototype](docs/prototypes/inference-world/README.md) supports
+iterative code, content, research, and other artifact-based work. Explore a visual
+lineage, compare evidence, use optional adversarial planning, and steer the next
+iteration through a persistent discussion panel. Execution and Agent responses
+are clearly labelled simulations. See the [product model](docs/loop-workbench.md).
+The previous research workbench and historical agent connections remain available
+through separate entries; see the [Lab agent setup guide](docs/lab-agents.md).
 
 ## How it thinks
 

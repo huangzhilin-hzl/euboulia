@@ -6,31 +6,45 @@
     <meta name="color-scheme" content="light" />
     <meta
       name="description"
-      content="Euboulia Loop 工作台：观察演进、对抗式讨论计划、随时介入下一轮。"
+      content="Euboulia 本地研究工作台：从方向到实验，与 Agent 一起讨论、分支验证、积累经验。"
     />
-    <title>Euboulia · Loop 工作台</title>
+    <title>Euboulia · 本地研究工作台</title>
     <script src="appearance.js"></script>
     <link rel="stylesheet" href="themes.css" />
     <link rel="stylesheet" href="research.css" />
-    <link rel="stylesheet" href="loop.css" />
   </head>
   <body>
-    <a class="skip" href="#main">跳到 Loop 内容</a>
-    <div class="loop-shell">
-      <aside class="loop-sidebar" id="loop-sidebar" aria-label="Loop 导航">
-        <button class="loop-brand" data-action="home">
-          <i>e<span>·</span></i
-          ><span>Euboulia<small>LOOP WORKSPACE</small></span></button
-        ><button class="button side-create" data-action="new">
-          ＋ 新建 Loop
+    <a class="skip" href="#main">跳到研究内容</a>
+    <div class="workbench">
+      <nav class="rail" aria-label="工作台导航">
+        <button class="brand" data-action="home" aria-label="Euboulia 首页">
+          e<span>·</span>
         </button>
-        <div class="side-section">你的 Loops <span id="loop-count"></span></div>
-        <div id="loop-list"></div>
-        <div class="sidebar-note">
-          <span class="local-dot"></span>本地工作台
-          <p>每条路径，都有下一种可能。</p>
-        </div>
-        <div class="loop-side-bottom">
+        <button
+          class="rail-button active"
+          data-action="home"
+          aria-label="研究方向"
+          title="研究方向"
+        >
+          <span data-icon="compass"></span>
+        </button>
+        <button
+          class="rail-button"
+          data-action="search"
+          aria-label="搜索研究记录"
+          title="搜索 · ⌘K"
+        >
+          <span data-icon="search"></span>
+        </button>
+        <button
+          class="rail-button"
+          data-action="memories"
+          aria-label="经验库"
+          title="经验库"
+        >
+          <span data-icon="book"></span>
+        </button>
+        <div class="rail-bottom">
           <button
             id="appearance-trigger"
             class="appearance-trigger"
@@ -38,40 +52,52 @@
             aria-haspopup="dialog"
             aria-controls="appearance-dialog"
           >
-            ◐ <span>外观</span></button
-          ><button data-action="about" aria-label="说明与备份">ⓘ</button
-          ><button
-            class="icon-button"
-            data-action="search"
-            aria-label="搜索 Loop"
-          >
-            ⌕
+            <span data-icon="palette"></span><span>外观</span>
           </button>
+          <span class="avatar" title="本地研究者">J</span>
+        </div>
+      </nav>
+      <aside class="sidebar" id="sidebar" aria-label="研究与分支">
+        <div class="workspace-name">Julian’s lab</div>
+        <div class="workspace-caption">
+          <span class="local-dot"></span>本地研究工作台
+        </div>
+        <button class="side-new" data-action="new">
+          <span data-icon="plus"></span>开始一个新方向
+        </button>
+        <div id="side-content"></div>
+        <div class="side-bottom">
+          <p>想法有来处，结论有依据。</p>
+          <p>研究记录保存在此浏览器</p>
+          <button data-action="about">原型说明与备份 ↗</button>
         </div>
       </aside>
-      <main id="main" class="loop-main" tabindex="-1">
-        <header class="loop-topbar">
-          <div id="breadcrumb"></div>
-          <div>
-            <span class="tag prototype-tag">交互原型 · 演示 Agent</span
-            ><button
-              class="icon-button nav-toggle"
-              data-action="nav"
-              aria-label="展开 Loop 导航"
-            >
-              ☰</button
+      <main class="main" id="main" tabindex="-1">
+        <header class="topbar">
+          <div class="breadcrumb" id="breadcrumb"></div>
+          <div class="top-tools">
+            <span class="prototype"
+              >交互原型<span class="prototype-detail"> · 演示执行</span></span
             ><button
               class="icon-button"
               data-action="export"
-              aria-label="导出 Loop 备份"
+              aria-label="导出研究备份"
+              title="导出研究备份"
             >
-              ↧
+              <span data-icon="download"></span></button
+            ><button
+              class="icon-button mobile-nav"
+              data-action="sidebar"
+              aria-label="展开研究导航"
+              aria-expanded="false"
+            >
+              <span data-icon="menu"></span>
             </button>
           </div>
         </header>
         <div
-          id="storage-warning"
           class="storage-warning"
+          id="storage-warning"
           role="alert"
           hidden
         ></div>
@@ -93,13 +119,15 @@
         </header>
         <div class="dialog-content">
           <div id="flow-fields"></div>
-          <p id="flow-error" class="form-error" role="alert"></p>
+          <p class="form-error" id="flow-error" role="alert"></p>
         </div>
         <footer class="dialog-footer">
-          <small>保存在此浏览器</small
+          <small id="flow-hint">仅保存到本地</small
           ><button type="button" class="button" data-action="close-dialog">
             取消</button
-          ><button class="button primary" id="flow-submit">保存</button>
+          ><button type="submit" class="button primary" id="flow-submit">
+            保存
+          </button>
         </footer>
       </form>
     </dialog>
@@ -107,6 +135,7 @@
       <header class="dialog-heading">
         <h2 id="detail-title"></h2>
         <button
+          type="button"
           class="icon-button"
           data-action="close-detail"
           aria-label="关闭详情"
@@ -116,13 +145,30 @@
       </header>
       <div id="detail-content" class="dialog-content"></div>
     </dialog>
+    <dialog id="search-dialog" aria-labelledby="search-title">
+      <header class="dialog-heading">
+        <h2 id="search-title">搜索研究记录</h2>
+        <button
+          type="button"
+          class="icon-button"
+          data-action="close-search"
+          aria-label="关闭搜索"
+        >
+          ×
+        </button>
+      </header>
+      <div class="dialog-content">
+        <input
+          id="search-input"
+          type="search"
+          aria-label="搜索方向、方案、讨论或经验"
+          placeholder="方向、方案、讨论或经验…"
+        />
+        <div id="search-results"></div>
+      </div>
+    </dialog>
     <input
       id="backup-input"
-      type="file"
-      accept="application/json,.json"
-      hidden
-    /><input
-      id="result-input"
       type="file"
       accept="application/json,.json"
       hidden
@@ -242,7 +288,6 @@
         <button class="button primary" data-appearance-close>完成</button>
       </div>
     </dialog>
-
-    <script type="module" src="loop.mjs"></script>
+    <script type="module" src="research.mjs"></script>
   </body>
 </html>
