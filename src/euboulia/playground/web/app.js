@@ -358,18 +358,40 @@ for (const viewer of document.querySelectorAll(".report-viewer")) {
     selection.removeAllRanges(); selection.addRange(range);
   });
 }
-$("report-copy").onclick = () => $("copy-report").onclick();
-$("copy-report").onclick = () => action(async () => {
-  const rid = selectedRun, name = $("result-view").value;
-  if (!rid || name === "console") return;
-  const response = await fetch(`/api/runs/${rid}/reports/${name}`);
-  if (!response.ok) throw new Error("Could not read saved report");
-  const text = await response.text();
-  try { await navigator.clipboard.writeText(text); }
-  catch (_) { throw new Error("Clipboard is unavailable. Use Expand to select/copy text, or Download text."); }
-  $("copy-report").textContent = "Copied";
-  setTimeout(() => { $("copy-report").textContent = "Copy"; },1500);
-});
+for (const button of [$("report-copy"), $("copy-report")]) {
+  const label = button.textContent, accessibleLabel = button.getAttribute("aria-label"), title = button.title;
+  let feedbackTimer;
+  function feedback(status, text) {
+    button.dataset.copyState = status; button.textContent = text;
+    button.setAttribute("aria-label", text);
+  }
+  button.setAttribute("aria-live", "polite");
+  button.onclick = () => action(async () => {
+    const rid = selectedRun, name = $("result-view").value;
+    if (!rid || name === "console") return;
+    clearTimeout(feedbackTimer);
+    button.disabled = true; button.setAttribute("aria-busy", "true");
+    feedback("copying", "复制中…");
+    try {
+      const response = await fetch(`/api/runs/${rid}/reports/${name}`);
+      if (!response.ok) throw new Error("Could not read saved report");
+      const text = await response.text();
+      try { await navigator.clipboard.writeText(text); }
+      catch (_) { throw new Error("Clipboard is unavailable. Select text to copy, or download the report."); }
+      feedback("copied", "✓ 已复制");
+    } catch (e) {
+      feedback("failed", "复制失败"); button.title = e.message;
+      throw e;
+    } finally {
+      button.disabled = false; button.removeAttribute("aria-busy");
+      feedbackTimer = setTimeout(() => {
+        button.textContent = label; delete button.dataset.copyState; button.title = title;
+        if (accessibleLabel === null) button.removeAttribute("aria-label");
+        else button.setAttribute("aria-label", accessibleLabel);
+      }, button.dataset.copyState === "failed" ? 4000 : 2000);
+    }
+  });
+}
 $("arguments-expanded").addEventListener("input", updateArgumentsEditor);
 $("arguments-apply").onclick = applyArguments;
 $("arguments-cancel").onclick = () => $("arguments-dialog").close();
