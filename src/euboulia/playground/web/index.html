@@ -44,7 +44,7 @@
             <a id="download-report" class="subtle" aria-label="Download saved text" title="Download saved text">Download</a>
           </div>
         </div>
-        <pre id="report-text" hidden tabindex="0" aria-label="Profiler text report"></pre>
+        <pre id="report-text" class="report-viewer" hidden tabindex="0" role="region" aria-label="Profiler text report"></pre>
         <div id="console" role="log" aria-live="polite" aria-label="Console Output"><div class="console-empty"><span>›_</span><p>Ready when you are.</p><small>Run your code to see live stdout, stderr and build output.</small></div></div>
         <details id="raw-report-details" hidden><summary>Raw report in Pod · not saved locally</summary><div id="raw-reports"></div></details>
         <div class="console-footer"><span id="run-detail">No active run</span><span>Shared GPUs may affect timings</span></div>
@@ -61,7 +61,7 @@
   <dialog id="report-dialog" aria-labelledby="report-title">
     <div class="arguments-dialog-header"><h2 id="report-title">Profiler text report</h2><button id="report-close" class="icon-button" aria-label="Close report">×</button></div>
     <p id="report-dialog-info" class="muted">Loading saved text…</p>
-    <textarea id="report-expanded" readonly spellcheck="false" wrap="off" aria-label="Full profiler text report"></textarea>
+    <pre id="report-expanded" class="report-viewer" tabindex="0" role="region" aria-label="Full profiler text report"></pre>
     <div class="arguments-dialog-footer"><span class="muted">Select text to copy, or copy the entire saved report.</span><button id="report-copy" type="button">Copy all saved text</button></div>
   </dialog>
   <script src="/choices.js"></script>

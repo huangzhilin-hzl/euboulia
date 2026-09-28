@@ -339,15 +339,25 @@ $("expand-report").onclick = () => action(async () => {
   if (!rid || name === "console") return;
   $("report-title").textContent = name;
   $("report-dialog-info").textContent = $("report-info").textContent.replace(/ · Preview:.*/, "");
-  $("report-expanded").value = "Loading saved text…";
+  $("report-expanded").textContent = "Loading saved text…";
   $("report-copy").disabled = true;
   $("report-dialog").showModal();
+  $("report-expanded").scrollTop = 0; $("report-expanded").scrollLeft = 0;
   const response = await fetch(`/api/runs/${rid}/reports/${name}`);
   if (!response.ok) throw new Error("Could not read saved report");
-  $("report-expanded").value = await response.text();
+  $("report-expanded").textContent = await response.text();
   $("report-copy").disabled = false;
 });
 $("report-close").onclick = () => $("report-dialog").close();
+for (const viewer of document.querySelectorAll(".report-viewer")) {
+  viewer.addEventListener("keydown", e => {
+    if (e.key.toLowerCase() !== "a" || !(e.metaKey || e.ctrlKey) || e.altKey) return;
+    e.preventDefault();
+    const range = document.createRange(); range.selectNodeContents(viewer);
+    const selection = window.getSelection();
+    selection.removeAllRanges(); selection.addRange(range);
+  });
+}
 $("report-copy").onclick = () => $("copy-report").onclick();
 $("copy-report").onclick = () => action(async () => {
   const rid = selectedRun, name = $("result-view").value;
