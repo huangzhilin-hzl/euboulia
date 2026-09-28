@@ -190,3 +190,70 @@ HTTP origin/Host/token protection, actual Python venv reuse and streaming, stder
 exit codes, cancellation, timeout, output caps, session serialization and history.
 They use a fake GPU inventory for local tests; actual kernel validation requires a
 live CUDA Pod.
+
+
+## NCU and NSYS text reports
+
+Choose **Run**, **NCU**, or **NSYS** beside the language/environment selector. The
+source, script arguments, chosen GPU UUID and venv are reused. **Profiler → Edit**
+opens a separate multiline editor; enter profiler options only (not the tool name,
+Python command or script arguments). Each environment keeps independent mode/options
+in its browser draft. History restores source, script arguments, mode, profiler
+arguments and the optional **Export SASS** setting.
+
+NCU defaults to `--set detailed --launch-count 1`. Set a filter such as
+`--kernel-name 'regex:MyKernel'` or `--nvtx --nvtx-include 'measure/'` to select your
+kernel. Launch skip/count counts matching kernel launches, not Python warmup
+iterations. Clock control is fixed to `none` on shared GPUs. The command wraps the
+complete target argv, preserving quoted arguments. The current editor still runs
+a single Python file; profiling does not upload project dependencies.
+
+NSYS defaults to `--trace=cuda,nvtx --sample=none --cpuctxsw=none`. For scripts using
+CUDA Profiler APIs, add `--capture-range=cudaProfilerApi --capture-range-end=stop`.
+The argument editor lists supported long options. Both `--name value` and
+`--name=value` work, including quoted values and shell-style line continuations.
+Output, target, GPU, config-file and attach options are managed by the tool and
+cannot be overridden. CPU sampling/context-switch collection, when enabled, is
+restricted to `process-tree`. Unsupported options fail before submission; options
+unsupported by the installed profiler version report the tool's error in Console.
+
+The Pod image must provide `ncu` and/or `nsys` on PATH, compatible with its GPU and
+driver. These are image tools, not pip dependencies; a local profile may configure
+PATH for an existing installation. Every profile run records the binary path,
+version and capture/export commands. Missing tools, counter-permission failures
+and missing reports are reported without silently falling back to normal Run.
+Sharing GPU resources affects metrics and profiler replay affects timing; use
+normal Run for ordinary benchmark timings.
+
+After capture, NCU imports its report to produce `details.txt` and optionally
+`sass.txt`. NSYS runs `nsys stats` for kernel, CUDA API and memory-operation time
+summaries to produce `stats.txt`. Choose the text file in the **Output** selector.
+The page previews the first 256 KiB; **Expand** opens the full saved text in a
+large selectable viewer. **Copy all saved text** and **Download text**
+read the entire saved file. Exported text is separate from the bounded Console
+stream. Each file is capped at `max_report_bytes` (default 32 MiB); incomplete,
+failed or size-limited exports are explicitly marked **Partial**. Copy/download
+contains only the saved bytes when an export is partial.
+
+Text is streamed to private local files under
+`<storage>/runs/<run-id>/reports/`, independently checksummed, and retained across
+server restarts and Pod deletion. `profiling.json` stores capture/export status,
+version and raw report locations; `run.json` also records each text file's size,
+status and checksum. Capture may succeed while export fails; the two states are
+shown separately and a failed export marks the overall run failed. A size-limited
+export marks its text partial even if the profiler itself succeeded.
+
+Raw `report.ncu-rep` / `report.nsys-rep` stay under the run directory in the Pod.
+Their paths appear below the output pane, labeled **Pod only**. Copy those paths
+for manual retrieval with your usual kubectl tooling if you need the native GUI;
+text statistics do not replace the NSYS interactive timeline. Releasing the Pod
+warns about these raw files. Files already saved locally remain available.
+
+`profiling_timeout_seconds` defaults to 900 seconds; `export_timeout_seconds`
+defaults to 300 seconds per text export. They are separate from the normal
+`run_timeout_seconds`. Stop/timeout during capture sends SIGINT to this run's
+process group, allows up to 15 seconds to finalize, then terminates remaining owned
+processes. A stopped capture does not automatically start text exports; any raw
+report finalized before exit is listed for manual retrieval. Stop during export
+retains any text received so far as partial. Connection loss keeps partial local
+text and the existing recovery-required Pod workflow.

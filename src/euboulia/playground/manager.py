@@ -20,8 +20,18 @@ from typing import Any, cast
 
 from euboulia.playground.config import PlaygroundConfig, integer, string
 from euboulia.playground.kubernetes import Kubernetes, PlaygroundError, manifest
+from euboulia.playground.profiling import DEFAULT_ARGUMENTS, REPORT_NAMES, validate_options
 
-ACTIVE = {"queued", "verifying_gpu", "preparing_environment", "running", "cancelling"}
+ACTIVE = {
+    "queued",
+    "verifying_gpu",
+    "preparing_environment",
+    "running",
+    "cancelling",
+    "profiling",
+    "exporting",
+    "finalizing",
+}
 
 
 def parse_arguments(value: object) -> list[str]:
@@ -110,6 +120,12 @@ class Manager:
                         "still be running; release the owned Pod before reconnecting.",
                     )
                 record.update(status="interrupted", finished_at=time.time())
+                for report in record.get("reports", {}).values():
+                    if report["status"] == "streaming":
+                        report["status"] = "partial"
+                        report_path = path.parent / "reports" / report["name"]
+                        if report["name"] in REPORT_NAMES and report_path.is_file():
+                            report["bytes"] = report_path.stat().st_size
                 write_json(path, record)
             # Older run records kept execution metadata in a separate file only.
             execution_path = path.parent / "execution.json"
@@ -300,6 +316,9 @@ class Manager:
             "code",
             "arguments",
             "timeout_seconds",
+            "mode",
+            "profiler_arguments",
+            "export_sass",
         }:
             raise ValueError("unknown run fields")
         sid = string(payload.get("session"), "session")
@@ -310,11 +329,19 @@ class Manager:
             raise ValueError("script is limited to 256 KiB")
         arguments = payload.get("arguments", "")
         argv = parse_arguments(arguments)
+        mode = string(payload.get("mode", "run"), "mode")
+        profiler_arguments = payload.get("profiler_arguments", DEFAULT_ARGUMENTS.get(mode, ""))
+        profiler_args = parse_arguments(profiler_arguments)
+        validate_options(mode, profiler_args)
+        export_sass = payload.get("export_sass", False)
+        if not isinstance(export_sass, bool) or (export_sass and mode != "ncu"):
+            raise ValueError("export_sass must be a boolean and is only available for ncu")
+        timeout_limit = self.config.run_timeout if mode == "run" else self.config.profiling_timeout
         timeout = integer(
-            payload.get("timeout_seconds", self.config.run_timeout),
+            payload.get("timeout_seconds", timeout_limit),
             "timeout",
             1,
-            self.config.run_timeout,
+            timeout_limit,
         )
         with self.lock:
             session = self.sessions[sid]
@@ -339,6 +366,11 @@ class Manager:
                 "gpu_uuid": matches[0]["uuid"],
                 "profile": profile.name,
                 "profile_fingerprint": profile.fingerprint,
+                "mode": mode,
+                "profiler_arguments": profiler_arguments,
+                "profiler_args": profiler_args,
+                "export_sass": export_sass,
+                "reports": {},
                 "arguments": arguments,
                 "args": argv,
                 "status": "queued",
@@ -361,6 +393,11 @@ class Manager:
                 "code": code,
                 "args": argv,
                 "profile": asdict(profile),
+                "mode": mode,
+                "profiler_args": profiler_args,
+                "export_sass": export_sass,
+                "export_timeout": self.config.export_timeout,
+                "max_report_bytes": self.config.max_report_bytes,
                 "run_timeout": timeout,
                 "setup_timeout": self.config.setup_timeout,
                 "max_output_bytes": self.config.max_output_bytes,
@@ -371,6 +408,14 @@ class Manager:
     def _event(self, rid: str, event: dict[str, Any]) -> None:
         with self.lock:
             run = self.runs[rid]
+            if event["kind"].startswith("report_"):
+                self._report_event(rid, event)
+                return
+            if event["kind"] == "profiling":
+                run["profiling"] = {k: v for k, v in event.items() if k != "kind"}
+                write_json(self._run_dir(rid) / "profiling.json", run["profiling"])
+                self._save_run(run)
+                return
             if event["kind"] == "environment":
                 write_json(self._run_dir(rid) / "environment.json", event)
                 if event["status"] == "preparing":
@@ -400,8 +445,11 @@ class Manager:
                     "data": data,
                 }
             if event["kind"] == "execution":
-                write_json(self._run_dir(rid) / "execution.json", event)
-                run["execution"] = dict(event)
+                if event.get("stage") == "export":
+                    run.setdefault("export_commands", []).append(dict(event))
+                else:
+                    write_json(self._run_dir(rid) / "execution.json", event)
+                    run["execution"] = dict(event)
                 self._save_run(run)
                 event = {
                     "kind": "output",
@@ -416,6 +464,9 @@ class Manager:
                 run["status"] = event["phase"]
                 self._save_run(run)
             if event["kind"] == "result":
+                for report in run.get("reports", {}).values():
+                    if report["status"] == "streaming":
+                        report["status"] = "partial"
                 run.update(
                     status=event["status"],
                     exit_code=event.get("exit_code"),
@@ -427,6 +478,50 @@ class Manager:
             with path.open("a", encoding="utf-8") as handle:
                 os.chmod(path, 0o600)
                 handle.write(json.dumps(event, ensure_ascii=True) + "\n")
+
+    def _report_event(self, rid: str, event: dict[str, Any]) -> None:
+        name = event.get("name")
+        if name not in REPORT_NAMES:
+            raise PlaygroundError("invalid text report name")
+        run = self.runs[rid]
+        reports = run.setdefault("reports", {})
+        directory = self._run_dir(rid) / "reports"
+        directory.mkdir(mode=0o700, exist_ok=True)
+        path = directory / name
+        if event["kind"] == "report_begin":
+            if name in reports:
+                raise PlaygroundError("duplicate text report")
+            with path.open("xb") as handle:
+                os.chmod(handle.name, 0o600)
+            reports[name] = {"name": name, "status": "streaming", "bytes": 0}
+        elif name not in reports or reports[name]["status"] != "streaming":
+            raise PlaygroundError("text report is not streaming")
+        elif event["kind"] == "report_chunk":
+            data = event["data"].encode("utf-8")
+            if reports[name]["bytes"] + len(data) > self.config.max_report_bytes:
+                raise PlaygroundError("text report exceeds configured size limit")
+            with path.open("ab") as handle:
+                handle.write(data)
+            reports[name]["bytes"] += len(data)
+            return
+        elif event["kind"] == "report_end":
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            if event["bytes"] != path.stat().st_size or event["sha256"] != digest:
+                raise PlaygroundError("text report checksum mismatch")
+            if event["status"] not in {"ready", "partial"}:
+                raise PlaygroundError("invalid text report status")
+            reports[name].update(
+                {k: event[k] for k in ("status", "bytes", "sha256", "exit_code", "truncated")}
+            )
+        else:
+            raise PlaygroundError("invalid text report event")
+        self._save_run(run)
+
+    def report_path(self, rid: str, name: str) -> Path:
+        with self.lock:
+            if name not in REPORT_NAMES or name not in self.runs[rid].get("reports", {}):
+                raise KeyError("text report not found")
+            return self._run_dir(rid) / "reports" / name
 
     def events(self, rid: str, after: int) -> dict[str, Any]:
         with self.lock:
@@ -503,7 +598,13 @@ class Manager:
                 selector.register(pipe, selectors.EVENT_READ, stream)
             buffer = b""
             transport_bytes = 0
-            deadline = time.monotonic() + request["setup_timeout"] + request["run_timeout"] + 60
+            deadline = (
+                time.monotonic()
+                + request["setup_timeout"]
+                + request["run_timeout"]
+                + 90
+                + (2 * request["export_timeout"] if request.get("mode") != "run" else 0)
+            )
             result_seen = False
             while selector.get_map() or process.poll() is None:
                 if time.monotonic() >= deadline:

@@ -14,6 +14,7 @@ from urllib.parse import parse_qs, urlsplit
 from euboulia.playground.config import PlaygroundConfig, integer, load_config, mapping, string
 from euboulia.playground.kubernetes import Kubernetes, PlaygroundError
 from euboulia.playground.manager import Manager
+from euboulia.playground.profiling import DEFAULT_ARGUMENTS, OPTIONS
 
 
 class Server(ThreadingHTTPServer):
@@ -98,6 +99,34 @@ class Handler(BaseHTTPRequestHandler):
                 if len(parts) == 4 and parts[:2] == ["api", "clusters"] and parts[3] == "nodes":
                     self._json(200, {"nodes": Kubernetes(config.clusters[parts[2]]).nodes()})
                     return
+                if len(parts) == 5 and parts[:2] == ["api", "runs"] and parts[3] == "reports":
+                    path = manager.report_path(parts[2], parts[4])
+                    query = parse_qs(request.query)
+                    if query.get("preview") == ["1"]:
+                        with path.open("rb") as handle:
+                            preview_text = handle.read(256 * 1024).decode("utf-8", errors="replace")
+                        self._json(200, {"text": preview_text, "bytes": path.stat().st_size})
+                    else:
+                        # Stream from disk: reports are independent of the Console cap.
+                        with path.open("rb") as handle:
+                            size = path.stat().st_size
+                            self.send_response(200)
+                            self.send_header("Content-Type", "text/plain; charset=utf-8")
+                            self.send_header(
+                                "Content-Disposition", f'attachment; filename="{path.name}"'
+                            )
+                            self.send_header("X-Content-Type-Options", "nosniff")
+                            self.send_header("Cache-Control", "no-store")
+                            self.send_header("Content-Length", str(size))
+                            self.end_headers()
+                            remaining = size
+                            while remaining:
+                                chunk = handle.read(min(65536, remaining))
+                                if not chunk:
+                                    break
+                                self.wfile.write(chunk)
+                                remaining -= len(chunk)
+                    return
                 if len(parts) == 4 and parts[:2] == ["api", "runs"]:
                     if parts[3] == "events":
                         query = parse_qs(request.query)
@@ -173,6 +202,11 @@ def public_config(config: PlaygroundConfig) -> dict[str, Any]:
         "clusters": [{"name": c.name, "namespace": c.namespace} for c in config.clusters.values()],
         "profiles": profiles,
         "run_timeout_seconds": config.run_timeout,
+        "profiling_timeout_seconds": config.profiling_timeout,
+        "profiler_defaults": DEFAULT_ARGUMENTS,
+        "profiler_options": {
+            k: sorted(v | ({"--nvtx"} if k == "ncu" else set())) for k, v in OPTIONS.items()
+        },
     }
 
 
