@@ -113,7 +113,7 @@ function resetResults() {
 async function showResult() {
   const name = $("result-view").value, rid = selectedRun, isReport = name !== "console";
   $("console").hidden = isReport; $("report-text").hidden = !isReport;
-  $("report-info").hidden = !isReport; $("download-report").hidden = !isReport;
+  $("report-toolbar").hidden = !isReport;
   $("copy-report").disabled = true; $("expand-report").disabled = true;
   if (!isReport || !rid) return;
   const record = state.runs.find(r => r.id === rid)?.reports?.[name];
@@ -356,7 +356,7 @@ $("copy-report").onclick = () => action(async () => {
   try { await navigator.clipboard.writeText(text); }
   catch (_) { throw new Error("Clipboard is unavailable. Use Expand to select/copy text, or Download text."); }
   $("copy-report").textContent = "Copied";
-  setTimeout(() => { $("copy-report").textContent = "Copy all saved text"; },1500);
+  setTimeout(() => { $("copy-report").textContent = "Copy"; },1500);
 });
 $("arguments-expanded").addEventListener("input", updateArgumentsEditor);
 $("arguments-apply").onclick = applyArguments;

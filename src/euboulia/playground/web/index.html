@@ -31,7 +31,22 @@
         <button id="arguments-preview" class="arguments-preview" type="button" aria-label="Edit script arguments" aria-haspopup="dialog" aria-controls="arguments-dialog" title="Click to edit all arguments"><code id="arguments-preview-text">No arguments · Click to edit</code></button>
         <div class="arguments-actions"><button id="arguments-expand" class="subtle" type="button" aria-haspopup="dialog" aria-controls="arguments-dialog">Edit</button><span id="arguments-count">0 lines</span></div>
       </div><div class="editor"><pre id="line-numbers" aria-hidden="true">1</pre><div class="code-area"><pre id="highlight" aria-hidden="true"><code></code></pre><textarea id="code" aria-label="Python source code" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off" wrap="off"></textarea></div></div><div class="editor-footer"><span id="cursor">Ln 1, Col 1</span><span>Python <span class="divider">|</span> UTF-8 <span class="divider">|</span> Tab: 4 spaces</span></div></section>
-      <section class="console-panel" aria-label="Console output"><div class="panel-header"><div><span class="console-icon">›_</span> Console Output <span id="run-status" class="badge">Ready</span></div><div><label class="follow"><input id="autoscroll" type="checkbox" checked> Follow</label><button id="clear" class="subtle">Clear</button></div></div><div class="result-toolbar"><label for="result-view">Output</label><select id="result-view" data-control="segments" aria-label="Output view"><option value="console">Console</option></select><button id="expand-report" class="subtle" disabled>Expand</button><button id="copy-report" class="subtle" disabled>Copy all saved text</button><a id="download-report" hidden>Download text</a></div><div id="report-info" hidden role="status"></div><pre id="report-text" hidden tabindex="0" aria-label="Profiler text report"></pre><div id="console" role="log" aria-live="polite" aria-label="Console Output"><div class="console-empty"><span>›_</span><p>Ready when you are.</p><small>Run your code to see live stdout, stderr and build output.</small></div></div><details id="raw-report-details" hidden><summary>Raw report in Pod · not saved locally</summary><div id="raw-reports"></div></details><div class="console-footer"><span id="run-detail">No active run</span><span>Shared GPUs may affect timings</span></div></section>
+      <section class="console-panel" aria-label="Console output">
+        <div class="panel-header"><div><span class="console-icon">›_</span> Console Output <span id="run-status" class="badge">Ready</span></div><div><label class="follow"><input id="autoscroll" type="checkbox" checked> Follow</label><button id="clear" class="subtle">Clear</button></div></div>
+        <div class="result-toolbar"><span class="result-label">Output</span><select id="result-view" data-control="segments" aria-label="Output view"><option value="console">Console</option></select></div>
+        <div id="report-toolbar" hidden>
+          <div id="report-info" role="status"></div>
+          <div class="report-actions" role="group" aria-label="Report actions">
+            <button id="expand-report" class="subtle" disabled>Expand</button>
+            <button id="copy-report" class="subtle" aria-label="Copy all saved text" title="Copy all saved text" disabled>Copy</button>
+            <a id="download-report" class="subtle" aria-label="Download saved text" title="Download saved text">Download</a>
+          </div>
+        </div>
+        <pre id="report-text" hidden tabindex="0" aria-label="Profiler text report"></pre>
+        <div id="console" role="log" aria-live="polite" aria-label="Console Output"><div class="console-empty"><span>›_</span><p>Ready when you are.</p><small>Run your code to see live stdout, stderr and build output.</small></div></div>
+        <details id="raw-report-details" hidden><summary>Raw report in Pod · not saved locally</summary><div id="raw-reports"></div></details>
+        <div class="console-footer"><span id="run-detail">No active run</span><span>Shared GPUs may affect timings</span></div>
+      </section>
     </section>
   </main>
   <dialog id="arguments-dialog" aria-labelledby="arguments-title" aria-describedby="arguments-help">
