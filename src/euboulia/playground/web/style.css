@@ -8,6 +8,16 @@
 ::-webkit-scrollbar,::-webkit-scrollbar-track,::-webkit-scrollbar-track-piece,::-webkit-scrollbar-thumb,::-webkit-scrollbar-button,::-webkit-scrollbar-corner{cursor:default}
 ::-webkit-scrollbar-thumb:hover,::-webkit-scrollbar-thumb:active{cursor:default}
 
+.history-label{justify-content:flex-start;align-items:center;gap:8px}
+#run-count{display:inline-flex;align-items:center;justify-content:center;min-width:22px;height:18px;padding:0 5px;border:1px solid #303844;border-radius:5px;background:#1a2028;color:#8795a8;font:10px/1 var(--mono);letter-spacing:0}
+.history{scrollbar-gutter:stable;padding-right:7px}
+.history::-webkit-scrollbar{width:11px}
+.history::-webkit-scrollbar-track{background:transparent}
+.history::-webkit-scrollbar-thumb{background:#29313b;border:3px solid transparent;background-clip:padding-box;border-radius:6px;min-height:28px}
+.history:hover::-webkit-scrollbar-thumb,.history:focus-within::-webkit-scrollbar-thumb{background-color:#414e5e}
+.history::-webkit-scrollbar-thumb:hover,.history::-webkit-scrollbar-thumb:active{background-color:#5b6c81}
+@supports not selector(::-webkit-scrollbar){.history{scrollbar-width:thin;scrollbar-color:#29313b transparent}.history:hover,.history:focus-within{scrollbar-color:#414e5e transparent}}
+
 .session-card{min-width:0;padding:14px 12px;line-height:1.45;background:linear-gradient(180deg,#181d23,#14181e)}
 .session-heading{font-size:11px;font-weight:600;color:#c1cbd8}
 .session-title{gap:8px}.session-title .badge{font-size:9px;padding:3px 6px;white-space:nowrap}
