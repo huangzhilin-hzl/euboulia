@@ -264,6 +264,12 @@ status and checksum. Capture may succeed while export fails; the two states are
 shown separately and a failed export marks the overall run failed. A size-limited
 export marks its text partial even if the profiler itself succeeded.
 
+The controller acknowledges the final worker event only after receiving the
+preceding output and verifying report checksums. The worker keeps the exec stream
+open until that acknowledgement arrives (up to 30 seconds), preventing a fast
+remote exit from cutting off queued report data in kubectl. A missing completion
+event still fails the run; exit code zero alone does not prove complete delivery.
+
 Raw `report.ncu-rep` / `report.nsys-rep` stay under the run directory in the Pod.
 Their paths appear below the output pane, labeled **Pod only**. Copy those paths
 for manual retrieval with your usual kubectl tooling if you need the native GUI;

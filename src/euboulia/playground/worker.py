@@ -462,9 +462,35 @@ class Worker:
         self.emit("result", status="succeeded" if code == 0 and ok else "failed", exit_code=code)
 
 
+def wait_for_ack(run_id: str, timeout: float = 30) -> bool:
+    """Keep the exec stream alive until the controller has consumed the final event."""
+    deadline = time.monotonic() + timeout
+    buffer = b""
+    with selectors.DefaultSelector() as selector:
+        selector.register(sys.stdin, selectors.EVENT_READ)
+        while len(buffer) <= 4096:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not selector.select(remaining):
+                return False
+            chunk = os.read(sys.stdin.fileno(), 4096)
+            if not chunk:
+                return False
+            buffer += chunk
+            if b"\n" in buffer:
+                try:
+                    return bool(
+                        json.loads(buffer.split(b"\n", 1)[0])
+                        == {"kind": "ack", "run_id": run_id}
+                    )
+                except (ValueError, UnicodeDecodeError):
+                    return False
+    return False
+
+
 def main() -> None:
     os.umask(0o077)
-    request = json.load(sys.stdin)
+    # One JSON line leaves stdin available for the controller's completion ACK.
+    request = json.loads(sys.stdin.readline())
     worker = Worker(request)
     try:
         worker.execute()
@@ -476,6 +502,8 @@ def main() -> None:
     except Exception as exc:
         worker.emit("output", stream="system", data=f"\n{type(exc).__name__}: {exc}\n")
         worker.emit("result", status="failed", exit_code=None)
+    if request.get("acknowledge_result") and not wait_for_ack(request["id"]):
+        raise SystemExit("Controller did not acknowledge complete worker output")
 
 
 if __name__ == "__main__":

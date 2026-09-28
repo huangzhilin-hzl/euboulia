@@ -592,7 +592,11 @@ class Manager:
                 stderr=subprocess.PIPE,
             )
             assert process.stdin and process.stdout and process.stderr
-            input_bytes = json.dumps(request).encode()
+            # Keep stdin open for a completion ACK. Closing the remote process before
+            # kubectl drains stdout can silently truncate a large report, even on exit 0.
+            input_bytes = (
+                json.dumps({**request, "acknowledge_result": True}) + "\n"
+            ).encode()
             os.set_blocking(process.stdin.fileno(), False)
             selector.register(process.stdin, selectors.EVENT_WRITE, "input")
             for pipe, stream in ((process.stdout, "protocol"), (process.stderr, "transport")):
@@ -612,12 +616,13 @@ class Manager:
                 if time.monotonic() >= deadline:
                     raise PlaygroundError("remote transport timed out; release Pod before retrying")
                 for key, _ in selector.select(0.2):
-                    if key.data == "input":
+                    if key.data in {"input", "ack"}:
                         written = os.write(key.fd, input_bytes[:8192])
                         input_bytes = input_bytes[written:]
                         if not input_bytes:
                             selector.unregister(key.fileobj)
-                            process.stdin.close()
+                            if key.data == "ack":
+                                process.stdin.close()
                         continue
                     chunk = os.read(key.fd, 8192)
                     if not chunk:
@@ -639,8 +644,15 @@ class Manager:
                         while b"\n" in buffer:
                             line, buffer = buffer.split(b"\n", 1)
                             event = json.loads(line)
-                            result_seen |= event.get("kind") == "result"
                             self._event(rid, event)
+                            if event.get("kind") == "result":
+                                if result_seen:
+                                    raise PlaygroundError("duplicate worker result")
+                                result_seen = True
+                                input_bytes = (
+                                    json.dumps({"kind": "ack", "run_id": rid}) + "\n"
+                                ).encode()
+                                selector.register(process.stdin, selectors.EVENT_WRITE, "ack")
                         if len(buffer) > 1024 * 1024:
                             raise PlaygroundError("invalid oversized worker protocol frame")
             returncode = process.wait()

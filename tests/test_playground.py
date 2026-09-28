@@ -843,3 +843,97 @@ def test_missing_profiler_does_not_execute_target(tmp_path: Path, monkeypatch: A
     worker.env["PATH"] = str(tmp_path / "missing-tools")
     with pytest.raises(RuntimeError, match="not installed"):
         worker.profile_command([sys.executable, "-c", "raise AssertionError('must not run')"])
+
+
+@pytest.mark.parametrize("valid_ack", [True, False])
+def test_worker_waits_for_controller_ack(tmp_path: Path, valid_ack: bool) -> None:
+    request = worker_request(tmp_path, "unused") | {"acknowledge_result": True}
+    script = (
+        "from euboulia.playground.worker import Worker,main; "
+        "Worker.execute=lambda self:self.emit('result',status='succeeded',exit_code=0); main()"
+    )
+    process = subprocess.Popen(
+        [sys.executable, "-u", "-c", script],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        assert process.stdin and process.stdout
+        process.stdin.write((json.dumps(request) + "\n").encode())
+        process.stdin.flush()
+        assert json.loads(process.stdout.readline())["status"] == "succeeded"
+        # Finishing computation must not close the transport before receipt is confirmed.
+        with pytest.raises(subprocess.TimeoutExpired):
+            process.wait(timeout=0.1)
+        ack = {"kind": "ack", "run_id": request["id"] if valid_ack else "wrong-run"}
+        _, stderr = process.communicate((json.dumps(ack) + "\n").encode(), timeout=3)
+        assert (process.returncode == 0) is valid_ack
+        if not valid_ack:
+            assert b"did not acknowledge" in stderr
+    finally:
+        if process.poll() is None:
+            process.kill()
+        process.communicate()
+
+
+def test_manager_acknowledges_only_after_large_report_is_saved(
+    config_path: Path, monkeypatch: Any
+) -> None:
+    import hashlib
+
+    fake_worker = """
+import hashlib,json,sys
+from pathlib import Path
+r=json.loads(sys.stdin.readline())
+assert r['acknowledge_result'] is True
+def emit(kind,**data):
+    print(json.dumps(dict(kind=kind,**data)),flush=True)
+text='instruction \\u6307\\u6807\\n'*256
+size=0
+digest=hashlib.sha256()
+emit('report_begin',name='sass.txt')
+for _ in range(768):
+    data=text.encode()
+    digest.update(data)
+    size+=len(data)
+    emit('report_chunk',name='sass.txt',data=text)
+emit('report_end',name='sass.txt',status='ready',bytes=size,
+     sha256=digest.hexdigest(),exit_code=0,truncated=False)
+emit('result',status='succeeded',exit_code=0)
+assert json.loads(sys.stdin.readline())=={'kind':'ack','run_id':r['id']}
+Path(r['root'],'ack-received').touch()
+"""
+    config = load_config(config_path)
+    manager = Manager(config)
+    rid = "e" * 32
+    session = {
+        "id": "s", "status": "ready", "cluster": "test", "node": "node-a",
+        "namespace": "molou", "pod": "test-pod",
+        "cluster_fingerprint": config.clusters["test"].fingerprint,
+    }
+    manager.sessions["s"] = session
+    manager.runs[rid] = {
+        **session, "id": rid, "session": "s", "container": "workspace",
+        "status": "queued", "mode": "ncu", "reports": {},
+    }
+    manager._save_run(manager.runs[rid])
+    monkeypatch.setattr(Kubernetes, "inspect", lambda *a: {"status": {"hostIP": "10.0.0.3"}})
+    monkeypatch.setattr(
+        Kubernetes, "exec_args", lambda *a: [sys.executable, "-u", "-c", fake_worker]
+    )
+    req = worker_request(config_path.parent, "unused") | {
+        "id": rid, "export_timeout": 5, "mode": "ncu",
+    }
+    Path(req["root"]).mkdir(parents=True, exist_ok=True)
+    try:
+        manager._execute(rid, req)
+        run = manager.runs[rid]
+        assert run["status"] == "succeeded", run.get("error")
+        data = manager.report_path(rid, "sass.txt").read_bytes()
+        assert data == ("instruction 指标\n" * 256 * 768).encode()
+        assert run["reports"]["sass.txt"]["sha256"] == hashlib.sha256(data).hexdigest()
+        assert (Path(req["root"]) / "ack-received").exists()
+        assert session["status"] == "ready"
+    finally:
+        manager.close()
