@@ -60,13 +60,14 @@
 .result-toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:9px;padding:7px 14px;border-bottom:1px solid var(--border);flex-shrink:0}.result-label{color:var(--muted);font-size:11px}
 #report-toolbar{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:6px 16px;padding:7px 14px;border-bottom:1px solid #222730;flex-shrink:0}
 #report-toolbar #report-info{flex:1 1 180px;min-width:0;padding:0}
-.report-actions{display:flex;align-items:center;gap:4px;margin-left:auto;flex-shrink:0}
+.report-actions{display:flex;align-items:center;gap:6px;margin-left:auto;flex-shrink:0}
+.report-actions .subtle{gap:7px}
 .report-actions .subtle{display:inline-flex;align-items:center;justify-content:center;min-height:28px;padding:5px 9px;border:1px solid #323944;border-radius:5px;background:#20262e;color:#b8c3d3;font:11px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;text-decoration:none;white-space:nowrap;cursor:pointer}
 .report-actions .subtle:hover{background:#2b3440;color:#e1e6ed;filter:none}.report-actions button:disabled{cursor:not-allowed}.report-actions a:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 #report-copy{width:184px;height:36px;font:12px/1 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}#copy-report{width:112px;height:28px}
 .copy-button{display:inline-flex;align-items:center;justify-content:center;gap:7px;flex-shrink:0;white-space:nowrap}
 #report-copy,#copy-report{transition:background-color .18s,border-color .18s,color .18s}
-.copy-icon{width:14px;height:14px;flex-shrink:0;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
+.report-action-icon,.copy-icon{width:14px;height:14px;flex-shrink:0;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
 .copy-check,.copy-spinner{display:none}
 .copy-button[data-copy-state=copying] .copy-sheets,.copy-button[data-copy-state=copied] .copy-sheets{display:none}
 .copy-button[data-copy-state=copying] .copy-spinner{display:block;stroke-dasharray:26 12;transform-origin:10px 10px;animation:copy-spin .8s linear infinite}
