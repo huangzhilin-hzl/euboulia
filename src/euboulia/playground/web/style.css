@@ -38,6 +38,7 @@
 #report-text{margin:0;flex:1;min-height:70px;overflow:auto;padding:14px 18px;font:12px/1.7 var(--mono);white-space:pre;tab-size:4}
 #report-info,#raw-reports{font:10px/1.5 var(--mono);color:#aab9ca;padding:6px 14px;white-space:pre-wrap;overflow-wrap:anywhere;max-height:95px;overflow:auto;flex-shrink:0}
 #report-info.partial{color:#efbc7a}.badge.profiling,.badge.exporting,.badge.finalizing{color:#8dcaff;border-color:#31516d}
+#ncu-reports{color:var(--accent);white-space:nowrap}
 @media(max-width:1000px){.toolbar{flex-wrap:wrap;gap:6px;padding:8px 0}.gpu-control{max-width:55%}.toolbar-spacer{display:none}.profiling-help{flex-wrap:wrap}}
 
 .toolbar{grid-row:1;min-height:66px}.target-strip{grid-row:2}#profiling-settings{grid-row:3}.workbench{grid-row:4}.editor-panel{grid-row:1}.console-panel{grid-row:3}

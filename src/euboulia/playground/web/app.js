@@ -66,7 +66,6 @@ function saveDraft() {
     localStorage.setItem(`${draftKey(currentProfile)}-arguments`, $("arguments").value);
     profilerDraft.mode = currentMode;
     profilerDraft[currentMode] = $("profiler-arguments").value;
-    profilerDraft.sass = $("export-sass").checked;
     localStorage.setItem(`${draftKey(currentProfile)}-profiling`, JSON.stringify(profilerDraft));
     $("saved").textContent = "Draft saved";
   }
@@ -81,10 +80,14 @@ function setProfile(name, code, argumentsText) {
   } catch (_) { /* storage can be disabled */ }
   $("code").value = code ?? draft ?? config.profiles.find((p) => p.name === name).code;
   $("arguments").value = argumentsText ?? savedArguments;
-  profilerDraft = {...config.profiler_defaults, mode: "run", sass: false};
+  profilerDraft = {...config.profiler_defaults, mode: "run"};
   try { Object.assign(profilerDraft, JSON.parse(localStorage.getItem(`${draftKey(name)}-profiling`) || "{}")); } catch (_) { /* use defaults */ }
+  // Upgrade the old default without changing any custom filters or profiler options.
+  if (profilerDraft.ncu.trim().replace(/\s+/g, " ") === "--set detailed --launch-count 1") {
+    profilerDraft.ncu = config.profiler_defaults.ncu;
+  }
+  delete profilerDraft.sass;
   setMode(profilerDraft.mode in config.profiler_defaults ? profilerDraft.mode : "run");
-  $("export-sass").checked = !!profilerDraft.sass;
   updateArguments();
   highlight(); updateCursor(); choices.sync();
 }
@@ -95,15 +98,15 @@ function setMode(mode) {
 }
 function updateProfiler() {
   $("profiling-settings").hidden = currentMode === "run";
-  $("sass-option").hidden = currentMode !== "ncu";
+  $("ncu-reports").hidden = currentMode !== "ncu";
   $("profiler-preview-text").textContent = $("profiler-arguments").value || "Default tool options · Click to edit";
   $("run").textContent = currentMode === "run" ? "▶ Run" : `▶ ${currentMode.toUpperCase()}`;
-  $("profiling-hint").textContent = currentMode === "ncu" ? "Set a kernel filter / NVTX range to skip JIT and warmup. Shared GPU; clocks are unchanged." : "CUDA / NVTX timeline collection. Text statistics are saved locally.";
+  $("profiling-hint").textContent = currentMode === "ncu" ? "Filter kernels with --kernel-name 'regex:Sm100SimpleCopyKernel'. The default regex:.* matches all names; --launch-count 1 captures the first match." : "CUDA / NVTX timeline collection. Text statistics are saved locally.";
 }
 function restoreProfiling(run) {
   const mode = run.mode || "run";
   profilerDraft[mode] = run.profiler_arguments ?? config.profiler_defaults[mode];
-  setMode(mode); $("export-sass").checked = !!run.export_sass;
+  setMode(mode);
 }
 function resetResults() {
   reportKey = ""; options($("result-view"), [["console", "Console"]]);
@@ -298,7 +301,7 @@ async function run() {
   if ($("run").disabled) return;
   await action(async () => {
     saveDraft();
-    const r = await api("/api/runs", {session:session.id, profile:currentProfile, gpu_index:Number($("gpu").value), code:$("code").value, arguments:$("arguments").value, mode:currentMode, profiler_arguments:currentMode === "run" ? "" : $("profiler-arguments").value, export_sass:currentMode === "ncu" && $("export-sass").checked});
+    const r = await api("/api/runs", {session:session.id, profile:currentProfile, gpu_index:Number($("gpu").value), code:$("code").value, arguments:$("arguments").value, mode:currentMode, profiler_arguments:currentMode === "run" ? "" : $("profiler-arguments").value});
     state.runs.unshift(r); selectedRun = r.id; cursor = 0; clearConsole(); resetResults(); badge("run-status", "queued"); renderHistory();
   });
 }
@@ -326,7 +329,6 @@ $("arguments-preview").onclick = () => openArguments();
 $("arguments-expand").onclick = () => openArguments();
 $("profiler-preview").onclick = () => openArguments("profiler-arguments");
 $("profiler-edit").onclick = () => openArguments("profiler-arguments");
-$("export-sass").onchange = saveDraft;
 $("mode").onchange = () => {
   profilerDraft[currentMode] = $("profiler-arguments").value;
   setMode($("mode").value); saveDraft();

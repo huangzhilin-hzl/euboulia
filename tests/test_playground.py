@@ -530,6 +530,12 @@ def test_http_security_and_assets(config_path: Path) -> None:
 @pytest.mark.parametrize(
     "mode,args",
     [
+        ("ncu", DEFAULT_ARGUMENTS["ncu"]),
+        (
+            "ncu",
+            "--set detailed --kernel-name-base function "
+            "--kernel-name 'regex:Sm100SimpleCopyKernel' --launch-count 1",
+        ),
         ("ncu", "--set detailed\n--kernel-name 'regex:copy|add'\n--launch-count=2 --nvtx"),
         ("nsys", "--trace=cuda,nvtx --sample none --capture-range cudaProfilerApi"),
         ("run", ""),
@@ -619,7 +625,7 @@ def test_profiling_pipeline_preserves_target_and_untruncated_text(
         id=rid,
         mode=mode,
         profiler_args=parse_arguments(DEFAULT_ARGUMENTS[mode]),
-        export_sass=mode == "ncu",
+        export_sass=False,  # Legacy requests cannot suppress the required SASS report.
         max_report_bytes=config.max_report_bytes,
     )
     worker = Worker(req)
@@ -645,12 +651,29 @@ def test_profiling_pipeline_preserves_target_and_untruncated_text(
         assert captured["cwd"] == str(worker.run_dir)
         if mode == "ncu":
             assert captured["options"][-2:] == ["--clock-control", "none"]
+            assert captured["options"][2:-2] == [
+                "--kernel-name-base",
+                "function",
+                "--kernel-name",
+                "regex:.*",
+                "--set",
+                "detailed",
+                "--launch-count",
+                "1",
+            ]
+            exports = [e["argv"] for e in events if e.get("stage") == "export"]
+            assert [argv[1:] for argv in exports] == [
+                ["--import", str(raw), "--page", "details", "--print-details", "all"],
+                ["--import", str(raw), "--page", "source", "--print-source", "sass"],
+            ]
         assert worker.truncated  # Console cap does not truncate reports.
         reports = manager.runs[rid]["reports"]
         assert set(reports) == ({"details.txt", "sass.txt"} if mode == "ncu" else {"stats.txt"})
         for name, record in reports.items():
             assert record["status"] == "ready"
             assert manager.report_path(rid, name).read_text() == "指标 " * 2000 + "\n"
+            local_text = manager.report_path(rid, name).read_bytes()
+            assert (worker.run_dir / name).read_bytes() == local_text
         assert manager.runs[rid]["execution"]["stage"] == "capture"
         assert all(c["stage"] == "export" for c in manager.runs[rid]["export_commands"])
         assert not any(e["kind"] == "report_chunk" for e in manager.events(rid, 0)["events"])
@@ -665,14 +688,14 @@ def test_profiling_pipeline_preserves_target_and_untruncated_text(
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        name = next(iter(restarted.runs[rid]["reports"]))
-        connection = HTTPConnection("127.0.0.1", server.server_port)
-        connection.request("GET", f"/api/runs/{rid}/reports/{name}")
-        response = connection.getresponse()
-        assert response.status == 200
-        assert "attachment" in response.getheader("Content-Disposition", "")
-        assert response.read().decode() == "指标 " * 2000 + "\n"
-        connection.close()
+        for name in restarted.runs[rid]["reports"]:
+            connection = HTTPConnection("127.0.0.1", server.server_port)
+            connection.request("GET", f"/api/runs/{rid}/reports/{name}")
+            response = connection.getresponse()
+            assert response.status == 200
+            assert "attachment" in response.getheader("Content-Disposition", "")
+            assert response.read().decode() == "指标 " * 2000 + "\n"
+            connection.close()
         with pytest.raises(KeyError):
             restarted.report_path(rid, "../../run.json")
     finally:
@@ -700,11 +723,17 @@ def test_profiler_missing_and_partial_reports(
         assert events[-1]["status"] == "failed"
         assert not any(e["kind"] == "report_begin" for e in events)
     else:
-        report = next(e for e in events if e["kind"] == "report_end")
-        assert report["status"] == "partial"
-        text = "".join(e["data"] for e in events if e["kind"] == "report_chunk")
-        assert len(text.encode()) <= 1024
-        assert report["truncated"] == (case == "limit")
+        reports = [e for e in events if e["kind"] == "report_end"]
+        assert {report["name"] for report in reports} == {"details.txt", "sass.txt"}
+        for report in reports:
+            assert report["status"] == "partial"
+            text = "".join(
+                e["data"]
+                for e in events
+                if e["kind"] == "report_chunk" and e["name"] == report["name"]
+            )
+            assert len(text.encode()) <= 1024
+            assert report["truncated"] == (case == "limit")
         assert events[-1]["status"] == ("succeeded" if case == "limit" else "failed")
 
 
@@ -747,9 +776,11 @@ def test_profiler_stop_allows_finalization(
             timer.join()
 
 
+@pytest.mark.parametrize("legacy_sass", [{}, {"export_sass": False}, {"export_sass": True}])
 def test_profiling_submission_uses_separate_timeout_and_persists_options(
     config_path: Path,
     monkeypatch: Any,
+    legacy_sass: dict[str, bool],
 ) -> None:
     config = load_config(config_path)
     manager = Manager(config)
@@ -772,10 +803,11 @@ def test_profiling_submission_uses_separate_timeout_and_persists_options(
             manager.submit(payload | {"mode": "nsys", "export_sass": True})
         with pytest.raises(ValueError, match="unsupported ncu"):
             manager.submit(payload | {"mode": "ncu", "profiler_arguments": "--export=x"})
-        run = manager.submit(payload | {"mode": "ncu", "export_sass": True})
+        run = manager.submit(payload | {"mode": "ncu"} | legacy_sass)
         request = calls[0][2]
         assert run["timeout_seconds"] == config.profiling_timeout
         assert run["profiler_arguments"] == DEFAULT_ARGUMENTS["ncu"]
+        assert run["export_sass"] is True
         assert request["gpu_uuid"] == "GPU-test-three"
         assert request["export_sass"] is True
         assert request["export_timeout"] == config.export_timeout

@@ -408,23 +408,20 @@ class Worker:
                         "--print-details",
                         "all",
                     ],
-                )
+                ),
+                (
+                    "sass.txt",
+                    [
+                        executable,
+                        "--import",
+                        str(report_path),
+                        "--page",
+                        "source",
+                        "--print-source",
+                        "sass",
+                    ],
+                ),
             ]
-            if r.get("export_sass"):
-                exports.append(
-                    (
-                        "sass.txt",
-                        [
-                            executable,
-                            "--import",
-                            str(report_path),
-                            "--page",
-                            "source",
-                            "--print-source",
-                            "sass",
-                        ],
-                    )
-                )
         else:
             exports = [
                 (

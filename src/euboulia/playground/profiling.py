@@ -4,7 +4,12 @@ from __future__ import annotations
 
 DEFAULT_ARGUMENTS = {
     "run": "",
-    "ncu": "--set detailed\n--launch-count 1",
+    "ncu": (
+        "--kernel-name-base function\n"
+        "--kernel-name 'regex:.*'\n"
+        "--set detailed\n"
+        "--launch-count 1"
+    ),
     "nsys": "--trace=cuda,nvtx\n--sample=none\n--cpuctxsw=none",
 }
 REPORT_NAMES = {"details.txt", "sass.txt", "stats.txt"}

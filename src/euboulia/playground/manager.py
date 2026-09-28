@@ -336,6 +336,8 @@ class Manager:
         export_sass = payload.get("export_sass", False)
         if not isinstance(export_sass, bool) or (export_sass and mode != "ncu"):
             raise ValueError("export_sass must be a boolean and is only available for ncu")
+        # Accept the legacy checkbox field, but every NCU run now retains both reports.
+        export_sass = mode == "ncu"
         timeout_limit = self.config.run_timeout if mode == "run" else self.config.profiling_timeout
         timeout = integer(
             payload.get("timeout_seconds", timeout_limit),

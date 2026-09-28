@@ -198,12 +198,22 @@ Choose **Run**, **NCU**, or **NSYS** beside the language/environment selector. T
 source, script arguments, chosen GPU UUID and venv are reused. **Profiler → Edit**
 opens a separate multiline editor; enter profiler options only (not the tool name,
 Python command or script arguments). Each environment keeps independent mode/options
-in its browser draft. History restores source, script arguments, mode, profiler
-arguments and the optional **Export SASS** setting.
+in its browser draft. History restores source, script arguments, mode and profiler
+arguments. NCU always exports both Details and SASS; no checkbox is required.
 
-NCU defaults to `--set detailed --launch-count 1`. Set a filter such as
-`--kernel-name 'regex:MyKernel'` or `--nvtx --nvtx-include 'measure/'` to select your
-kernel. Launch skip/count counts matching kernel launches, not Python warmup
+NCU provides this editable default:
+
+```text
+--kernel-name-base function
+--kernel-name 'regex:.*'
+--set detailed
+--launch-count 1
+```
+
+Replace `regex:.*` (all kernel names) with `regex:Sm100SimpleCopyKernel` or another
+kernel filter. You can also use `--nvtx --nvtx-include 'measure/'` to select a range.
+The old unmodified default is upgraded in saved browser drafts; custom options
+are preserved. Launch skip/count counts matching kernel launches, not Python warmup
 iterations. Clock control is fixed to `none` on shared GPUs. The command wraps the
 complete target argv, preserving quoted arguments. The current editor still runs
 a single Python file; profiling does not upload project dependencies.
@@ -225,8 +235,19 @@ and missing reports are reported without silently falling back to normal Run.
 Sharing GPU resources affects metrics and profiler replay affects timing; use
 normal Run for ordinary benchmark timings.
 
-After capture, NCU imports its report to produce `details.txt` and optionally
-`sass.txt`. NSYS runs `nsys stats` for kernel, CUDA API and memory-operation time
+After capture, NCU always imports its report twice:
+
+```text
+ncu --import <run-directory>/report.ncu-rep --page details --print-details all
+ncu --import <run-directory>/report.ncu-rep --page source --print-source sass
+```
+
+Their stdout is saved as `details.txt` and `sass.txt` in the Pod run directory and
+streamed to persistent local files. Separate run directories preserve earlier
+reports without overwriting them. The legacy `export_sass: false` request field
+is accepted for compatibility but no longer disables SASS export.
+
+NSYS runs `nsys stats` for kernel, CUDA API and memory-operation time
 summaries to produce `stats.txt`. Choose the text file in the **Output** selector.
 The page previews the first 256 KiB; **Expand** opens the full saved text in a
 large selectable viewer. **Copy all saved text** and **Download text**
