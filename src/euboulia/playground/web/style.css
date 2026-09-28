@@ -4,6 +4,10 @@
 @media(max-width:900px){main{grid-template-columns:210px minmax(0,1fr)}aside{padding:22px 13px}.workspace{padding:0 12px 12px}.toolbar{gap:6px}.primary kbd,#saved,.local,.console-footer span:last-child{display:none}.primary{padding:10px 12px}.editor-actions{gap:0}.gpu-control{max-width:40%}.brand-sub{font-size:13px}}
 @media(max-width:650px){header{padding:0 14px}.brand{font-size:18px;gap:10px}main{display:flex;flex-direction:column;height:auto;min-height:100vh}aside{border-right:0;border-bottom:1px solid var(--border);display:grid;grid-template-columns:1fr 1fr;gap:8px}.section-label,.history-label,.history,.aside-footer,.connect span{display:none}.session-card{display:block;grid-column:span 2;margin-top:4px}aside label{margin:0}aside label[for=node]{grid-row:1;grid-column:2}aside select{margin:0}.connect{grid-column:span 2;justify-content:center}.workspace{height:calc(100vh - 65px);min-height:660px;}.target-strip{font-size:9px}.toolbar .stop{padding:9px}.editor-actions button{font-size:10px;padding:6px}.file-tab{font-size:11px}.gpu-control{max-width:42%}}
 
+/* Scrollbar parts must not inherit the editor's text-selection cursor. */
+::-webkit-scrollbar,::-webkit-scrollbar-track,::-webkit-scrollbar-track-piece,::-webkit-scrollbar-thumb,::-webkit-scrollbar-button,::-webkit-scrollbar-corner{cursor:default}
+::-webkit-scrollbar-thumb:hover,::-webkit-scrollbar-thumb:active{cursor:default}
+
 .session-card{min-width:0;padding:14px 12px;line-height:1.45;background:linear-gradient(180deg,#181d23,#14181e)}
 .session-heading{font-size:11px;font-weight:600;color:#c1cbd8}
 .session-title{gap:8px}.session-title .badge{font-size:9px;padding:3px 6px;white-space:nowrap}
