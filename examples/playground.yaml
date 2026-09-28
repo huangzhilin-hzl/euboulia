@@ -1,0 +1,34 @@
+# Copy outside the repository, for example ~/.config/euboulia/playground.yaml.
+# Paths resolve relative to this file; kubeconfig credentials stay local.
+version: 1
+storage: ~/.local/share/euboulia/playground
+run_timeout_seconds: 120
+setup_timeout_seconds: 900
+max_output_bytes: 8388608
+clusters:
+  gpu-lab:
+    kubeconfig: ~/.kube/config
+    context: default
+    namespace: molou
+    pod_template: ./playground-pod.yaml
+    # Explicit opt-in to an existing admin-enabled shared NVIDIA runtime.
+    # This does not install/reconfigure the GPU operator or reserve exclusive GPUs.
+    gpu_access: shared-nvidia-runtime
+    python: python3
+    workdir: /workspace/molou
+    startup_timeout_seconds: 300
+    # Optional allowlist; also works without permission to list nodes.
+    # nodes: [your-gpu-node]
+profiles:
+  cutedsl:
+    label: CuTe DSL
+    system_site_packages: true
+    packages: [nvidia-cutlass-dsl]
+  tilelang:
+    label: TileLang
+    system_site_packages: true
+    packages: [tilelang]
+  python:
+    label: Python / PyTorch
+    system_site_packages: true
+    packages: []

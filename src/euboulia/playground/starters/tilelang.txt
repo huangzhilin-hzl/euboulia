@@ -1,0 +1,30 @@
+import torch
+import tilelang
+import tilelang.language as T
+
+
+@tilelang.jit(out_idx=[2])
+def vector_add(n, block=256):
+    @T.prim_func
+    def kernel(A: T.Tensor((n,), "float32"),
+               B: T.Tensor((n,), "float32"),
+               C: T.Tensor((n,), "float32")):
+        with T.Kernel(T.ceildiv(n, block), threads=128) as bx:
+            for i in T.Parallel(block):
+                index = bx * block + i
+                if index < n:
+                    C[index] = A[index] + B[index]
+    return kernel
+
+
+n = 1 << 20
+print("Device:", torch.cuda.get_device_name(0))
+print("TileLang:", tilelang.__version__)
+a = torch.randn(n, device="cuda", dtype=torch.float32)
+b = torch.randn_like(a)
+kernel = vector_add(n)
+c = kernel(a, b)
+torch.cuda.synchronize()
+torch.testing.assert_close(c, a + b)
+print(f"PASS · TileLang vector addition · {n:,} elements")
+print("Output:", c[:8].tolist())

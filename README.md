@@ -105,6 +105,12 @@ records remain under `<storage.root>`.
 
 ## Documentation
 
+For interactive CuTe DSL, TileLang, and Python kernels, configure the separate local
+GPU playground and start `uv run euboulia playground --open`. Select a cluster, node,
+and physical GPU index, edit Python, and stream real output from a dedicated shared
+GPU Pod. See the [GPU playground guide](docs/playground.md) for configuration,
+environment reuse, and Pod lifecycle details.
+
 - [Optimization guide](docs/optimization.md): recipes, execution, evaluation, and
   experiment memory.
 - [Architecture](docs/architecture.md): system boundaries and feedback loops.
