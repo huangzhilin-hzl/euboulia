@@ -197,7 +197,16 @@ function controls() {
 }
 function renderSession() {
   badge("session-status", session?.status || "Disconnected");
-  $("pod-name").textContent = session ? `${session.namespace} / ${session.pod}${session.error ? "\n" + session.error : ""}` : "A dedicated molou pod will be created on your selected node.";
+  $("session-details").hidden = !session; $("session-empty").hidden = !!session;
+  $("pod-namespace").textContent = session?.namespace || "";
+  const podName = session?.pod || "";
+  if ($("pod-name").textContent !== podName) {
+    const split = podName.lastIndexOf("-") + 1;
+    $("pod-name").replaceChildren(podName.slice(0, split), document.createElement("wbr"), podName.slice(split));
+    $("pod-name").title = podName;
+  }
+  $("session-error").hidden = !session?.error;
+  $("session-error").textContent = session?.error || "";
   $("target-info").textContent = session ? `${session.cluster} / ${nodeLabel(session.cluster, session.node)}` : "Select your cluster and node to get started";
   const old = $("gpu").value, gpus = session?.gpus || [];
   const desired = gpus.map((g) => [String(g.index), `GPU ${g.index} · ${g.name}`]);
@@ -359,10 +368,11 @@ for (const viewer of document.querySelectorAll(".report-viewer")) {
   });
 }
 for (const button of [$("report-copy"), $("copy-report")]) {
-  const label = button.textContent, accessibleLabel = button.getAttribute("aria-label"), title = button.title;
+  const labelElement = button.querySelector(".copy-label"), label = labelElement.textContent;
+  const accessibleLabel = button.getAttribute("aria-label"), title = button.title;
   let feedbackTimer, copying = false;
   function feedback(status, text) {
-    button.dataset.copyState = status; button.textContent = text;
+    button.dataset.copyState = status; labelElement.textContent = text;
     button.setAttribute("aria-label", text);
   }
   button.setAttribute("aria-live", "polite");
@@ -374,22 +384,22 @@ for (const button of [$("report-copy"), $("copy-report")]) {
     copying = true;
     clearTimeout(feedbackTimer);
     button.disabled = true; button.setAttribute("aria-busy", "true");
-    feedback("copying", "复制中…");
+    feedback("copying", "Copying…");
     try {
       const response = await fetch(`/api/runs/${rid}/reports/${name}`);
       if (!response.ok) throw new Error("Could not read saved report");
       const text = await response.text();
       try { await navigator.clipboard.writeText(text); }
       catch (_) { throw new Error("Clipboard is unavailable. Select text to copy, or download the report."); }
-      feedback("copied", "✓ 已复制");
+      feedback("copied", "Copied");
     } catch (e) {
-      feedback("failed", "复制失败"); button.title = e.message;
+      feedback("failed", "Copy failed"); button.title = e.message;
       error(e.message);
     } finally {
       copying = false;
       button.disabled = false; button.removeAttribute("aria-busy");
       feedbackTimer = setTimeout(() => {
-        button.textContent = label; delete button.dataset.copyState; button.title = title;
+        labelElement.textContent = label; delete button.dataset.copyState; button.title = title;
         if (accessibleLabel === null) button.removeAttribute("aria-label");
         else button.setAttribute("aria-label", accessibleLabel);
       }, button.dataset.copyState === "failed" ? 4000 : 2000);
