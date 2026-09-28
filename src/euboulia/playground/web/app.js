@@ -1,5 +1,7 @@
 "use strict";
 const $ = (id) => document.getElementById(id);
+const choices = window.PlaygroundChoices;
+choices.init();
 const activeStates = new Set(["queued", "verifying_gpu", "preparing_environment", "running", "cancelling", "profiling", "exporting", "finalizing"]);
 let config, session = null, selectedRun = null, cursor = 0, state = {sessions: [], runs: []};
 let currentProfile = "", polling = false, busy = false, historyKey = "", outputSize = 0, nodeRequest = 0;
@@ -24,6 +26,7 @@ async function action(fn) {
 }
 function options(select, values) {
   select.replaceChildren(...values.map(([value, label]) => new Option(label, value)));
+  choices.sync();
 }
 function draftKey(profile) { return `molou-playground-draft-${profile}`; }
 function argumentLines(text) {
@@ -83,12 +86,12 @@ function setProfile(name, code, argumentsText) {
   setMode(profilerDraft.mode in config.profiler_defaults ? profilerDraft.mode : "run");
   $("export-sass").checked = !!profilerDraft.sass;
   updateArguments();
-  highlight(); updateCursor();
+  highlight(); updateCursor(); choices.sync();
 }
 function setMode(mode) {
   currentMode = mode; $("mode").value = mode;
   $("profiler-arguments").value = profilerDraft[mode] ?? config.profiler_defaults[mode];
-  updateProfiler();
+  updateProfiler(); choices.sync();
 }
 function updateProfiler() {
   $("profiling-settings").hidden = currentMode === "run";
@@ -130,11 +133,12 @@ async function showResult() {
 }
 async function updateResults(run) {
   const previous = $("result-view").value;
-  const choices = [["console", "Console"], ...Object.keys(run.reports || {}).map(n => [n,n])];
-  if (JSON.stringify([...$("result-view").options].map(o => o.value)) !== JSON.stringify(choices.map(c => c[0]))) {
-    options($("result-view"), choices);
-    if (choices.some(c => c[0] === previous)) $("result-view").value = previous;
+  const views = [["console", "Console"], ...Object.keys(run.reports || {}).map(n => [n, {"details.txt":"NCU Details", "sass.txt":"SASS", "stats.txt":"NSYS Stats"}[n] || n])];
+  if (JSON.stringify([...$("result-view").options].map(o => o.value)) !== JSON.stringify(views.map(c => c[0]))) {
+    options($("result-view"), views);
+    if (views.some(c => c[0] === previous)) $("result-view").value = previous;
   }
+  choices.sync();
   const raw = run.profiling?.remote_reports || [];
   $("raw-report-details").hidden = !raw.length;
   $("raw-reports").textContent = `Raw report · Pod only · deleted when Pod is released\n${raw.join("\n")}\nCollection: ${run.profiling?.collection_status} · Text export: ${run.profiling?.export_status}`;
@@ -186,6 +190,7 @@ function controls() {
   $("release").disabled = busy || !session || !!running || ["starting", "releasing", "released"].includes(session.status);
   $("refresh").disabled = busy || !ready;
   $("gpu").disabled = busy || !ready || !!running;
+  choices.sync();
 }
 function renderSession() {
   badge("session-status", session?.status || "Disconnected");
@@ -369,7 +374,7 @@ document.addEventListener("keydown", e => {
   if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
     e.preventDefault();
     if ($("arguments-dialog").open) applyArguments();
-    else if (!$("report-dialog").open) run();
+    else if (!$("report-dialog").open && !choices.isOpen()) run();
   }
 });
 $("run").onclick = run;
