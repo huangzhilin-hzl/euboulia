@@ -311,7 +311,7 @@ def test_worker_inherits_image_venv_and_dsl_pth(tmp_path: Path, monkeypatch: Any
     )
     worker_path = Path(__file__).parents[1] / "src/euboulia/playground/worker.py"
     result = subprocess.run(
-        [python, str(worker_path)],
+        [python, "-u", "-c", worker_path.read_text()],
         input=json.dumps(request),
         capture_output=True,
         text=True,
@@ -319,7 +319,7 @@ def test_worker_inherits_image_venv_and_dsl_pth(tmp_path: Path, monkeypatch: Any
         check=True,
     )
     events = [json.loads(line) for line in result.stdout.splitlines()]
-    assert events[-1]["status"] == "succeeded"
+    assert events[-1]["status"] == "succeeded", events
     assert "image dependency nested DSL" in "".join(e.get("data", "") for e in events)
 
 
