@@ -10,7 +10,11 @@
 
 .history-label{justify-content:flex-start;align-items:center;gap:8px}
 #run-count{display:inline-flex;align-items:center;justify-content:center;min-width:22px;height:18px;padding:0 5px;border:1px solid #303844;border-radius:5px;background:#1a2028;color:#8795a8;font:10px/1 var(--mono);letter-spacing:0}
-.history{scrollbar-gutter:stable;padding-right:7px}
+.history{scrollbar-gutter:stable;padding-right:7px;min-height:128px}
+.history .run-meta{display:grid;gap:4px;line-height:1.5}
+.history .run-created{color:#a4b1c3;white-space:nowrap}
+.history .run-meta-summary{display:flex;flex-wrap:wrap;gap:2px 6px}
+.history .run-age{color:#8999ae}
 .history::-webkit-scrollbar{width:11px}
 .history::-webkit-scrollbar-track{background:transparent}
 .history::-webkit-scrollbar-thumb{background:#29313b;border:3px solid transparent;background-clip:padding-box;border-radius:6px;min-height:28px}

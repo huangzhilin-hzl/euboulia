@@ -250,9 +250,28 @@ function historyCommand(run) {
     detail: `Working directory: ${execution.cwd}\nCUDA_VISIBLE_DEVICES=${shellQuote(execution.env.CUDA_VISIBLE_DEVICES)}\nCommand (inside Pod): ${execution.argv.map(shellQuote).join(" ")}`,
   };
 }
+function historyDate(createdAt) {
+  const date = new Date(createdAt * 1000), pad = n => String(n).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+const relativeTime = new Intl.RelativeTimeFormat("en", {numeric: "always"});
+function historyAge(createdAt, now = Date.now()) {
+  const elapsed = (now - createdAt * 1000) / 1000, seconds = Math.abs(elapsed);
+  if (seconds < 60) return "Just now";
+  const [unit, size] = seconds < 3600 ? ["minute", 60] : seconds < 86400 ? ["hour", 3600] : ["day", 86400];
+  return relativeTime.format((elapsed < 0 ? 1 : -1) * Math.floor(seconds / size), unit);
+}
+function updateHistoryTimes() {
+  const now = Date.now();
+  // Update only the age labels, preserving list scroll, selection and keyboard focus.
+  for (const age of $("history").querySelectorAll(".run-age")) {
+    const text = historyAge(Number(age.dataset.createdAt), now);
+    if (age.textContent !== text) age.textContent = text;
+  }
+}
 function renderHistory() {
   $("run-count").textContent = state.runs.length;
-  const key = JSON.stringify(state.runs.map(r => [r.id,r.status,r.node_ip,r.args,r.execution])) + selectedRun;
+  const key = JSON.stringify(state.runs.map(r => [r.id,r.status,r.created_at,r.node_ip,r.args,r.execution])) + selectedRun;
   if (key === historyKey) return;
   historyKey = key;
   if (!state.runs.length) return;
@@ -261,8 +280,15 @@ function renderHistory() {
     const title = document.createElement("span"); title.className = "run-title";
     const name = document.createElement("span"); name.textContent = `${(r.mode || "run").toUpperCase()} · ${r.profile} · GPU ${r.gpu_index}`;
     const status = document.createElement("span"); status.className = "status-dot"; status.textContent = r.status === "succeeded" ? "✓" : r.status === "failed" ? "×" : "·";
-    title.append(name,status); const detail = document.createElement("small");
-    detail.textContent = `${new Date(r.created_at * 1000).toLocaleTimeString()} · ${r.status.replaceAll("_", " ")}`;
+    title.append(name,status); const detail = document.createElement("small"); detail.className = "run-meta";
+    const created = document.createElement("time"), date = new Date(r.created_at * 1000);
+    created.className = "run-created"; created.dateTime = date.toISOString();
+    created.textContent = historyDate(r.created_at); created.title = date.toString();
+    const summary = document.createElement("span"); summary.className = "run-meta-summary";
+    const age = document.createElement("span"); age.className = "run-age";
+    age.dataset.createdAt = String(r.created_at); age.textContent = historyAge(r.created_at);
+    const outcome = document.createElement("span"); outcome.textContent = `· ${r.status.replaceAll("_", " ")}`;
+    summary.append(age,outcome); detail.append(created,summary);
     const target = document.createElement("span"); target.className = "run-target";
     target.textContent = `Node ${r.node_ip || nodeLabel(r.cluster, r.node)}`;
     const command = document.createElement("code"); command.className = "run-command";
@@ -535,7 +561,7 @@ async function init() {
     options($("profile"),config.profiles.map(p => [p.name,p.label]));
     setProfile(config.profiles[0].name);
     state = await api("/api/state"); renderHistory();
-    await action(loadNodes); setInterval(poll,800);
+    await action(loadNodes); setInterval(poll,800); setInterval(updateHistoryTimes,15000);
   } catch (e) { error(e.message); }
 }
 init();
