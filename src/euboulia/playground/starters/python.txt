@@ -1,0 +1,21 @@
+import os
+import torch
+
+print("Selected GPU:", os.environ["CUDA_VISIBLE_DEVICES"])
+print("Device:", torch.cuda.get_device_name(0))
+print("PyTorch:", torch.__version__)
+
+n = 1 << 20
+a = torch.randn(n, device="cuda", dtype=torch.float32)
+b = torch.randn_like(a)
+start, end = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+for _ in range(5):
+    c = a + b
+start.record()
+for _ in range(100):
+    c = a + b
+end.record()
+torch.cuda.synchronize()
+torch.testing.assert_close(c, a + b)
+print(f"PASS · {n:,} elements · {start.elapsed_time(end) * 1000 / 100:.2f} us/run")
+print("Output:", c[:8].tolist())

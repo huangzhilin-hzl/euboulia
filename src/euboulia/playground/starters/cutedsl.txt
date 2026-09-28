@@ -1,0 +1,33 @@
+import torch
+import cutlass
+import cutlass.cute as cute
+from cutlass.cute.runtime import from_dlpack
+
+
+@cute.kernel
+def vector_add(a: cute.Tensor, b: cute.Tensor, c: cute.Tensor, n: cutlass.Int32):
+    tid = cute.arch.thread_idx()[0]
+    bid = cute.arch.block_idx()[0]
+    i = bid * 256 + tid
+    if i < n:
+        c[i] = a[i] + b[i]
+
+
+@cute.jit
+def launch(a: cute.Tensor, b: cute.Tensor, c: cute.Tensor, n: cutlass.Int32):
+    vector_add(a, b, c, n).launch(grid=(cute.ceil_div(n, 256), 1, 1), block=(256, 1, 1))
+
+
+n = 1 << 20
+print("Device:", torch.cuda.get_device_name(0))
+a = torch.randn(n, device="cuda", dtype=torch.float32)
+b = torch.randn_like(a)
+c = torch.empty_like(a)
+views = [from_dlpack(t) for t in (a, b, c)]
+compiled = cute.compile(launch, *views, n)
+torch.cuda.synchronize()
+compiled(*views, n)
+torch.cuda.synchronize()
+torch.testing.assert_close(c, a + b)
+print(f"PASS · CuTe DSL vector addition · {n:,} elements")
+print("Output:", c[:8].tolist())

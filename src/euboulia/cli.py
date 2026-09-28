@@ -34,6 +34,7 @@ from euboulia.optimization.profiling import ProfileCaptureError
 from euboulia.optimization.runner import OptimizationRunner, OptimizationRuntimeError
 from euboulia.optimization.target import TargetError
 from euboulia.optimization.workspace import WorkspaceError
+from euboulia.playground.kubernetes import PlaygroundError
 from euboulia.progress import write_run_progress
 from euboulia.recipe import (
     ConfigError,
@@ -126,6 +127,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     serve_parser.add_argument("--open", action="store_true", help="open the console in a browser")
     serve_parser.set_defaults(handler=_serve)
+
+    playground_parser = subparsers.add_parser(
+        "playground", help="open a local GPU kernel editor with shared Kubernetes execution"
+    )
+    playground_parser.add_argument(
+        "--config", type=Path, help="local config (default: ~/.config/euboulia/playground.yaml)"
+    )
+    playground_parser.add_argument("--port", type=int, default=8766)
+    playground_parser.add_argument("--open", action="store_true", help="open in a browser")
+    playground_parser.set_defaults(handler=_playground)
 
     optimize_parser = subparsers.add_parser(
         "optimize", help="run the schema-v2 iterative optimization pipeline"
@@ -414,6 +425,13 @@ def _serve(args: argparse.Namespace) -> int:
         max_parallel=args.max_parallel,
         open_browser=args.open,
     )
+    return 0
+
+
+def _playground(args: argparse.Namespace) -> int:
+    from euboulia.playground.server import serve
+
+    serve(config_path=args.config, port=args.port, open_browser=args.open)
     return 0
 
 
@@ -916,6 +934,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     except (
         AdapterError,
         ControlError,
+        PlaygroundError,
         RecipeSafetyError,
         RemoteExecutionError,
         ConfigError,
