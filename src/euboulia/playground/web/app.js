@@ -360,15 +360,18 @@ for (const viewer of document.querySelectorAll(".report-viewer")) {
 }
 for (const button of [$("report-copy"), $("copy-report")]) {
   const label = button.textContent, accessibleLabel = button.getAttribute("aria-label"), title = button.title;
-  let feedbackTimer;
+  let feedbackTimer, copying = false;
   function feedback(status, text) {
     button.dataset.copyState = status; button.textContent = text;
     button.setAttribute("aria-label", text);
   }
   button.setAttribute("aria-live", "polite");
-  button.onclick = () => action(async () => {
+  // Clipboard feedback is local to this button; it must not flash all run controls.
+  button.onclick = async () => {
+    if (copying) return;
     const rid = selectedRun, name = $("result-view").value;
     if (!rid || name === "console") return;
+    copying = true;
     clearTimeout(feedbackTimer);
     button.disabled = true; button.setAttribute("aria-busy", "true");
     feedback("copying", "复制中…");
@@ -381,8 +384,9 @@ for (const button of [$("report-copy"), $("copy-report")]) {
       feedback("copied", "✓ 已复制");
     } catch (e) {
       feedback("failed", "复制失败"); button.title = e.message;
-      throw e;
+      error(e.message);
     } finally {
+      copying = false;
       button.disabled = false; button.removeAttribute("aria-busy");
       feedbackTimer = setTimeout(() => {
         button.textContent = label; delete button.dataset.copyState; button.title = title;
@@ -390,7 +394,7 @@ for (const button of [$("report-copy"), $("copy-report")]) {
         else button.setAttribute("aria-label", accessibleLabel);
       }, button.dataset.copyState === "failed" ? 4000 : 2000);
     }
-  });
+  };
 }
 $("arguments-expanded").addEventListener("input", updateArgumentsEditor);
 $("arguments-apply").onclick = applyArguments;

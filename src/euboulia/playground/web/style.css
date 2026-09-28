@@ -37,6 +37,7 @@
 .report-actions .subtle:hover{background:#2b3440;color:#e1e6ed;filter:none}.report-actions button:disabled{cursor:not-allowed}.report-actions a:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 #report-copy{min-width:158px}#copy-report{min-width:76px}
 #report-copy,#copy-report{transition:background-color .15s,border-color .15s,color .15s}
+#report-copy[data-copy-state=copying],#copy-report[data-copy-state=copying]{opacity:1;cursor:progress;filter:none}
 #report-copy[data-copy-state=copied],#copy-report[data-copy-state=copied]{background:#26391e;border-color:#628845;color:#c0ef97;filter:none}
 #report-copy[data-copy-state=failed],#copy-report[data-copy-state=failed]{background:#37282b;border-color:#865454;color:#f0bbbb;filter:none}
 #report-text{margin:0;flex:1;min-height:70px;overflow:auto;padding:14px 18px;font:12px/1.7 var(--mono);white-space:pre;tab-size:4}
