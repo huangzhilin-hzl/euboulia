@@ -393,6 +393,93 @@ $("download").onclick = () => {
   const url = URL.createObjectURL(new Blob([$("code").value], {type:"text/x-python"}));
   const a = document.createElement("a"); a.href = url; a.download = "solution.py"; a.click(); setTimeout(() => URL.revokeObjectURL(url),1000);
 };
+function initPanelLayout() {
+  const workbench = $("workbench"), resizer = $("panel-resizer"), expand = $("expand-editor");
+  const storageKey = "molou-playground-editor-share", defaultShare = 0.7;
+  let share = defaultShare, drag = null;
+  try {
+    const saved = Number(localStorage.getItem(storageKey));
+    if (saved > 0 && saved < 1) share = saved;
+  } catch (_) { /* resizing works without storage */ }
+  const bounds = () => {
+    const total = workbench.clientHeight - resizer.offsetHeight;
+    return {total, min: 320, max: Math.max(320, total - 180)};
+  };
+  function updateAria() {
+    if (workbench.classList.contains("editor-expanded")) return;
+    const {total, min, max} = bounds();
+    if (!total) return;
+    const percent = Math.round($("editor-panel").offsetHeight / total * 100);
+    $("output-panel").classList.toggle("compact-output", $("output-panel").clientHeight < 260);
+    resizer.setAttribute("aria-valuemin", String(Math.ceil(min / total * 100)));
+    resizer.setAttribute("aria-valuemax", String(Math.floor(max / total * 100)));
+    resizer.setAttribute("aria-valuenow", String(percent));
+    resizer.setAttribute("aria-valuetext", `Code editor ${percent} percent`);
+  }
+  function applyShare() {
+    workbench.style.setProperty("--editor-share", `${share}fr`);
+    workbench.style.setProperty("--output-share", `${1 - share}fr`);
+    updateAria();
+  }
+  function resize(height) {
+    const {total, min, max} = bounds();
+    if (total <= 0) return;
+    share = Math.max(min, Math.min(max, height)) / total;
+    applyShare();
+  }
+  function save() {
+    try { localStorage.setItem(storageKey, String(share)); } catch (_) { /* optional preference */ }
+  }
+  function finishDrag(cancel = false) {
+    if (!drag) return;
+    const previous = drag;
+    drag = null;
+    if (cancel) { share = previous.share; applyShare(); }
+    else save();
+    document.body.classList.remove("resizing-panels");
+    if (resizer.hasPointerCapture(previous.id)) resizer.releasePointerCapture(previous.id);
+  }
+  resizer.onpointerdown = e => {
+    if (e.button !== 0 || drag) return;
+    e.preventDefault(); resizer.focus({preventScroll:true});
+    drag = {id:e.pointerId, y:e.clientY, height:$("editor-panel").offsetHeight, share};
+    resizer.setPointerCapture(e.pointerId);
+    document.body.classList.add("resizing-panels");
+  };
+  resizer.onpointermove = e => {
+    if (drag?.id === e.pointerId) resize(drag.height + e.clientY - drag.y);
+  };
+  resizer.onpointerup = e => { if (drag?.id === e.pointerId) finishDrag(); };
+  resizer.onpointercancel = e => { if (drag?.id === e.pointerId) finishDrag(true); };
+  resizer.onlostpointercapture = () => finishDrag();
+  resizer.ondblclick = () => { share = defaultShare; applyShare(); save(); };
+  resizer.onkeydown = e => {
+    const step = e.shiftKey ? 80 : 24, height = $("editor-panel").offsetHeight;
+    if (e.key === "ArrowUp") resize(height - step);
+    else if (e.key === "ArrowDown") resize(height + step);
+    else if (e.key === "Home") resize(bounds().min);
+    else if (e.key === "End") resize(bounds().max);
+    else return;
+    e.preventDefault(); save();
+  };
+  function setExpanded(expanded) {
+    workbench.classList.toggle("editor-expanded", expanded);
+    expand.textContent = expanded ? "Restore" : "Expand";
+    expand.setAttribute("aria-pressed", String(expanded));
+    expand.setAttribute("aria-label", expanded ? "Restore code editor size" : "Expand code editor");
+    expand.title = expanded ? "Restore code editor size · Esc" : "Expand code editor";
+    updateAria();
+  }
+  expand.onclick = () => setExpanded(!workbench.classList.contains("editor-expanded"));
+  document.addEventListener("keydown", e => {
+    if (e.key !== "Escape" || e.defaultPrevented) return;
+    if (drag) finishDrag(true);
+    else if (!document.querySelector("dialog[open]") && !choices.isOpen()) setExpanded(false);
+  });
+  new ResizeObserver(updateAria).observe(workbench);
+  applyShare();
+}
+initPanelLayout();
 async function init() {
   try {
     config = await api("/api/config");
