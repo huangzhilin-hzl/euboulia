@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Molou · GPU Playground</title><link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header><a class="brand" href="/" aria-label="Molou playground"><span class="mark">m</span> molou<span class="slash">/</span><span class="brand-sub">GPU Playground</span></a><span class="local"><i></i> LOCAL WORKSPACE</span></header>
+  <div id="error" role="alert" hidden></div>
+  <main>
+    <aside>
+      <div class="section-label">EXECUTION TARGET</div>
+      <label for="cluster">Cluster</label><select id="cluster" aria-label="Cluster"></select>
+      <label for="node">Node</label><select id="node" aria-label="Node"><option>Select a cluster</option></select>
+      <button id="connect" class="connect">Connect GPU pod <span>↗</span></button>
+      <div class="session-card"><div class="session-title"><span id="session-status" class="badge">Disconnected</span><button id="refresh" class="icon-button" title="Refresh GPU inventory" aria-label="Refresh GPU inventory">↻</button></div><p id="pod-name">A dedicated molou pod will be created on your selected node.</p><p class="muted">Shared GPU · persistent environments</p><button id="release" class="subtle" disabled>Release pod</button></div>
+      <div class="section-label history-label">RUN HISTORY <span id="run-count">0</span></div>
+      <div id="history" class="history"><p class="muted">Your runs will appear here.</p></div>
+      <div class="aside-footer">CuTe DSL · TileLang · Python<br><span>Code runs on your cluster.</span></div>
+    </aside>
+    <section class="workspace">
+      <div class="toolbar"><div class="gpu-control"><svg class="gpu-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true" focusable="false"><rect x="5" y="5" width="14" height="14" rx="2"/><rect x="9" y="9" width="6" height="6" rx="1"/><path d="M9 2v3m6-3v3M9 19v3m6-3v3M2 9h3m-3 6h3m14-6h3m-3 6h3"/></svg><select id="gpu" aria-label="GPU index" disabled><option>Connect to select GPU</option></select></div><select id="profile" aria-label="Language and environment"></select><div class="toolbar-spacer"></div><button id="stop" class="stop" disabled>■ Stop</button><button id="run" class="primary" disabled>▶ Run <kbd>⌘ ↵</kbd></button></div>
+      <div class="target-strip"><span id="target-info">Select your cluster and node to get started</span><span id="gpu-info"></span></div>
+      <section class="editor-panel" aria-label="Code editor"><div class="panel-header"><span class="file-tab"><span class="python-icon">◇</span> solution.py <span class="draft-dot"></span></span><div class="editor-actions"><span id="saved">Local draft</span><button id="import" class="subtle">Import</button><input id="file" type="file" accept=".py,.txt" hidden><button id="download" class="subtle">Download</button><button id="reset" class="subtle">Reset example</button></div></div><div class="run-arguments">
+        <span class="arguments-label">Arguments</span>
+        <input id="arguments" type="hidden">
+        <button id="arguments-preview" class="arguments-preview" type="button" aria-label="Edit script arguments" aria-haspopup="dialog" aria-controls="arguments-dialog" title="Click to edit all arguments"><code id="arguments-preview-text">No arguments · Click to edit</code></button>
+        <div class="arguments-actions"><button id="arguments-expand" class="subtle" type="button" aria-haspopup="dialog" aria-controls="arguments-dialog">Edit</button><span id="arguments-count">0 lines</span></div>
+      </div><div class="editor"><pre id="line-numbers" aria-hidden="true">1</pre><div class="code-area"><pre id="highlight" aria-hidden="true"><code></code></pre><textarea id="code" aria-label="Python source code" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off" wrap="off"></textarea></div></div><div class="editor-footer"><span id="cursor">Ln 1, Col 1</span><span>Python <span class="divider">|</span> UTF-8 <span class="divider">|</span> Tab: 4 spaces</span></div></section>
+      <section class="console-panel" aria-label="Console output"><div class="panel-header"><div><span class="console-icon">›_</span> Console Output <span id="run-status" class="badge">Ready</span></div><div><label class="follow"><input id="autoscroll" type="checkbox" checked> Follow</label><button id="clear" class="subtle">Clear</button></div></div><div id="console" role="log" aria-live="polite" aria-label="Console Output"><div class="console-empty"><span>›_</span><p>Ready when you are.</p><small>Run your code to see live stdout, stderr and build output.</small></div></div><div class="console-footer"><span id="run-detail">No active run</span><span>Shared GPUs may affect timings</span></div></section>
+    </section>
+  </main>
+  <dialog id="arguments-dialog" aria-labelledby="arguments-title" aria-describedby="arguments-help">
+    <div class="arguments-dialog-header"><h2 id="arguments-title">Edit script arguments</h2><button id="arguments-close" class="icon-button" type="button" aria-label="Cancel and close arguments editor">×</button></div>
+    <p id="arguments-help">One option per line, or paste backslash continuations. Quote values containing spaces.</p>
+    <textarea id="arguments-expanded" rows="20" aria-label="Expanded script arguments" aria-describedby="arguments-help" maxlength="8192" spellcheck="false" autocomplete="off" autocapitalize="off" placeholder="--batch_size 8192&#10;--seq_len_k 2048&#10;--skip_ref_check"></textarea>
+    <div class="arguments-dialog-footer"><div class="arguments-editor-meta"><span id="arguments-editor-count">0 lines</span><span>Esc to cancel · ⌘ / Ctrl + Enter to apply</span></div><div class="arguments-dialog-actions"><button id="arguments-cancel" type="button">Cancel</button><button id="arguments-apply" class="primary" type="button">Apply changes</button></div></div>
+  </dialog>
+  <script src="/app.js"></script>
+</body>
+</html>

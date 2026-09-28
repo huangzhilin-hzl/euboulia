@@ -1,0 +1,22 @@
+# Use a CUDA development image with Python >=3.10, venv, pip and CUDA-enabled PyTorch.
+# Replace the image and runtimeClassName with values valid in your cluster.
+apiVersion: v1
+kind: Pod
+metadata: {}
+spec:
+  runtimeClassName: nvidia
+  terminationGracePeriodSeconds: 5
+  containers:
+    - name: workspace
+      image: your-registry/cuda-pytorch-devel:your-pinned-tag
+      resources:
+        requests: {cpu: "1", memory: 128Gi}
+        limits: {cpu: "8", memory: 128Gi}
+      volumeMounts:
+        - {name: workspace, mountPath: /workspace}
+        - {name: shm, mountPath: /dev/shm}
+  volumes:
+    - name: workspace
+      emptyDir: {}
+    - name: shm
+      emptyDir: {medium: Memory, sizeLimit: 2Gi}
