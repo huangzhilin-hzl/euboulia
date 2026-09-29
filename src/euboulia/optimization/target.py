@@ -42,6 +42,7 @@ _SGLANG_MODULES: Final[frozenset[str]] = frozenset(
     {
         "sglang.launch_server",
         "sglang.srt.entrypoints.http_server",
+        "euboulia.profilers.sglang_launcher",
     }
 )
 _MAX_BUILD_COMMANDS: Final[int] = 32

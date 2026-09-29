@@ -1252,3 +1252,38 @@ def test_tar_extraction_rejects_paths_outside_snapshot(tmp_path: Path) -> None:
         remote._extract_safe_tar(buffer, tmp_path / "snapshot")
 
     assert not (tmp_path / "outside.txt").exists()
+
+
+@pytest.mark.parametrize(
+    "policy,override,retained",
+    [
+        ("on_demand", None, False),
+        ("always", None, True),
+        ("on_demand", True, True),
+    ],
+)
+def test_raw_profile_sync_policy_covers_collection_windows(
+    tmp_path, monkeypatch, policy, override, retained
+):
+    supervisor = remote.KubernetesTargetSupervisor(
+        _executor(tmp_path),
+        remote.LocalStorageConfig(
+            root=tmp_path / "results", sync=remote.ArtifactSyncPolicy(policy)
+        ),
+    )
+    source = tmp_path / "worker"
+    for relative in [
+        "target-validation/profile",
+        "target-validation/profile-captures/point/window-2/profile",
+    ]:
+        folder = source / relative
+        (folder / "raw").mkdir(parents=True)
+        (folder / "raw" / "rank-0.trace.json.gz").write_bytes(b"test raw")
+        (folder / "summary.json").write_text("{}")
+    # Exercise the actual tar filters without macOS AppleDouble sidecar records.
+    monkeypatch.setenv("COPYFILE_DISABLE", "1")
+    monkeypatch.setattr(supervisor, "_kubectl_exec_prefix", lambda: ())
+    destination = tmp_path / "snapshot"
+    supervisor._pull_artifacts(PurePosixPath(source), destination, include_raw_profiles=override)
+    assert len(list(destination.rglob("summary.json"))) == 2
+    assert len(list(destination.rglob("*.trace.json.gz"))) == (2 if retained else 0)

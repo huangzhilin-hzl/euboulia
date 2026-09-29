@@ -1679,6 +1679,8 @@ print(digest.hexdigest())
                 (
                     "--exclude=./target-validation/profile/raw",
                     "--exclude=./target-validation/profile/raw/*",
+                    "--exclude=*/profile/raw",
+                    "--exclude=*/profile/raw/*",
                 )
             )
         tar_argv.extend(("-C", str(remote_run_dir), "-cf", "-", "."))

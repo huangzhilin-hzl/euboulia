@@ -997,3 +997,87 @@ def test_baseline_stop_failure_prevents_candidate_start(tmp_path: Path) -> None:
     assert set(controller.handles) == {"profile", "baseline"}
     candidate_root = workspace.root_dir / "baseline-stop-failure/iteration-001/candidate"
     assert not candidate_root.exists()
+
+
+def test_profile_collection_keeps_windows_separate_and_records_actual_load(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from euboulia.optimization import runner as runner_module
+    from euboulia.optimization.contracts import StageContext
+
+    config = _managed_project(tmp_path)
+    first = config.workload_suite.points[0]
+    second = replace(first, name="second-point", input_tokens=2048)
+    policy = replace(
+        config.optimization.profiling,
+        workload_points=(second.name,),
+        repetitions=2,
+        request_waves=3,
+        keep_raw=True,
+        warmup_runs=0,
+    )
+    config = replace(
+        config,
+        workload_suite=replace(config.workload_suite, points=(first, second)),
+        optimization=replace(config.optimization, profiling=policy),
+    )
+    context = StageContext(
+        run_uid="run",
+        iteration_id="profile-test",
+        artifact_dir=tmp_path / "capture",
+        authorizations=_ALL_MANAGED_CAPABILITIES,
+        input_digest="recipe-digest",
+    )
+    handle = SimpleNamespace(
+        endpoint="http://127.0.0.1:30000",
+        manifest_path=tmp_path / "service.json",
+        pid=123,
+        stdout_path=tmp_path / "stdout",
+        stderr_path=tmp_path / "stderr",
+        trial_id="profile-test",
+    )
+    recorded = []
+
+    def workload(command, workspace, artifact_dir, name):
+        recorded.append(command.env_overrides)
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        stdout, stderr = artifact_dir / "stdout", artifact_dir / "stderr"
+        stdout.write_text("")
+        stderr.write_text("")
+        return ExecutionResult(
+            command_id=name,
+            argv=command.argv,
+            cwd=workspace,
+            returncode=0,
+            started_at="2026-01-01T00:00:00Z",
+            finished_at="2026-01-01T00:00:01Z",
+            duration_seconds=1,
+            stdout_path=stdout,
+            stderr_path=stderr,
+            environment_keys=(),
+        )
+
+    monkeypatch.setattr(runner_module, "_run_profile_command", workload)
+    runner = OptimizationRunner(profiler=_FakeProfiler(policy))
+    _, result = runner._capture_running_service_profile(
+        config, context, tmp_path, handle, role="baseline", candidate_id="baseline"
+    )
+    manifests = sorted(context.artifact_dir.rglob("manifest.json"))
+    assert len(manifests) == 4
+    contents = [json.loads(p.read_text()) for p in manifests]
+    assert Counter(m["workload_point"] for m in contents) == {first.name: 2, second.name: 2}
+    assert all(
+        m["workload"]["num_prompts"] == max(first.num_prompts, first.concurrency * 3)
+        for m in contents
+    )
+    assert all(m["recipe_digest"] == "recipe-digest" and not m["gate_eligible"] for m in contents)
+    assert len({m["workload_digest"] for m in contents}) == 2
+    assert len(result.metadata["captures"]) == 4
+    assert len(recorded) == 4
+    assert all(
+        int(env["EUBOULIA_NUM_PROMPTS"]) == max(first.num_prompts, first.concurrency * 3)
+        for env in recorded
+    )
+    assert first.num_prompts == config.workload_suite.points[0].num_prompts
+    assert all(env["EUBOULIA_WARMUPS"] == "0" for env in recorded)
+    assert len(list(context.artifact_dir.rglob("*.trace.json.gz"))) == 4
