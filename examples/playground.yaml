@@ -5,6 +5,10 @@ storage: ~/.local/share/euboulia/playground
 run_timeout_seconds: 120
 setup_timeout_seconds: 900
 max_output_bytes: 8388608
+# Profilers may take much longer than normal execution. Export timeout is per text report.
+profiling_timeout_seconds: 900
+export_timeout_seconds: 300
+max_report_bytes: 33554432
 clusters:
   gpu-lab:
     kubeconfig: ~/.kube/config

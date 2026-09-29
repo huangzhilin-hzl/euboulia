@@ -58,6 +58,9 @@ class PlaygroundConfig:
     run_timeout: int
     setup_timeout: int
     max_output_bytes: int
+    profiling_timeout: int = 900
+    export_timeout: int = 300
+    max_report_bytes: int = 32 * 1024 * 1024
 
 
 def mapping(value: object, name: str) -> dict[str, Any]:
@@ -122,6 +125,9 @@ def load_config(path: Path | None = None) -> PlaygroundConfig:
             "run_timeout_seconds",
             "setup_timeout_seconds",
             "max_output_bytes",
+            "profiling_timeout_seconds",
+            "export_timeout_seconds",
+            "max_report_bytes",
         },
         "playground",
     )
@@ -244,5 +250,10 @@ def load_config(path: Path | None = None) -> PlaygroundConfig:
         integer(raw.get("setup_timeout_seconds", 900), "setup timeout"),
         integer(
             raw.get("max_output_bytes", 8 * 1024 * 1024), "max output", 1024, 128 * 1024 * 1024
+        ),
+        integer(raw.get("profiling_timeout_seconds", 900), "profiling timeout"),
+        integer(raw.get("export_timeout_seconds", 300), "export timeout"),
+        integer(
+            raw.get("max_report_bytes", 32 * 1024 * 1024), "max report", 1024, 128 * 1024 * 1024
         ),
     )

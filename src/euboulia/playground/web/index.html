@@ -13,21 +13,56 @@
       <label for="cluster">Cluster</label><select id="cluster" aria-label="Cluster"></select>
       <label for="node">Node</label><select id="node" aria-label="Node"><option>Select a cluster</option></select>
       <button id="connect" class="connect">Connect GPU pod <span>↗</span></button>
-      <div class="session-card"><div class="session-title"><span id="session-status" class="badge">Disconnected</span><button id="refresh" class="icon-button" title="Refresh GPU inventory" aria-label="Refresh GPU inventory">↻</button></div><p id="pod-name">A dedicated molou pod will be created on your selected node.</p><p class="muted">Shared GPU · persistent environments</p><button id="release" class="subtle" disabled>Release pod</button></div>
+      <section class="session-card" aria-label="GPU workspace">
+        <div class="session-title"><span class="session-heading">GPU workspace</span><span id="session-status" class="badge">Disconnected</span></div>
+        <dl id="session-details" hidden>
+          <div class="session-namespace"><dt>Namespace</dt><dd id="pod-namespace"></dd></div>
+          <div class="session-pod"><dt>Pod</dt><dd><code id="pod-name"></code></dd></div>
+        </dl>
+        <p id="session-empty">Connect to create a dedicated pod.</p>
+        <p id="session-error" role="status" hidden></p>
+        <p class="session-note">Shared GPU · Reusable venv</p>
+        <div class="session-actions">
+          <button id="refresh" class="subtle" title="Refresh GPU inventory" aria-label="Refresh GPU inventory"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M19 12a7 7 0 1 0-2 5M20 12a8 8 0 0 0-2-6"/></svg>Refresh</button>
+          <button id="release" class="subtle" disabled>Release pod</button>
+        </div>
+      </section>
       <div class="section-label history-label">RUN HISTORY <span id="run-count">0</span></div>
       <div id="history" class="history"><p class="muted">Your runs will appear here.</p></div>
       <div class="aside-footer">CuTe DSL · TileLang · Python<br><span>Code runs on your cluster.</span></div>
     </aside>
     <section class="workspace">
-      <div class="toolbar"><div class="gpu-control"><svg class="gpu-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true" focusable="false"><rect x="5" y="5" width="14" height="14" rx="2"/><rect x="9" y="9" width="6" height="6" rx="1"/><path d="M9 2v3m6-3v3M9 19v3m6-3v3M2 9h3m-3 6h3m14-6h3m-3 6h3"/></svg><select id="gpu" aria-label="GPU index" disabled><option>Connect to select GPU</option></select></div><select id="profile" aria-label="Language and environment"></select><div class="toolbar-spacer"></div><button id="stop" class="stop" disabled>■ Stop</button><button id="run" class="primary" disabled>▶ Run <kbd>⌘ ↵</kbd></button></div>
+      <div class="toolbar"><div class="gpu-control"><svg class="gpu-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true" focusable="false"><rect x="5" y="5" width="14" height="14" rx="2"/><rect x="9" y="9" width="6" height="6" rx="1"/><path d="M9 2v3m6-3v3M9 19v3m6-3v3M2 9h3m-3 6h3m14-6h3m-3 6h3"/></svg><select id="gpu" aria-label="GPU index" disabled><option>Connect to select GPU</option></select></div><select id="profile" aria-label="Language and environment"></select><select id="mode" data-control="segments" aria-label="Execution mode"><option value="run">Run</option><option value="ncu">NCU</option><option value="nsys">NSYS</option></select><div class="toolbar-spacer"></div><button id="stop" class="stop" disabled>■ Stop</button><button id="run" class="primary" disabled>▶ Run <kbd>⌘ ↵</kbd></button></div>
       <div class="target-strip"><span id="target-info">Select your cluster and node to get started</span><span id="gpu-info"></span></div>
-      <section class="editor-panel" aria-label="Code editor"><div class="panel-header"><span class="file-tab"><span class="python-icon">◇</span> solution.py <span class="draft-dot"></span></span><div class="editor-actions"><span id="saved">Local draft</span><button id="import" class="subtle">Import</button><input id="file" type="file" accept=".py,.txt" hidden><button id="download" class="subtle">Download</button><button id="reset" class="subtle">Reset example</button></div></div><div class="run-arguments">
+      <div id="profiling-settings" hidden>
+        <div class="run-arguments"><span class="arguments-label">Profiler</span><input id="profiler-arguments" type="hidden"><button id="profiler-preview" class="arguments-preview" type="button" aria-label="Edit profiler arguments" aria-haspopup="dialog"><code id="profiler-preview-text"></code></button><button id="profiler-edit" class="subtle" type="button">Edit</button></div>
+        <div class="profiling-help"><span id="ncu-reports">Details + SASS · saved locally</span><span id="profiling-hint"></span></div>
+      </div>
+      <div id="workbench" class="workbench">
+      <section id="editor-panel" class="editor-panel" aria-label="Code editor"><div class="panel-header"><span class="file-tab"><span class="python-icon">◇</span> solution.py <span class="draft-dot"></span></span><div class="editor-actions"><span id="saved">Local draft</span><button id="expand-editor" class="subtle" aria-label="Expand code editor" aria-pressed="false" title="Expand code editor">Expand</button><button id="import" class="subtle">Import</button><input id="file" type="file" accept=".py,.txt" hidden><button id="download" class="subtle">Download</button><button id="reset" class="subtle">Reset example</button></div></div><div class="run-arguments">
         <span class="arguments-label">Arguments</span>
         <input id="arguments" type="hidden">
         <button id="arguments-preview" class="arguments-preview" type="button" aria-label="Edit script arguments" aria-haspopup="dialog" aria-controls="arguments-dialog" title="Click to edit all arguments"><code id="arguments-preview-text">No arguments · Click to edit</code></button>
         <div class="arguments-actions"><button id="arguments-expand" class="subtle" type="button" aria-haspopup="dialog" aria-controls="arguments-dialog">Edit</button><span id="arguments-count">0 lines</span></div>
       </div><div class="editor"><pre id="line-numbers" aria-hidden="true">1</pre><div class="code-area"><pre id="highlight" aria-hidden="true"><code></code></pre><textarea id="code" aria-label="Python source code" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off" wrap="off"></textarea></div></div><div class="editor-footer"><span id="cursor">Ln 1, Col 1</span><span>Python <span class="divider">|</span> UTF-8 <span class="divider">|</span> Tab: 4 spaces</span></div></section>
-      <section class="console-panel" aria-label="Console output"><div class="panel-header"><div><span class="console-icon">›_</span> Console Output <span id="run-status" class="badge">Ready</span></div><div><label class="follow"><input id="autoscroll" type="checkbox" checked> Follow</label><button id="clear" class="subtle">Clear</button></div></div><div id="console" role="log" aria-live="polite" aria-label="Console Output"><div class="console-empty"><span>›_</span><p>Ready when you are.</p><small>Run your code to see live stdout, stderr and build output.</small></div></div><div class="console-footer"><span id="run-detail">No active run</span><span>Shared GPUs may affect timings</span></div></section>
+      <div id="panel-resizer" role="separator" tabindex="0" aria-label="Resize code and output panels" aria-orientation="horizontal" aria-controls="editor-panel output-panel" aria-valuemin="0" aria-valuemax="100" aria-valuenow="70" title="Drag to resize · Double-click to reset · Arrow keys to adjust"><span></span></div>
+      <section id="output-panel" class="console-panel" aria-label="Console output">
+        <div class="panel-header"><div><span class="console-icon">›_</span> Console Output <span id="run-status" class="badge">Ready</span></div><div class="console-actions"><label class="follow"><input id="autoscroll" type="checkbox" checked><span>Follow</span></label><button id="clear" class="subtle">Clear</button></div></div>
+        <div class="result-toolbar"><span class="result-label">Output</span><select id="result-view" data-control="segments" aria-label="Output view"><option value="console">Console</option></select></div>
+        <div id="report-toolbar" hidden>
+          <div id="report-info" role="status"></div>
+          <div class="report-actions" role="group" aria-label="Report actions">
+            <button id="expand-report" class="subtle" disabled><svg class="report-action-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M7 3H3v4m10-4h4v4M3 13v4h4m10-4v4h-4"/></svg><span>Expand</span></button>
+            <button id="copy-report" class="subtle copy-button" aria-label="Copy all saved text" title="Copy all saved text" disabled><svg class="copy-icon" viewBox="0 0 20 20" aria-hidden="true"><g class="copy-sheets"><rect x="6" y="6" width="10" height="11" rx="2"/><path d="M12 6V4a1 1 0 0 0-1-1H4a1 1 0 0 0-1 1v9a1 1 0 0 0 1 1h2"/></g><path class="copy-check" d="m4 10 4 4 8-8"/><circle class="copy-spinner" cx="10" cy="10" r="6"/></svg><span class="copy-label">Copy</span></button>
+            <a id="download-report" class="subtle" aria-label="Download saved text" title="Download saved text"><svg class="report-action-icon" viewBox="0 0 20 20" aria-hidden="true"><path d="M10 3v9m-4-4 4 4 4-4M3 13v4h14v-4"/></svg><span>Download</span></a>
+          </div>
+        </div>
+        <pre id="report-text" class="report-viewer" hidden tabindex="0" role="region" aria-label="Profiler text report"></pre>
+        <div id="console" role="log" aria-live="polite" aria-label="Console Output"><div class="console-empty"><span>›_</span><p>Ready when you are.</p><small>Run your code to see live stdout, stderr and build output.</small></div></div>
+        <details id="raw-report-details" hidden><summary>Raw report in Pod · not saved locally</summary><div id="raw-reports"></div></details>
+        <div class="console-footer"><span id="run-detail">No active run</span><span>Shared GPUs may affect timings</span></div>
+      </section>
+      </div>
     </section>
   </main>
   <dialog id="arguments-dialog" aria-labelledby="arguments-title" aria-describedby="arguments-help">
@@ -36,6 +71,13 @@
     <textarea id="arguments-expanded" rows="20" aria-label="Expanded script arguments" aria-describedby="arguments-help" maxlength="8192" spellcheck="false" autocomplete="off" autocapitalize="off" placeholder="--batch_size 8192&#10;--seq_len_k 2048&#10;--skip_ref_check"></textarea>
     <div class="arguments-dialog-footer"><div class="arguments-editor-meta"><span id="arguments-editor-count">0 lines</span><span>Esc to cancel · ⌘ / Ctrl + Enter to apply</span></div><div class="arguments-dialog-actions"><button id="arguments-cancel" type="button">Cancel</button><button id="arguments-apply" class="primary" type="button">Apply changes</button></div></div>
   </dialog>
+  <dialog id="report-dialog" aria-labelledby="report-title">
+    <div class="arguments-dialog-header"><h2 id="report-title">Profiler text report</h2><button id="report-close" class="icon-button" aria-label="Close report">×</button></div>
+    <p id="report-dialog-info" class="muted">Loading saved text…</p>
+    <pre id="report-expanded" class="report-viewer" tabindex="0" role="region" aria-label="Full profiler text report"></pre>
+    <div class="arguments-dialog-footer"><span class="muted">Select text to copy, or copy the entire saved report.</span><button id="report-copy" class="copy-button" type="button"><svg class="copy-icon" viewBox="0 0 20 20" aria-hidden="true"><g class="copy-sheets"><rect x="6" y="6" width="10" height="11" rx="2"/><path d="M12 6V4a1 1 0 0 0-1-1H4a1 1 0 0 0-1 1v9a1 1 0 0 0 1 1h2"/></g><path class="copy-check" d="m4 10 4 4 8-8"/><circle class="copy-spinner" cx="10" cy="10" r="6"/></svg><span class="copy-label">Copy all saved text</span></button></div>
+  </dialog>
+  <script src="/choices.js"></script>
   <script src="/app.js"></script>
 </body>
 </html>

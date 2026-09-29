@@ -20,6 +20,7 @@ from euboulia.cli import build_parser
 from euboulia.playground.config import load_config
 from euboulia.playground.kubernetes import Kubernetes, PlaygroundError, manifest, parse_gpus
 from euboulia.playground.manager import ACTIVE, Manager, parse_arguments
+from euboulia.playground.profiling import DEFAULT_ARGUMENTS, validate_options
 from euboulia.playground.server import Server
 from euboulia.playground.worker import Worker
 
@@ -523,4 +524,416 @@ def test_http_security_and_assets(config_path: Path) -> None:
         server.shutdown()
         server.server_close()
         thread.join()
+        manager.close()
+
+
+@pytest.mark.parametrize(
+    "mode,args",
+    [
+        ("ncu", DEFAULT_ARGUMENTS["ncu"]),
+        (
+            "ncu",
+            "--set detailed --kernel-name-base function "
+            "--kernel-name 'regex:Sm100SimpleCopyKernel' --launch-count 1",
+        ),
+        ("ncu", "--set detailed\n--kernel-name 'regex:copy|add'\n--launch-count=2 --nvtx"),
+        ("nsys", "--trace=cuda,nvtx --sample none --capture-range cudaProfilerApi"),
+        ("run", ""),
+    ],
+)
+def test_profiler_options_accept_quoted_multiline(mode: str, args: str) -> None:
+    validate_options(mode, parse_arguments(args))
+
+
+@pytest.mark.parametrize(
+    "mode,args",
+    [
+        ("ncu", "--export /tmp/other"),
+        ("ncu", "-o/tmp/other"),
+        ("ncu", "--config-file-path /tmp/config"),
+        ("ncu", "--devices 0"),
+        ("ncu", "--clock-control base"),
+        ("ncu", "--set detailed python another.py"),
+        ("ncu", "--kernel-name"),
+        ("nsys", "--output=x"),
+        ("nsys", "--sample system-wide"),
+        ("nsys", "--command-file options.txt"),
+        ("run", "--set basic"),
+        ("bogus", ""),
+    ],
+)
+def test_profiler_options_protect_target_gpu_and_output(mode: str, args: str) -> None:
+    with pytest.raises(ValueError):
+        validate_options(mode, parse_arguments(args))
+
+
+def fake_profiler(tmp_path: Path, monkeypatch: Any, mode: str) -> None:
+    binary = tmp_path / mode
+    binary.write_text(
+        f"#!{sys.executable}\n"
+        + """
+import json, os, subprocess, sys
+from pathlib import Path
+args = sys.argv[1:]
+case = os.environ.get("TEST_PROFILER_CASE", "")
+if args == ["--version"]:
+    print("test profiler 1.0")
+elif "--import" in args or args[0] == "stats":
+    if case == "export-fail":
+        print("partial text", flush=True)
+        print("export failed", file=sys.stderr)
+        sys.exit(4)
+    print("指标 " * 2000)
+elif "--export" in args or "--output" in args:
+    key = "--export" if "--export" in args else "--output"
+    i = args.index(key)
+    target = args[i+2:]
+    status = subprocess.call(target)
+    if case != "missing":
+        suffix = ".ncu-rep" if key == "--export" else ".nsys-rep"
+        Path(args[i+1] + suffix).write_text(json.dumps({
+            "target": target, "gpu": os.environ["CUDA_VISIBLE_DEVICES"],
+            "cwd": os.getcwd(), "options": args[:i],
+        }))
+    sys.exit(status)
+"""
+    )
+    binary.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tmp_path}:{os.environ['PATH']}")
+
+
+@pytest.mark.parametrize("mode", ["ncu", "nsys"])
+def test_profiling_pipeline_preserves_target_and_untruncated_text(
+    config_path: Path,
+    monkeypatch: Any,
+    mode: str,
+) -> None:
+    fake_profiler(config_path.parent, monkeypatch, mode)
+    config = load_config(config_path)
+    manager = Manager(config)
+    rid = "d" * 32
+    manager.runs[rid] = {
+        "id": rid,
+        "session": "session",
+        "status": "queued",
+        "created_at": 1,
+        "mode": mode,
+        "reports": {},
+    }
+    req = worker_request(config_path.parent, "unused")
+    req.update(
+        id=rid,
+        mode=mode,
+        profiler_args=parse_arguments(DEFAULT_ARGUMENTS[mode]),
+        export_sass=False,  # Legacy requests cannot suppress the required SASS report.
+        max_report_bytes=config.max_report_bytes,
+    )
+    worker = Worker(req)
+    events = []
+
+    def emit(kind: str, **fields: Any) -> None:
+        event = {"kind": kind, **fields}
+        events.append(event)
+        manager._event(rid, event)
+
+    monkeypatch.setattr(worker, "emit", emit)
+    # Profiling wraps a complete command: module/file modes and quoted args survive.
+    target = [sys.executable, "-c", "print('x'*2048)", "--label", "two words", "$(literal)"]
+    try:
+        worker.profile_command(target)
+        assert manager.runs[rid]["status"] == "succeeded"
+        info = manager.runs[rid]["profiling"]
+        assert info["version"] == "test profiler 1.0"
+        raw = Path(info["remote_reports"][0])
+        captured = json.loads(raw.read_text())
+        assert captured["target"] == target
+        assert captured["gpu"] == req["gpu_uuid"]
+        assert captured["cwd"] == str(worker.run_dir)
+        if mode == "ncu":
+            assert captured["options"][-2:] == ["--clock-control", "none"]
+            assert captured["options"][2:-2] == [
+                "--kernel-name-base",
+                "function",
+                "--kernel-name",
+                "regex:.*",
+                "--set",
+                "detailed",
+                "--launch-count",
+                "1",
+            ]
+            exports = [e["argv"] for e in events if e.get("stage") == "export"]
+            assert [argv[1:] for argv in exports] == [
+                ["--import", str(raw), "--page", "details", "--print-details", "all"],
+                ["--import", str(raw), "--page", "source", "--print-source", "sass"],
+            ]
+        assert worker.truncated  # Console cap does not truncate reports.
+        reports = manager.runs[rid]["reports"]
+        assert set(reports) == ({"details.txt", "sass.txt"} if mode == "ncu" else {"stats.txt"})
+        for name, record in reports.items():
+            assert record["status"] == "ready"
+            assert manager.report_path(rid, name).read_text() == "指标 " * 2000 + "\n"
+            local_text = manager.report_path(rid, name).read_bytes()
+            assert (worker.run_dir / name).read_bytes() == local_text
+        assert manager.runs[rid]["execution"]["stage"] == "capture"
+        assert all(c["stage"] == "export" for c in manager.runs[rid]["export_commands"])
+        assert not any(e["kind"] == "report_chunk" for e in manager.events(rid, 0)["events"])
+        # Simulate deletion of all remote files: local text remains downloadable.
+        import shutil
+
+        shutil.rmtree(worker.run_dir)
+    finally:
+        manager.close()
+    restarted = Manager(config)
+    server = Server(restarted, 0)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        for name in restarted.runs[rid]["reports"]:
+            connection = HTTPConnection("127.0.0.1", server.server_port)
+            connection.request("GET", f"/api/runs/{rid}/reports/{name}")
+            response = connection.getresponse()
+            assert response.status == 200
+            assert "attachment" in response.getheader("Content-Disposition", "")
+            assert response.read().decode() == "指标 " * 2000 + "\n"
+            connection.close()
+        with pytest.raises(KeyError):
+            restarted.report_path(rid, "../../run.json")
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+        restarted.close()
+
+
+@pytest.mark.parametrize("case", ["missing", "export-fail", "limit"])
+def test_profiler_missing_and_partial_reports(
+    tmp_path: Path,
+    monkeypatch: Any,
+    case: str,
+) -> None:
+    fake_profiler(tmp_path, monkeypatch, "ncu")
+    req = worker_request(tmp_path, "unused")
+    req.update(mode="ncu", profiler_args=[], max_report_bytes=1024)
+    req["profile"]["env"] = {"TEST_PROFILER_CASE": case}
+    worker = Worker(req)
+    events = []
+    monkeypatch.setattr(worker, "emit", lambda k, **v: events.append({"kind": k, **v}))
+    worker.profile_command([sys.executable, "-c", "pass"])
+    if case == "missing":
+        assert events[-1]["status"] == "failed"
+        assert not any(e["kind"] == "report_begin" for e in events)
+    else:
+        reports = [e for e in events if e["kind"] == "report_end"]
+        assert {report["name"] for report in reports} == {"details.txt", "sass.txt"}
+        for report in reports:
+            assert report["status"] == "partial"
+            text = "".join(
+                e["data"]
+                for e in events
+                if e["kind"] == "report_chunk" and e["name"] == report["name"]
+            )
+            assert len(text.encode()) <= 1024
+            assert report["truncated"] == (case == "limit")
+        assert events[-1]["status"] == ("succeeded" if case == "limit" else "failed")
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+def test_profiler_stop_allows_finalization(
+    tmp_path: Path,
+    monkeypatch: Any,
+    cancel: bool,
+) -> None:
+    from euboulia.playground.worker import Stopped
+
+    worker = Worker(worker_request(tmp_path, "unused"))
+    monkeypatch.setattr(worker, "emit", lambda *a, **kw: None)
+    code = (
+        "import signal,time,pathlib; "
+        "signal.signal(signal.SIGINT, lambda *a: "
+        "(pathlib.Path('finalized').write_text('yes'),exit(0))); "
+        "pathlib.Path('started').touch(); time.sleep(30)"
+    )
+    timer = None
+    if cancel:
+
+        def stop_when_started() -> None:
+            deadline = time.monotonic() + 3
+            while not (tmp_path / "started").exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            worker.cancel_file.touch()
+
+        timer = threading.Thread(target=stop_when_started)
+        timer.start()
+    try:
+        with pytest.raises(Stopped) as exc:
+            worker.command(
+                [sys.executable, "-c", code], time.monotonic() + 1, tmp_path, graceful=True
+            )
+        assert exc.value.status == ("cancelled" if cancel else "timed_out")
+        assert (tmp_path / "finalized").read_text() == "yes"
+    finally:
+        if timer:
+            timer.join()
+
+
+@pytest.mark.parametrize("legacy_sass", [{}, {"export_sass": False}, {"export_sass": True}])
+def test_profiling_submission_uses_separate_timeout_and_persists_options(
+    config_path: Path,
+    monkeypatch: Any,
+    legacy_sass: dict[str, bool],
+) -> None:
+    config = load_config(config_path)
+    manager = Manager(config)
+    calls = []
+    monkeypatch.setattr(manager, "_spawn", lambda *args: calls.append(args))
+    manager.sessions["s"] = {
+        "id": "s",
+        "status": "ready",
+        "cluster": "test",
+        "node": "node-a",
+        "namespace": "molou",
+        "pod": "test-pod",
+        "gpus": [{"index": 3, "uuid": "GPU-test-three"}],
+    }
+    payload = {"session": "s", "profile": "python", "gpu_index": 3, "code": "pass"}
+    try:
+        with pytest.raises(ValueError, match="timeout"):
+            manager.submit(payload | {"timeout_seconds": config.run_timeout + 1})
+        with pytest.raises(ValueError, match="export_sass"):
+            manager.submit(payload | {"mode": "nsys", "export_sass": True})
+        with pytest.raises(ValueError, match="unsupported ncu"):
+            manager.submit(payload | {"mode": "ncu", "profiler_arguments": "--export=x"})
+        run = manager.submit(payload | {"mode": "ncu"} | legacy_sass)
+        request = calls[0][2]
+        assert run["timeout_seconds"] == config.profiling_timeout
+        assert run["profiler_arguments"] == DEFAULT_ARGUMENTS["ncu"]
+        assert run["export_sass"] is True
+        assert request["gpu_uuid"] == "GPU-test-three"
+        assert request["export_sass"] is True
+        assert request["export_timeout"] == config.export_timeout
+        assert request["max_report_bytes"] == config.max_report_bytes
+        assert json.loads((config.storage / "runs" / run["id"] / "run.json").read_text()) == run
+        manager._event(run["id"], {"kind": "result", "status": "failed", "exit_code": None})
+    finally:
+        manager.close()
+
+
+def test_export_timeout_preserves_partial_text(tmp_path: Path, monkeypatch: Any) -> None:
+    from euboulia.playground.worker import Stopped
+
+    worker = Worker(worker_request(tmp_path, "unused"))
+    events = []
+    monkeypatch.setattr(worker, "emit", lambda k, **v: events.append({"kind": k, **v}))
+    with pytest.raises(Stopped):
+        worker.command(
+            [sys.executable, "-c", "import time; print('saved',flush=True); time.sleep(30)"],
+            time.monotonic() + 0.5,
+            tmp_path,
+            report="stats.txt",
+        )
+    assert events[-1]["kind"] == "report_end"
+    assert events[-1]["status"] == "partial"
+    assert (tmp_path / "stats.txt").read_text() == "saved\n"
+
+
+def test_missing_profiler_does_not_execute_target(tmp_path: Path, monkeypatch: Any) -> None:
+    req = worker_request(tmp_path, "unused")
+    req.update(mode="ncu", profiler_args=[])
+    worker = Worker(req)
+    worker.env["PATH"] = str(tmp_path / "missing-tools")
+    with pytest.raises(RuntimeError, match="not installed"):
+        worker.profile_command([sys.executable, "-c", "raise AssertionError('must not run')"])
+
+
+@pytest.mark.parametrize("valid_ack", [True, False])
+def test_worker_waits_for_controller_ack(tmp_path: Path, valid_ack: bool) -> None:
+    request = worker_request(tmp_path, "unused") | {"acknowledge_result": True}
+    script = (
+        "from euboulia.playground.worker import Worker,main; "
+        "Worker.execute=lambda self:self.emit('result',status='succeeded',exit_code=0); main()"
+    )
+    process = subprocess.Popen(
+        [sys.executable, "-u", "-c", script],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        assert process.stdin and process.stdout
+        process.stdin.write((json.dumps(request) + "\n").encode())
+        process.stdin.flush()
+        assert json.loads(process.stdout.readline())["status"] == "succeeded"
+        # Finishing computation must not close the transport before receipt is confirmed.
+        with pytest.raises(subprocess.TimeoutExpired):
+            process.wait(timeout=0.1)
+        ack = {"kind": "ack", "run_id": request["id"] if valid_ack else "wrong-run"}
+        _, stderr = process.communicate((json.dumps(ack) + "\n").encode(), timeout=3)
+        assert (process.returncode == 0) is valid_ack
+        if not valid_ack:
+            assert b"did not acknowledge" in stderr
+    finally:
+        if process.poll() is None:
+            process.kill()
+        process.communicate()
+
+
+def test_manager_acknowledges_only_after_large_report_is_saved(
+    config_path: Path, monkeypatch: Any
+) -> None:
+    import hashlib
+
+    fake_worker = """
+import hashlib,json,sys
+from pathlib import Path
+r=json.loads(sys.stdin.readline())
+assert r['acknowledge_result'] is True
+def emit(kind,**data):
+    print(json.dumps(dict(kind=kind,**data)),flush=True)
+text='instruction \\u6307\\u6807\\n'*256
+size=0
+digest=hashlib.sha256()
+emit('report_begin',name='sass.txt')
+for _ in range(768):
+    data=text.encode()
+    digest.update(data)
+    size+=len(data)
+    emit('report_chunk',name='sass.txt',data=text)
+emit('report_end',name='sass.txt',status='ready',bytes=size,
+     sha256=digest.hexdigest(),exit_code=0,truncated=False)
+emit('result',status='succeeded',exit_code=0)
+assert json.loads(sys.stdin.readline())=={'kind':'ack','run_id':r['id']}
+Path(r['root'],'ack-received').touch()
+"""
+    config = load_config(config_path)
+    manager = Manager(config)
+    rid = "e" * 32
+    session = {
+        "id": "s", "status": "ready", "cluster": "test", "node": "node-a",
+        "namespace": "molou", "pod": "test-pod",
+        "cluster_fingerprint": config.clusters["test"].fingerprint,
+    }
+    manager.sessions["s"] = session
+    manager.runs[rid] = {
+        **session, "id": rid, "session": "s", "container": "workspace",
+        "status": "queued", "mode": "ncu", "reports": {},
+    }
+    manager._save_run(manager.runs[rid])
+    monkeypatch.setattr(Kubernetes, "inspect", lambda *a: {"status": {"hostIP": "10.0.0.3"}})
+    monkeypatch.setattr(
+        Kubernetes, "exec_args", lambda *a: [sys.executable, "-u", "-c", fake_worker]
+    )
+    req = worker_request(config_path.parent, "unused") | {
+        "id": rid, "export_timeout": 5, "mode": "ncu",
+    }
+    Path(req["root"]).mkdir(parents=True, exist_ok=True)
+    try:
+        manager._execute(rid, req)
+        run = manager.runs[rid]
+        assert run["status"] == "succeeded", run.get("error")
+        data = manager.report_path(rid, "sass.txt").read_bytes()
+        assert data == ("instruction 指标\n" * 256 * 768).encode()
+        assert run["reports"]["sass.txt"]["sha256"] == hashlib.sha256(data).hexdigest()
+        assert (Path(req["root"]) / "ack-received").exists()
+        assert session["status"] == "ready"
+    finally:
         manager.close()
