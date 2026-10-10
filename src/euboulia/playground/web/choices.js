@@ -17,6 +17,7 @@ window.PlaygroundChoices = (() => {
       this.typedAt = 0;
       this.root = document.createElement("div");
       this.root.className = this.segmented ? "choice-segments" : "choice-control";
+      this.root.hidden = select.dataset.hideUntilConfig === "true";
       select.before(this.root);
       this.root.append(select);
       select.hidden = true;

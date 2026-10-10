@@ -8,7 +8,7 @@ import subprocess
 import sys
 import threading
 import time
-from dataclasses import replace
+from dataclasses import asdict, replace
 from http.client import HTTPConnection
 from pathlib import Path
 from typing import Any
@@ -254,6 +254,182 @@ def worker_request(tmp_path: Path, code: str) -> dict[str, Any]:
         "max_output_bytes": 1024,
         "profile": {"name": "python", "packages": [], "system_site_packages": True},
     }
+
+
+def submission_session() -> dict[str, Any]:
+    return {
+        "id": "s",
+        "status": "ready",
+        "cluster": "test",
+        "node": "node-a",
+        "namespace": "molou",
+        "pod": "test-pod",
+        "gpus": [{"index": 3, "uuid": "GPU-test-three"}],
+    }
+
+
+@pytest.mark.parametrize(
+    ("available", "requested", "expected"),
+    [
+        (("gpu",), "gpu", "gpu"),
+        (("gpu",), "cutedsl", "gpu"),
+        (("gpu",), "tilelang", "gpu"),
+        (("gpu",), "python", "gpu"),
+        (("cutedsl", "python"), "cutedsl", "cutedsl"),
+        (("cutedsl", "python"), "python", "python"),
+    ],
+)
+def test_profile_submission_compatibility_preserves_history(
+    config_path: Path,
+    monkeypatch: Any,
+    available: tuple[str, ...],
+    requested: str,
+    expected: str,
+) -> None:
+    config = load_config(config_path)
+    config = replace(
+        config,
+        profiles={name: replace(config.profiles["python"], name=name) for name in available},
+    )
+    legacy = {
+        "id": "a" * 32,
+        "session": "retired",
+        "profile": "tilelang",
+        "profile_fingerprint": "old-package-specification",
+        "status": "succeeded",
+        "created_at": 1,
+    }
+    history = config.storage / "runs" / legacy["id"] / "run.json"
+    history.parent.mkdir(parents=True)
+    original = json.dumps(legacy).encode()
+    history.write_bytes(original)
+    manager = Manager(config)
+    calls = []
+    monkeypatch.setattr(manager, "_spawn", lambda *args: calls.append(args))
+    manager.sessions["s"] = submission_session()
+    try:
+        run = manager.submit({
+            "session": "s", "profile": requested, "gpu_index": 3, "code": "pass",
+        })
+        assert run["profile"] == expected
+        assert run["profile_fingerprint"] == config.profiles[expected].fingerprint
+        assert calls[0][2]["profile"] == asdict(config.profiles[expected])
+        assert manager.runs[legacy["id"]] == legacy
+        assert history.read_bytes() == original
+        manager._event(run["id"], {"kind": "result", "status": "succeeded", "exit_code": 0})
+    finally:
+        manager.close()
+    assert history.read_bytes() == original
+
+
+@pytest.mark.parametrize(
+    ("available", "requested"),
+    [
+        (("gpu",), "unknown"),
+        (("cutedsl", "python"), "tilelang"),
+        (("cutedsl", "python"), "unknown"),
+    ],
+)
+def test_profile_submission_rejects_unconfigured_names(
+    config_path: Path, available: tuple[str, ...], requested: str
+) -> None:
+    config = load_config(config_path)
+    config = replace(
+        config,
+        profiles={name: replace(config.profiles["python"], name=name) for name in available},
+    )
+    manager = Manager(config)
+    manager.sessions["s"] = submission_session()
+    try:
+        with pytest.raises(KeyError, match=requested):
+            manager.submit({
+                "session": "s", "profile": requested, "gpu_index": 3, "code": "pass",
+            })
+        assert not manager.runs
+        assert not (config.storage / "runs").exists()
+    finally:
+        manager.close()
+
+
+def test_legacy_profile_names_reuse_one_worker_environment(
+    config_path: Path, monkeypatch: Any
+) -> None:
+    fake_gpu(config_path.parent, monkeypatch)
+    config = load_config(config_path)
+    profile = replace(config.profiles["python"], name="gpu", label="Unified GPU")
+    config = replace(config, profiles={"gpu": profile})
+    manager = Manager(config)
+    calls = []
+    environments = []
+    monkeypatch.setattr(manager, "_spawn", lambda *args: calls.append(args))
+    manager.sessions["s"] = submission_session()
+    try:
+        for name in ("cutedsl", "tilelang", "python", "gpu"):
+            code = f"print({name!r})"
+            run = manager.submit({
+                "session": "s", "profile": name, "gpu_index": 3, "code": code,
+            })
+            request = calls[-1][2]
+            assert request["profile"] == asdict(profile)
+            worker = Worker(request)
+            monkeypatch.setattr(
+                worker,
+                "emit",
+                lambda kind, rid=run["id"], **fields: manager._event(
+                    rid, {"kind": kind, **fields}
+                ),
+            )
+            worker.execute()
+            assert manager.runs[run["id"]]["status"] == "succeeded"
+            assert manager.code(run["id"]) == code
+            environments.append(json.loads(
+                (config.storage / "runs" / run["id"] / "environment.json").read_text()
+            ))
+        assert {request[2]["root"] for request in calls} == {
+            f"{config.clusters['test'].workdir}/s"
+        }
+        assert {environment["profile"] for environment in environments} == {"gpu"}
+        assert len({environment["key"] for environment in environments}) == 1
+        assert len({environment["path"] for environment in environments}) == 1
+        assert [environment["reused"] for environment in environments] == [
+            False, True, True, True
+        ]
+    finally:
+        manager.close()
+
+
+def test_environment_log_includes_tirx_package_versions(
+    config_path: Path, monkeypatch: Any
+) -> None:
+    config = load_config(config_path)
+    manager = Manager(config)
+    monkeypatch.setattr(manager, "_spawn", lambda *args: None)
+    manager.sessions["s"] = submission_session()
+    packages = {
+        "apache-tvm": "0.24.0",
+        "apache-tvm-ffi": "0.1.0",
+        "cuda_bindings": "12.9.0",
+        "tirx-kernels": "0.1.0",
+        "torch": "2.8.0",
+        "numpy": "2.2.0",
+    }
+    try:
+        run = manager.submit({
+            "session": "s", "profile": "python", "gpu_index": 3, "code": "pass",
+        })
+        manager._event(run["id"], {
+            "kind": "environment", "status": "ready", "key": "one-cache",
+            "path": "/venvs/one-cache", "reused": True, "packages": packages,
+        })
+        output = "".join(e.get("data", "") for e in manager.events(run["id"], 0)["events"])
+        for name in ("apache-tvm", "apache-tvm-ffi", "cuda_bindings", "tirx-kernels", "torch"):
+            assert f"{name}=={packages[name]}" in output
+        assert "numpy==" not in output
+        saved = config.storage / "runs" / run["id"] / "environment.json"
+        assert json.loads(saved.read_text())["packages"] == packages
+        manager._event(run["id"], {"kind": "result", "status": "succeeded", "exit_code": 0})
+    finally:
+        manager.close()
 
 
 def test_real_worker_streams_failures_and_reuses_venv(tmp_path: Path, monkeypatch: Any) -> None:

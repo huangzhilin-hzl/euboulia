@@ -242,9 +242,15 @@ def load_config(path: Path | None = None) -> PlaygroundConfig:
     if not clusters:
         raise ValueError("configure at least one cluster")
     defaults = {
-        "cutedsl": {"label": "CuTe DSL", "packages": ["nvidia-cutlass-dsl"]},
-        "tilelang": {"label": "TileLang", "packages": ["tilelang"]},
-        "python": {"label": "Python / PyTorch", "packages": []},
+        "gpu": {
+            "label": "GPU environment",
+            "packages": [
+                "nvidia-cutlass-dsl",
+                "tilelang==0.1.15",
+                "apache-tvm[cuda]==0.25.0.post1",
+                "apache-tvm-ffi>=0.1.12,<0.1.13",
+            ],
+        },
     }
     profiles = {}
     for name, data in mapping(raw.get("profiles", defaults), "profiles").items():
