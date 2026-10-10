@@ -21,6 +21,14 @@ clusters:
     python: python3
     workdir: /workspace/molou
     startup_timeout_seconds: 300
+    # Node status reads existing DCGM exporter Pods through the Kubernetes API.
+    # No monitoring Pod is installed. Missing/partial metrics appear as Unknown.
+    # gpu_metrics:
+    #   namespace: nvidia-gpu
+    #   selector: app.kubernetes.io/name=dcgm-exporter
+    #   port: 9400
+    #   idle_utilization_percent: 0
+    #   idle_memory_mb: 128
     # Optional allowlist; also works without permission to list nodes.
     # nodes: [your-gpu-node]
 profiles:

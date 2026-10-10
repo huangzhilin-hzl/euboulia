@@ -11,7 +11,8 @@
     <aside>
       <div class="section-label">EXECUTION TARGET</div>
       <label for="cluster">Cluster</label><select id="cluster" aria-label="Cluster"></select>
-      <label for="node">Node</label><select id="node" aria-label="Node"><option>Select a cluster</option></select>
+      <div class="node-heading"><label for="node">Node</label><button id="refresh-nodes" class="node-refresh" type="button" title="Refresh node GPU status" aria-label="Refresh node GPU status"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 7v5h-5M19 12a7 7 0 1 0-2 5M20 12a8 8 0 0 0-2-6"/></svg></button></div><select id="node" aria-label="Node" aria-describedby="node-gpu-help"><option>Select a cluster</option></select>
+      <div class="node-status"><div id="node-refresh-status" role="status" aria-live="polite">GPU status not checked</div><div class="node-legend"><span><i data-status="idle"></i>All idle</span><span><i data-status="busy"></i>Busy / partial</span><span><i data-status="unknown"></i>Unknown</span></div><p id="node-gpu-help">All idle: every GPU at 0% utilization and ≤128 MiB used. Unknown means unverified.</p></div>
       <button id="connect" class="connect">Connect GPU pod <span>↗</span></button>
       <section class="session-card" aria-label="GPU workspace">
         <div class="session-title"><span class="session-heading">GPU workspace</span><span id="session-status" class="badge">Disconnected</span></div>

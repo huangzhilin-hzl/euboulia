@@ -78,6 +78,47 @@ def test_local_configuration_is_explicit_and_private(config_path: Path) -> None:
     assert args.open and args.port == 8766
 
 
+def test_gpu_metrics_configuration(config_path: Path) -> None:
+    original = load_config(config_path).clusters["test"]
+    assert original.gpu_metrics.idle_memory_mb == 128
+    assert original.gpu_metrics.idle_utilization_percent == 0
+    raw = yaml.safe_load(config_path.read_text())
+    raw["clusters"]["test"]["gpu_metrics"] = {
+        "namespace": "monitoring",
+        "selector": "app=dcgm-exporter",
+        "port": 9500,
+        "idle_memory_mb": 0,
+        "idle_utilization_percent": 1,
+    }
+    config_path.write_text(yaml.safe_dump(raw))
+    updated = load_config(config_path).clusters["test"]
+    assert updated.gpu_metrics.namespace == "monitoring"
+    assert updated.gpu_metrics.port == 9500
+    assert updated.gpu_metrics.idle_memory_mb == 0
+    assert updated.gpu_metrics.idle_utilization_percent == 1
+    assert updated.fingerprint == original.fingerprint
+
+
+@pytest.mark.parametrize(
+    "metrics",
+    [
+        {"idle_memory_mb": -1},
+        {"idle_utilization_percent": 101},
+        {"port": True},
+        {"port": 65536},
+        {"selector": ""},
+        {"namespace": "not a namespace"},
+        {"unexpected": 1},
+    ],
+)
+def test_invalid_gpu_metrics_configuration(config_path: Path, metrics: dict[str, Any]) -> None:
+    raw = yaml.safe_load(config_path.read_text())
+    raw["clusters"]["test"]["gpu_metrics"] = metrics
+    config_path.write_text(yaml.safe_dump(raw))
+    with pytest.raises(ValueError, match="gpu_metrics"):
+        load_config(config_path)
+
+
 @pytest.mark.parametrize(
     "update",
     [
@@ -491,11 +532,20 @@ def test_manager_streaming_history_and_session_lock(config_path: Path, monkeypat
         restarted.close()
 
 
-def test_http_security_and_assets(config_path: Path) -> None:
+def test_http_security_and_assets(config_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     manager = Manager(load_config(config_path))
     server = Server(manager, port=0)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
+    node_requests: list[tuple[str, bool]] = []
+
+    def node_snapshot(cluster: str, *, refresh: bool = False) -> dict[str, Any]:
+        if cluster != "test":
+            raise KeyError(cluster)
+        node_requests.append((cluster, refresh))
+        return {"nodes": [{"name": "node-a", "gpu": {"state": "idle"}}], "refreshing": False}
+
+    monkeypatch.setattr(server.node_monitor, "snapshot", node_snapshot)
 
     def request(method: str, path: str, headers: dict[str, str] | None = None) -> tuple[int, bytes]:
         connection = HTTPConnection("127.0.0.1", server.server_port)
@@ -512,11 +562,19 @@ def test_http_security_and_assets(config_path: Path) -> None:
         assert request("GET", "/")[0] == 200
         assert b"Python source code" in request("GET", "/")[1]
         assert request("GET", "/app.js")[0] == 200
+        assert request("GET", "/api/clusters/test/nodes?refresh=1")[0] == 200
+        assert node_requests == [("test", True)]
+        assert request("GET", "/api/clusters/missing/nodes")[0] == 404
+        assert request("GET", "/api/clusters/test/nodes", {"Origin": "https://evil.example"})[
+            0
+        ] == 403
+        assert node_requests == [("test", True)]
         assert request("GET", "/api/config", {"Host": "attacker.example"})[0] == 403
         assert request("GET", "/api/state", {"Origin": "https://attacker.example"})[0] == 403
         assert request("POST", "/api/runs")[0] == 403
         public = json.loads(request("GET", "/api/config")[1])
         assert "kubeconfig" not in json.dumps(public)
+        assert public["clusters"][0]["gpu_idle"] == {"memory_mb": 128, "utilization_percent": 0}
         headers = {"X-Playground-Token": public["token"], "Content-Type": "application/json"}
         assert request("POST", "/api/runs", headers)[0] == 400
         assert request("GET", "/api/runs/not-a-run/code")[0] == 404

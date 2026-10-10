@@ -6,6 +6,7 @@ const activeStates = new Set(["queued", "verifying_gpu", "preparing_environment"
 let config, session = null, selectedRun = null, cursor = 0, state = {sessions: [], runs: []};
 let currentProfile = "", polling = false, busy = false, historyKey = "", outputSize = 0, nodeRequest = 0;
 const nodeLabels = new Map();
+let nodeRefreshTimer = 0, nodeFreshnessTimer = 0, nodeAutoSelect = true;
 let argumentsTarget = "arguments", currentMode = "run", profilerDraft = {}, reportKey = "";
 function nodeLabel(cluster, node) { return nodeLabels.get(`${cluster}/${node}`) || node; }
 
@@ -25,8 +26,105 @@ async function action(fn) {
   finally { busy = false; controls(); }
 }
 function options(select, values) {
-  select.replaceChildren(...values.map(([value, label]) => new Option(label, value)));
+  updateOptions(select, values.map(([value, label]) => new Option(label, value)));
   choices.sync();
+}
+function updateOptions(select, entries) {
+  const current = [...select.options], existing = new Map(current.map(option => [option.value, option]));
+  const selected = select.value;
+  const next = entries.map(entry => {
+    const option = existing.get(entry.value) || entry;
+    if (option !== entry) {
+      for (const property of ["text", "disabled", "title"]) {
+        if (option[property] !== entry[property]) option[property] = entry[property];
+      }
+      for (const key of Object.keys(option.dataset)) {
+        if (!(key in entry.dataset)) delete option.dataset[key];
+      }
+      for (const [key, value] of Object.entries(entry.dataset)) {
+        if (option.dataset[key] !== value) option.dataset[key] = value;
+      }
+    }
+    return option;
+  });
+  if (current.length !== next.length || current.some((option, index) => option !== next[index])) {
+    select.replaceChildren(...next);
+  }
+  if (next.some(option => option.value === selected) && select.value !== selected) select.value = selected;
+}
+function setText(id, text) {
+  const element = $(id);
+  if (element.textContent !== text) element.textContent = text;
+}
+function setDisabled(id, disabled) {
+  const element = $(id), value = !!disabled;
+  if (element.disabled !== value) element.disabled = value;
+}
+// Claim that every GPU is idle only when every physical GPU was measured.
+function nodeGpuView(node, now = Date.now() / 1000) {
+  const gpu = node.gpu || {};
+  const count = value => Number.isInteger(value) && value >= 0 ? value : null;
+  const total = count(gpu.total), measured = count(gpu.measured) || 0;
+  const idle = Math.min(count(gpu.idle) || 0, measured, total ?? measured);
+  if (node.ready === false || gpu.state === "not_ready") {
+    return {status: "not_ready", label: "NotReady", brief: "NotReady", rank: 3, idle: 0, disabled: true};
+  }
+  if (gpu.state === "no_gpu") {
+    return {status: "no_gpu", label: "No GPUs", brief: "No GPUs", rank: 4, idle: 0, disabled: true};
+  }
+  if (["idle", "busy"].includes(gpu.state) &&
+      (!Number.isFinite(gpu.checked_at) || now - gpu.checked_at >= 45)) {
+    return {status: "unknown", label: gpu.checked_at ? "Unknown · stale" : "Unknown", brief: "Unknown", rank: 2, idle: 0, disabled: false};
+  }
+  if (node.ready === true && gpu.state === "idle" && total > 0 && measured === total && idle === total) {
+    return {status: "idle", label: `All ${total} idle`, brief: `All ${total} idle`, rank: 0, idle, disabled: false};
+  }
+  if (gpu.state === "busy") {
+    const label = idle > 0 ? `${idle}/${total ?? "?"} idle` : "Busy";
+    return {status: idle > 0 ? "partial" : "busy", label, brief: label, rank: 1, idle, disabled: false};
+  }
+  const label = idle > 0 ? `${idle}/${total ?? "?"} idle · Unknown` : "Unknown";
+  return {status: "unknown", label, brief: "Unknown", rank: 2, idle, disabled: false};
+}
+function sortNodeList(nodes) {
+  return [...nodes].sort((a, b) => {
+    const x = nodeGpuView(a), y = nodeGpuView(b);
+    return x.rank - y.rank || y.idle - x.idle ||
+      (a.ip || a.name).localeCompare(b.ip || b.name, undefined, {numeric: true}) || a.name.localeCompare(b.name);
+  });
+}
+function selectNodeValue(nodes, current, automatic, connected) {
+  if (current && (!automatic || connected)) return current;
+  const idle = nodes.find(node => nodeGpuView(node).rank === 0 && node.ready === true);
+  if (idle && automatic && !connected) return idle.name;
+  if (nodes.some(node => node.name === current && !nodeGpuView(node).disabled)) return current;
+  return nodes.find(node => !nodeGpuView(node).disabled)?.name || "";
+}
+function expireNodeOptions(select, now = Date.now() / 1000) {
+  let changed = false;
+  for (const option of select.options) {
+    if (!["idle", "partial", "busy"].includes(option.dataset.choiceStatus)) continue;
+    const checked = Number(option.dataset.choiceCheckedAt);
+    if (Number.isFinite(checked) && checked > 0 && now - checked < 45) continue;
+    option.dataset.choiceStatus = "unknown";
+    option.dataset.choiceSummary = "Unknown · stale";
+    option.dataset.choiceBrief = "Unknown";
+    option.text = `${option.dataset.choiceLabel || option.value} · Unknown · stale`;
+    option.title = `${option.value}\nGPU telemetry is older than 45 seconds or unavailable. Refresh to verify usage.`;
+    changed = true;
+  }
+  return changed;
+}
+function scheduleNodeFreshness() {
+  clearTimeout(nodeFreshnessTimer);
+  const deadlines = [...$("node").options]
+    .filter(option => ["idle", "partial", "busy"].includes(option.dataset.choiceStatus))
+    .map(option => Number(option.dataset.choiceCheckedAt) * 1000 + 45000);
+  if (!deadlines.length) return;
+  nodeFreshnessTimer = setTimeout(() => {
+    if (expireNodeOptions($("node"))) choices.sync();
+    scheduleNodeFreshness();
+  }, Math.max(1, Math.min(...deadlines) - Date.now() + 1));
 }
 function draftKey(profile) { return `molou-playground-draft-${profile}`; }
 function argumentLines(text) {
@@ -183,22 +281,25 @@ function output(stream, text) {
   $("console").append(span); outputSize += text.length;
   if ($("autoscroll").checked) $("console").scrollTop = $("console").scrollHeight;
 }
-function badge(id, value) { $(id).textContent = value.replaceAll("_", " "); $(id).className = `badge ${value}`; }
+function badge(id, value) {
+  setText(id, value.replaceAll("_", " "));
+  if ($(id).className !== `badge ${value}`) $(id).className = `badge ${value}`;
+}
 function activeRun() { return state.runs.find((r) => r.session === session?.id && activeStates.has(r.status)); }
 function controls() {
   const running = activeRun(), ready = session?.status === "ready";
-  $("run").disabled = busy || !ready || !!running || !$("gpu").value;
-  $("stop").disabled = busy || !running || running.status === "cancelling";
-  $("connect").disabled = busy || !$("node").value || session?.status === "starting";
-  $("release").disabled = busy || !session || !!running || ["starting", "releasing", "released"].includes(session.status);
-  $("refresh").disabled = busy || !ready;
-  $("gpu").disabled = busy || !ready || !!running;
+  setDisabled("run", busy || !ready || !!running || !$("gpu").value);
+  setDisabled("stop", busy || !running || running.status === "cancelling");
+  setDisabled("connect", busy || !$("node").value || $("node").selectedOptions[0]?.disabled || session?.status === "starting");
+  setDisabled("release", busy || !session || !!running || ["starting", "releasing", "released"].includes(session.status));
+  setDisabled("refresh", busy || !ready);
+  setDisabled("gpu", busy || !ready || !!running);
   choices.sync();
 }
 function renderSession() {
   badge("session-status", session?.status || "Disconnected");
   $("session-details").hidden = !session; $("session-empty").hidden = !!session;
-  $("pod-namespace").textContent = session?.namespace || "";
+  setText("pod-namespace", session?.namespace || "");
   const podName = session?.pod || "";
   if ($("pod-name").textContent !== podName) {
     const split = podName.lastIndexOf("-") + 1;
@@ -206,8 +307,8 @@ function renderSession() {
     $("pod-name").title = podName;
   }
   $("session-error").hidden = !session?.error;
-  $("session-error").textContent = session?.error || "";
-  $("target-info").textContent = session ? `${session.cluster} / ${nodeLabel(session.cluster, session.node)}` : "Select your cluster and node to get started";
+  setText("session-error", session?.error || "");
+  setText("target-info", session ? `${session.cluster} / ${nodeLabel(session.cluster, session.node)}` : "Select your cluster and node to get started");
   const old = $("gpu").value, gpus = session?.gpus || [];
   const desired = gpus.map((g) => [String(g.index), `GPU ${g.index} · ${g.name}`]);
   if (JSON.stringify([...$("gpu").options].map(o => [o.value,o.text])) !== JSON.stringify(desired.length ? desired : [["", "Connect to select GPU"]])) {
@@ -218,21 +319,89 @@ function renderSession() {
 }
 function gpuInfo() {
   const gpu = session?.gpus.find(g => String(g.index) === $("gpu").value);
-  $("gpu-info").textContent = gpu ? `${gpu.memory_used_mb} / ${gpu.memory_total_mb} MiB · ${gpu.utilization}% util` : "";
-  $("gpu").title = gpu?.uuid || "Select a physical GPU index";
+  setText("gpu-info", gpu ? `${gpu.memory_used_mb} / ${gpu.memory_total_mb} MiB · ${gpu.utilization}% util` : "");
+  const title = gpu?.uuid || "Select a physical GPU index";
+  if ($("gpu").title !== title) $("gpu").title = title;
 }
-async function loadNodes() {
+async function loadNodes({reset = false, force = false} = {}) {
+  clearTimeout(nodeRefreshTimer);
   const request = ++nodeRequest, cluster = $("cluster").value;
-  session = null; renderSession();
-  options($("node"), [["", "Loading nodes…"]]); controls();
-  const response = await api(`/api/clusters/${encodeURIComponent(cluster)}/nodes`);
-  if (request !== nodeRequest) return;
-  for (const n of response.nodes) nodeLabels.set(`${cluster}/${n.name}`, n.ip || n.name);
-  options($("node"), response.nodes.map(n => [n.name, (n.ip || n.name) + (n.ready === false ? " (NotReady)" : "")]));
-  for (const option of $("node").options) option.title = option.value;
-  historyKey = "";
-  if (!response.nodes.length) options($("node"), [["", "No nodes available"]]);
-  selectSession();
+  if (reset) {
+    clearTimeout(nodeFreshnessTimer);
+    nodeAutoSelect = true;
+    session = null; renderSession();
+    options($("node"), [["", "Loading nodes…"]]); controls();
+  }
+  if (expireNodeOptions($("node"))) choices.sync();
+  const rule = config.clusters.find(entry => entry.name === cluster)?.gpu_idle || {};
+  setText("node-gpu-help", `All idle: every GPU at ≤${rule.utilization_percent ?? 0}% utilization and ≤${rule.memory_mb ?? 128} MiB used. Unknown means unverified.`);
+  if (reset || force) {
+    setDisabled("refresh-nodes", true);
+    setText("node-refresh-status", "Checking GPU status…");
+  }
+  let delay = 15000;
+  try {
+    const response = await api(`/api/clusters/${encodeURIComponent(cluster)}/nodes${force ? "?refresh=1" : ""}`);
+    if (request !== nodeRequest || cluster !== $("cluster").value) return;
+    const nodes = sortNodeList(response.nodes), previous = $("node").value;
+    const previousOption = $("node").selectedOptions[0];
+    const selected = selectNodeValue(nodes, previous, nodeAutoSelect, !!session);
+    for (const node of nodes) nodeLabels.set(`${cluster}/${node.name}`, node.ip || node.name);
+    const entries = nodes.map(node => {
+      const gpu = node.gpu || {}, view = nodeGpuView(node), label = node.ip || node.name;
+      const option = new Option(`${label} · ${view.label}`, node.name);
+      option.disabled = view.disabled;
+      option.dataset.choiceLabel = label;
+      option.dataset.choiceStatus = view.status;
+      option.dataset.choiceSummary = view.label;
+      option.dataset.choiceBrief = view.brief;
+      option.dataset.choiceCheckedAt = String(gpu.checked_at || "");
+      const details = [node.name, view.label];
+      if (gpu.total !== null && gpu.total !== undefined) details.push(`${gpu.measured || 0}/${gpu.total} GPUs measured`);
+      if (gpu.max_utilization !== null && gpu.max_utilization !== undefined) details.push(`Max utilization: ${gpu.max_utilization}%`);
+      if (gpu.max_memory_used_mb !== null && gpu.max_memory_used_mb !== undefined) details.push(`Max used memory: ${gpu.max_memory_used_mb} MiB`);
+      if (gpu.checked_at) details.push(`Checked: ${new Date(gpu.checked_at * 1000).toLocaleTimeString()}`);
+      if (gpu.reason) details.push(gpu.reason);
+      if (gpu.source) details.push(`Source: ${gpu.source}`);
+      option.title = details.join("\n");
+      return option;
+    });
+    // Keep a chosen workspace visible even if it disappears from a refreshed list.
+    if (selected && !entries.some(option => option.value === selected)) {
+      const retained = new Option(previousOption?.text || selected, selected);
+      retained.disabled = true;
+      retained.dataset.choiceLabel = previousOption?.dataset.choiceLabel || selected;
+      retained.dataset.choiceStatus = "unknown";
+      retained.dataset.choiceSummary = "No longer listed";
+      retained.dataset.choiceBrief = "Unavailable";
+      retained.title = "This selected node is no longer listed. Choose another node to connect.";
+      entries.push(retained);
+    }
+    updateOptions($("node"), entries.length ? entries : [new Option("No nodes available", "")]);
+    $("node").value = selected;
+    choices.sync();
+    scheduleNodeFreshness();
+    selectSession();
+    nodeAutoSelect = nodeAutoSelect && !!response.refreshing && !session;
+    delay = response.refreshing ? 2000 : 15000;
+    const checked = response.updated_at ? new Date(response.updated_at * 1000).toLocaleTimeString() : null;
+    const summary = response.refreshing
+      ? `Refreshing${checked ? ` · Last ${checked}` : " GPU status…"}`
+      : checked ? `Updated ${checked}` : "GPU status unavailable";
+    setText("node-refresh-status", summary);
+    if ($("node-refresh-status").title !== summary) $("node-refresh-status").title = summary;
+  } catch (e) {
+    if (request !== nodeRequest || cluster !== $("cluster").value) return;
+    if (expireNodeOptions($("node"))) choices.sync();
+    setText("node-refresh-status", "Could not refresh GPU status");
+    $("node-refresh-status").title = "Could not refresh GPU status";
+    error(e.message);
+  } finally {
+    if (request === nodeRequest && cluster === $("cluster").value) {
+      setDisabled("refresh-nodes", false);
+      nodeRefreshTimer = setTimeout(() => loadNodes(), delay);
+    }
+  }
 }
 function selectSession() {
   session = state.sessions.find(s => s.cluster === $("cluster").value && s.node === $("node").value && s.status !== "released") || null;
@@ -271,7 +440,7 @@ function updateHistoryTimes() {
 }
 function renderHistory() {
   $("run-count").textContent = state.runs.length;
-  const key = JSON.stringify(state.runs.map(r => [r.id,r.status,r.created_at,r.node_ip,r.args,r.execution])) + selectedRun;
+  const key = JSON.stringify(state.runs.map(r => [r.id,r.status,r.created_at,r.node_ip || nodeLabel(r.cluster, r.node),r.args,r.execution])) + selectedRun;
   if (key === historyKey) return;
   historyKey = key;
   if (!state.runs.length) return;
@@ -341,10 +510,13 @@ async function run() {
   });
 }
 $("error").onclick = () => { $("error").hidden = true; };
-$("cluster").onchange = () => action(loadNodes);
-$("node").onchange = selectSession;
+$("cluster").onchange = () => loadNodes({reset: true});
+$("node").onchange = () => { nodeAutoSelect = false; selectSession(); };
+$("node").addEventListener("choice-select", () => { nodeAutoSelect = false; });
+$("refresh-nodes").onclick = () => loadNodes({force: true});
 $("gpu").onchange = () => { gpuInfo(); controls(); };
 $("connect").onclick = () => action(async () => {
+  nodeAutoSelect = false;
   session = await api("/api/sessions", {cluster:$("cluster").value,node:$("node").value});
   state.sessions = [...state.sessions.filter(s => s.id !== session.id),session]; renderSession();
 });
@@ -561,7 +733,7 @@ async function init() {
     options($("profile"),config.profiles.map(p => [p.name,p.label]));
     setProfile(config.profiles[0].name);
     state = await api("/api/state"); renderHistory();
-    await action(loadNodes); setInterval(poll,800); setInterval(updateHistoryTimes,15000);
+    await action(() => loadNodes({reset: true})); setInterval(poll,800); setInterval(updateHistoryTimes,15000);
   } catch (e) { error(e.message); }
 }
 init();

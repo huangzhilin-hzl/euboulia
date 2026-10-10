@@ -30,6 +30,14 @@ The server binds only to `127.0.0.1`. Starting it does not create a Pod. In the 
    uses the original node name. Targets come from the cluster or the local `nodes`
    allowlist. Creating a session is asynchronous;
    image-pull failures and other Pod status information remain in the local record.
+   The Node menu places nodes with **all GPUs idle** first. Green means every
+   physical GPU was measured and met the idle rule; orange means at least one
+   GPU is busy, with the number of idle cards shown alongside the node. Gray
+   means GPU status is unknown or the node has no GPU, and red means NotReady.
+   Unknown, partial, unsupported MIG, or expired measurements are never green.
+   Known NotReady and non-GPU nodes cannot be selected for a new session.
+   GPU status refreshes in the background, with a manual refresh beside the
+   Node selector; refreshing preserves an explicitly selected node.
 2. Choose **GPU index** from the Pod's actual `nvidia-smi` inventory. The workbench
    displays memory use and GPU utilization; the refresh button updates them.
 3. Select a profile, edit `solution.py`, and click **Run** or press Cmd/Ctrl+Enter.
@@ -109,6 +117,45 @@ then uses an API deletion UID precondition.
 See NVIDIA's [device visibility documentation](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/docker-specialized.html)
 and [GPU sharing documentation](https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/latest/gpu-sharing.html)
 for runtime requirements and isolation limits.
+
+### Node GPU status
+
+GPU status reads existing DCGM exporter Pods using the Kubernetes API's Pod
+HTTP proxy. Each exporter is mapped by its Pod's `spec.nodeName`; a Service
+proxy is not used because it can return a random single node. Reading requires
+Pod list and Pod proxy permissions in the monitoring namespace. The playground
+does not install monitoring Pods. For a node without exporter metrics, it can
+query `nvidia-smi` inside an existing owned Playground Pod after verifying its
+cluster fingerprint and immutable Pod UID. Other workload Pods are not exec
+targets. If neither source is available, the node remains selectable with an
+**Unknown** status.
+
+The default idle rule requires every physical GPU to have **0% utilization and
+at most 128 MiB framebuffer memory used**. The small memory allowance accommodates
+driver overhead; a loaded model with 0% utilization still counts as busy.
+Measurements must cover the expected physical GPU count and contain valid
+utilization and memory values. Nodes without advertised GPU capacity remain
+Unknown, since missing device-plugin resources do not prove that physical GPUs
+are absent; existing exporter or owned-Pod observations can still identify busy
+GPUs on those nodes. The status is a recent snapshot, not a reservation;
+another workload may start after the measurement. Status is cached for 15 seconds
+and measurements older than 45 seconds are shown as Unknown.
+
+The exporter location and idle rule can be customized per cluster:
+
+```yaml
+clusters:
+  gpu-lab:
+    # Other cluster fields are still required.
+    gpu_metrics:
+      namespace: nvidia-gpu
+      selector: app.kubernetes.io/name=dcgm-exporter
+      port: 9400
+      idle_utilization_percent: 0
+      idle_memory_mb: 128
+```
+
+DCGM metric units follow the [NVIDIA exporter documentation](https://docs.nvidia.com/datacenter/dcgm/latest/installation/install-dcgm-exporter.html).
 
 ## Environments and persistence
 
