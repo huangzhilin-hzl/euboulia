@@ -183,7 +183,7 @@ class Worker:
         setup_deadline = time.monotonic() + r["setup_timeout"]
         env_key = hashlib.sha256(
             json.dumps(
-                ["parent-sites-v2", r["profile"], sys.version, sys.executable], sort_keys=True
+                ["parent-sites-v3", r["profile"], sys.version, sys.executable], sort_keys=True
             ).encode()
         ).hexdigest()[:20]
         env_root = self.root / "venvs"
@@ -255,7 +255,7 @@ class Worker:
                         timeout=30,
                     ).strip()
                     (Path(site_dir) / "00-molou-image-sites.pth").write_text(
-                        f"import site; [site.addsitedir(p) for p in {parents!r}]\n"
+                        f"import site; list(map(site.addsitedir, {parents!r}))\n"
                     )
                 packages = r["profile"]["packages"]
                 if packages and self.command(
