@@ -29,6 +29,15 @@ class Profile:
 
 
 @dataclass(frozen=True)
+class GpuMetrics:
+    namespace: str = "nvidia-gpu"
+    selector: str = "app.kubernetes.io/name=dcgm-exporter"
+    port: int = 9400
+    idle_memory_mb: int = 128
+    idle_utilization_percent: int = 0
+
+
+@dataclass(frozen=True)
 class Cluster:
     name: str
     context: str
@@ -41,6 +50,7 @@ class Cluster:
     kubeconfig: Path | None
     nodes: tuple[str, ...]
     startup_timeout: int
+    gpu_metrics: GpuMetrics = field(default_factory=GpuMetrics)
 
     @property
     def fingerprint(self) -> str:
@@ -104,6 +114,28 @@ def _identifier(value: object, name: str) -> str:
     return result
 
 
+def _gpu_metrics(value: object) -> GpuMetrics:
+    raw = mapping(value, "gpu_metrics")
+    _keys(
+        raw,
+        {"namespace", "selector", "port", "idle_memory_mb", "idle_utilization_percent"},
+        "gpu_metrics",
+    )
+    return GpuMetrics(
+        namespace=_identifier(raw.get("namespace", "nvidia-gpu"), "gpu_metrics.namespace"),
+        selector=string(
+            raw.get("selector", "app.kubernetes.io/name=dcgm-exporter"), "gpu_metrics.selector"
+        ),
+        port=integer(raw.get("port", 9400), "gpu_metrics.port", 1, 65535),
+        idle_memory_mb=integer(
+            raw.get("idle_memory_mb", 128), "gpu_metrics.idle_memory_mb", 0, 1024 * 1024
+        ),
+        idle_utilization_percent=integer(
+            raw.get("idle_utilization_percent", 0), "gpu_metrics.idle_utilization_percent", 0, 100
+        ),
+    )
+
+
 def load_config(path: Path | None = None) -> PlaygroundConfig:
     source = (path or Path.home() / ".config/euboulia/playground.yaml").expanduser().resolve()
     try:
@@ -154,6 +186,7 @@ def load_config(path: Path | None = None) -> PlaygroundConfig:
                 "nodes",
                 "startup_timeout_seconds",
                 "gpu_access",
+                "gpu_metrics",
             },
             f"clusters.{name}",
         )
@@ -204,6 +237,7 @@ def load_config(path: Path | None = None) -> PlaygroundConfig:
             kubeconfig=_path(c["kubeconfig"], source) if "kubeconfig" in c else None,
             nodes=tuple(_identifier(n, "node") for n in _strings(c.get("nodes", []), "nodes")),
             startup_timeout=integer(c.get("startup_timeout_seconds", 300), "startup timeout"),
+            gpu_metrics=_gpu_metrics(c.get("gpu_metrics", {})),
         )
     if not clusters:
         raise ValueError("configure at least one cluster")

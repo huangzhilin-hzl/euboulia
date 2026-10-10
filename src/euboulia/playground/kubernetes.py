@@ -19,6 +19,43 @@ class PlaygroundError(RuntimeError):
     """An actionable cluster or execution failure."""
 
 
+def node_gpu_inventory(item: dict[str, Any]) -> tuple[int | None, bool]:
+    """Read advertised physical inventory, never scheduled resource occupancy."""
+    capacity = item.get("status", {}).get("capacity")
+    labels = item.get("metadata", {}).get("labels", {})
+    mig = False
+    disabled = {"", "0", "false", "disabled", "all-disabled", "none", "off"}
+    for key, value in labels.items():
+        name, state = key.lower().split("/")[-1], str(value).lower()
+        if name in {"mig.config", "gpu-mig-config", "mig.mode"} and state not in disabled:
+            mig = True
+        if name in {"gpu-mode", "gpu.mode"} and state == "mig":
+            mig = True
+    counts = []
+    if not isinstance(capacity, dict):
+        return None, mig
+    for key, value in capacity.items():
+        if not key.startswith("nvidia.com/"):
+            continue
+        if "mig" in key.lower():
+            mig = mig or str(value) != "0"
+            continue
+        try:
+            count = int(value)
+        except (ValueError, TypeError):
+            return None, mig
+        if count < 0:
+            return None, mig
+        counts.append(count)
+    # Missing device-plugin advertisement does not establish a physically GPU-free node.
+    if not counts:
+        return None, mig
+    # Vendor aliases can advertise the same devices under multiple resource names.
+    count = max(counts, default=0)
+    gpu_hint = any("gpu" in key.lower() and value for key, value in labels.items())
+    return (None if not count and gpu_hint else count), mig
+
+
 def manifest(cluster: Cluster, session: dict[str, Any]) -> dict[str, Any]:
     pod = copy.deepcopy(cluster.template)
     pod.pop("status", None)
@@ -122,9 +159,13 @@ class Kubernetes:
             if not self.cluster.nodes:
                 raise
             # Keep explicit targets usable without node-read RBAC, as before.
-            return [{"name": n, "ip": None, "ready": None} for n in self.cluster.nodes]
+            return [
+                {"name": n, "ip": None, "ready": None, "gpu_count": None, "gpu_mig": False}
+                for n in self.cluster.nodes
+            ]
         result = []
         for item in payload.get("items", [payload]):
+            gpu_count, gpu_mig = node_gpu_inventory(item)
             status = item.get("status", {})
             addresses = status.get("addresses", [])
             ip = next(
@@ -144,6 +185,8 @@ class Kubernetes:
                         c.get("type") == "Ready" and c.get("status") == "True"
                         for c in status.get("conditions", [])
                     ),
+                    "gpu_count": gpu_count,
+                    "gpu_mig": gpu_mig,
                 }
             )
         if self.cluster.nodes:

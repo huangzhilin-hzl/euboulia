@@ -12,8 +12,9 @@ from typing import Any
 from urllib.parse import parse_qs, urlsplit
 
 from euboulia.playground.config import PlaygroundConfig, integer, load_config, mapping, string
-from euboulia.playground.kubernetes import Kubernetes, PlaygroundError
+from euboulia.playground.kubernetes import PlaygroundError
 from euboulia.playground.manager import Manager
+from euboulia.playground.node_status import NodeMonitor
 from euboulia.playground.profiling import DEFAULT_ARGUMENTS, OPTIONS
 
 
@@ -24,6 +25,13 @@ class Server(ThreadingHTTPServer):
         self.manager = manager
         self.token = secrets.token_urlsafe(32)
         super().__init__(("127.0.0.1", integer(port, "port", 0, 65535)), Handler)
+        self.node_monitor = NodeMonitor(
+            manager.config.clusters, sessions=lambda: manager.snapshot()["sessions"]
+        )
+
+    def server_close(self) -> None:
+        self.node_monitor.close()
+        super().server_close()
 
     @property
     def url(self) -> str:
@@ -98,7 +106,13 @@ class Handler(BaseHTTPRequestHandler):
                     self._json(200, manager.snapshot())
                     return
                 if len(parts) == 4 and parts[:2] == ["api", "clusters"] and parts[3] == "nodes":
-                    self._json(200, {"nodes": Kubernetes(config.clusters[parts[2]]).nodes()})
+                    query = parse_qs(request.query)
+                    self._json(
+                        200,
+                        self.server.node_monitor.snapshot(
+                            parts[2], refresh=query.get("refresh") == ["1"]
+                        ),
+                    )
                     return
                 if len(parts) == 5 and parts[:2] == ["api", "runs"] and parts[3] == "reports":
                     path = manager.report_path(parts[2], parts[4])
@@ -200,7 +214,17 @@ def public_config(config: PlaygroundConfig) -> dict[str, Any]:
         code = path.read_text() if path.is_file() else "print('Hello from the GPU playground')\n"
         profiles.append({"name": p.name, "label": p.label, "code": code})
     return {
-        "clusters": [{"name": c.name, "namespace": c.namespace} for c in config.clusters.values()],
+        "clusters": [
+            {
+                "name": c.name,
+                "namespace": c.namespace,
+                "gpu_idle": {
+                    "memory_mb": c.gpu_metrics.idle_memory_mb,
+                    "utilization_percent": c.gpu_metrics.idle_utilization_percent,
+                },
+            }
+            for c in config.clusters.values()
+        ],
         "profiles": profiles,
         "run_timeout_seconds": config.run_timeout,
         "profiling_timeout_seconds": config.profiling_timeout,
