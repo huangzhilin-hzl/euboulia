@@ -32,15 +32,11 @@ clusters:
     # Optional allowlist; also works without permission to list nodes.
     # nodes: [your-gpu-node]
 profiles:
-  cutedsl:
-    label: CuTe DSL
+  gpu:
+    label: GPU environment
     system_site_packages: true
-    packages: [nvidia-cutlass-dsl]
-  tilelang:
-    label: TileLang
-    system_site_packages: true
-    packages: [tilelang]
-  python:
-    label: Python / PyTorch
-    system_site_packages: true
-    packages: []
+    packages:
+      - nvidia-cutlass-dsl
+      - tilelang==0.1.15
+      - apache-tvm[cuda]==0.25.0.post1
+      - apache-tvm-ffi>=0.1.12,<0.1.13

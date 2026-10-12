@@ -160,12 +160,31 @@ DCGM metric units follow the [NVIDIA exporter documentation](https://docs.nvidia
 ## Environments and persistence
 
 The image needs Linux, Python 3.10+, `venv`, `pip`, `nvidia-smi`, a compatible CUDA
-development toolkit and GPU-enabled PyTorch for the included starters. Profiles are
-independent Python venvs keyed by package specification and interpreter version.
+development toolkit and GPU-enabled PyTorch for the included starters. The default
+configuration uses one **GPU environment** for PyTorch, CuTe DSL, TileLang, and
+TIRx, so there is no language/environment selector. All scripts share its cached
+venv; each run starts a fresh Python process. Run TIRx and TileLang in separate
+scripts/runs: TileLang uses a bundled TVM that cannot be mixed with the external
+TIRx installation in the same Python process. Explicit custom `profiles` remain
+supported for existing configurations.
+
+TIRx is installed through `apache-tvm`, not a package named `tirx`. The default
+combination pins TVM 0.25.0.post1 and TileLang 0.1.15 with a compatible
+`apache-tvm-ffi` range. Newer TVM and TileLang releases can require conflicting
+FFI versions, so upgrade them together after checking compatibility. The
+`apache-tvm[cuda]` extra supplies Python CUDA bindings, and the default Linux TVM
+wheel provides the CUDA runtime library. Compiling/running CUDA kernels also needs
+a compatible driver and CUDA toolkit/NVCC in the image. See the
+[TIRx installation guide](https://tvm.apache.org/docs/tirx/install.html).
+
+Environments are keyed by package specification and interpreter version.
 `system_site_packages: true` reuses the image's PyTorch/CUDA packages; set it false
 and include all needed packages for a self-contained venv. `packages` accepts pip
 requirement strings; pin versions for repeatability. Set package mirrors using the
 trusted Pod template's pip environment variables or a prepared image.
+If the image's `PIP_CONSTRAINT` pins incompatible DSL versions, override it with
+`env: {PIP_CONSTRAINT: ""}` for this profile. This affects its venv installation;
+the base image remains unchanged.
 Image interpreters that already live in a venv are supported: their package
 directories and DSL `.pth` bootstrap files are also inherited when this option is on.
 Profile `env` can set runtime-specific values such as `LD_LIBRARY_PATH` or `CUDA_HOME`.

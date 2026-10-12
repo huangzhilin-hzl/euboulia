@@ -322,7 +322,13 @@ class Manager:
         }:
             raise ValueError("unknown run fields")
         sid = string(payload.get("session"), "session")
-        profile = self.config.profiles[string(payload.get("profile"), "profile")]
+        profile_name = string(payload.get("profile"), "profile")
+        # Older pages still submit the built-in language names. A single configured
+        # environment runs all of them, while custom multi-profile configs stay explicit.
+        if len(self.config.profiles) == 1 and profile_name in {"cutedsl", "tilelang", "python"}:
+            profile = next(iter(self.config.profiles.values()))
+        else:
+            profile = self.config.profiles[profile_name]
         gpu_index = integer(payload.get("gpu_index"), "GPU index", 0, 1024)
         code = string(payload.get("code"), "code")
         if len(code.encode()) > 256 * 1024:
@@ -430,7 +436,16 @@ class Manager:
                         f"Inherit image packages: {inherited}\n"
                     )
                 else:
-                    gpu_packages = {"torch", "nvidia-cutlass-dsl", "tilelang", "triton"}
+                    gpu_packages = {
+                        "torch",
+                        "nvidia-cutlass-dsl",
+                        "tilelang",
+                        "triton",
+                        "apache-tvm",
+                        "apache-tvm-ffi",
+                        "cuda-bindings",
+                        "tirx-kernels",
+                    }
                     versions = ", ".join(
                         f"{name}=={version}"
                         for name, version in sorted(event["packages"].items())

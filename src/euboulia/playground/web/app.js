@@ -4,7 +4,7 @@ const choices = window.PlaygroundChoices;
 choices.init();
 const activeStates = new Set(["queued", "verifying_gpu", "preparing_environment", "running", "cancelling", "profiling", "exporting", "finalizing"]);
 let config, session = null, selectedRun = null, cursor = 0, state = {sessions: [], runs: []};
-let currentProfile = "", polling = false, busy = false, historyKey = "", outputSize = 0, nodeRequest = 0;
+let currentProfile = "", editorTouched = false, polling = false, busy = false, historyKey = "", outputSize = 0, nodeRequest = 0;
 const nodeLabels = new Map();
 let nodeRefreshTimer = 0, nodeFreshnessTimer = 0, nodeAutoSelect = true;
 let argumentsTarget = "arguments", currentMode = "run", profilerDraft = {}, reportKey = "";
@@ -127,6 +127,66 @@ function scheduleNodeFreshness() {
   }, Math.max(1, Math.min(...deadlines) - Date.now() + 1));
 }
 function draftKey(profile) { return `molou-playground-draft-${profile}`; }
+const lastProfileKey = "molou-playground-last-profile";
+let gpuMigrationPending = false;
+function lastProfile() {
+  try { return localStorage.getItem(lastProfileKey); }
+  catch (_) { return null; }
+}
+function rememberProfile(name) {
+  if (name === "gpu" && gpuMigrationPending) return;
+  try { localStorage.setItem(lastProfileKey, name); }
+  catch (_) { /* optional preference */ }
+}
+function readDraft(name) {
+  try {
+    return {
+      code: localStorage.getItem(draftKey(name)),
+      arguments: localStorage.getItem(`${draftKey(name)}-arguments`),
+      profiling: localStorage.getItem(`${draftKey(name)}-profiling`),
+    };
+  } catch (_) { return {code: null, arguments: null, profiling: null}; }
+}
+function migrateGpuDraft() {
+  const existing = readDraft("gpu");
+  if (Object.values(existing).some(value => value !== null)) return null;
+  const recent = lastProfile(), candidates = [...new Set([recent, "cutedsl", "tilelang", "python"])];
+  let draft = null;
+  for (const name of candidates) {
+    if (!name || name === "gpu") continue;
+    const candidate = readDraft(name);
+    if (candidate.code !== null) { draft = candidate; break; }
+  }
+  if (!draft) return null;
+  const entries = [
+    [`${draftKey("gpu")}-arguments`, draft.arguments ?? ""],
+    [`${draftKey("gpu")}-profiling`, draft.profiling ?? "{}"],
+    [draftKey("gpu"), draft.code],
+  ];
+  const written = [];
+  try {
+    for (const [key, value] of entries) { localStorage.setItem(key, value); written.push(key); }
+    gpuMigrationPending = false;
+  } catch (_) {
+    // Keep the source intact and use it in memory even if storage is unavailable.
+    gpuMigrationPending = true;
+    for (const key of written) {
+      try { localStorage.removeItem(key); } catch (_) { /* storage can be blocked */ }
+    }
+  }
+  return draft;
+}
+function initializeProfiles() {
+  const profiles = config.profiles, recent = lastProfile();
+  const selected = profiles.find(profile => profile.name === recent) || profiles[0];
+  const pending = !currentProfile && editorTouched
+    ? {code: $("code").value, arguments: $("arguments").value} : null;
+  options($("profile"), profiles.map(profile => [profile.name, profile.label]));
+  $("profile").closest(".choice-control").hidden = profiles.length === 1;
+  const migrated = profiles.length === 1 && selected.name === "gpu" ? migrateGpuDraft() : null;
+  setProfile(selected.name, pending?.code, pending?.arguments, migrated);
+  if (pending) saveDraft();
+}
 function argumentLines(text) {
   const lines = text ? text.split("\n").length : 0;
   return `${lines} ${lines === 1 ? "line" : "lines"}`;
@@ -159,27 +219,44 @@ function applyArguments() {
   $("arguments-dialog").close();
 }
 function saveDraft() {
+  editorTouched = true;
+  if (!currentProfile) return;
+  let newGpuKeys = [];
   try {
+    if (currentProfile === "gpu" && gpuMigrationPending) {
+      newGpuKeys = [draftKey("gpu"), `${draftKey("gpu")}-arguments`, `${draftKey("gpu")}-profiling`]
+        .filter(key => localStorage.getItem(key) === null);
+    }
     localStorage.setItem(draftKey(currentProfile), $("code").value);
     localStorage.setItem(`${draftKey(currentProfile)}-arguments`, $("arguments").value);
     profilerDraft.mode = currentMode;
     profilerDraft[currentMode] = $("profiler-arguments").value;
     localStorage.setItem(`${draftKey(currentProfile)}-profiling`, JSON.stringify(profilerDraft));
+    if (currentProfile === "gpu") gpuMigrationPending = false;
+    rememberProfile(currentProfile);
     $("saved").textContent = "Draft saved";
   }
-  catch (_) { $("saved").textContent = "Draft not saved · download a copy"; }
+  catch (_) {
+    // A partial retry must not prevent the intact source bundle from migrating on reload.
+    for (const key of newGpuKeys) {
+      try { localStorage.removeItem(key); } catch (_) { /* storage can be blocked */ }
+    }
+    $("saved").textContent = "Draft not saved · download a copy";
+  }
 }
-function setProfile(name, code, argumentsText) {
+function setProfile(name, code, argumentsText, migrated = null) {
   currentProfile = name; $("profile").value = name;
-  let draft = null, savedArguments = "";
-  try {
-    draft = localStorage.getItem(draftKey(name));
-    savedArguments = localStorage.getItem(`${draftKey(name)}-arguments`) || "";
-  } catch (_) { /* storage can be disabled */ }
-  $("code").value = code ?? draft ?? config.profiles.find((p) => p.name === name).code;
-  $("arguments").value = argumentsText ?? savedArguments;
+  const draft = migrated || readDraft(name);
+  $("code").value = code ?? draft.code ?? config.profiles.find((p) => p.name === name).code;
+  $("arguments").value = argumentsText ?? draft.arguments ?? "";
   profilerDraft = {...config.profiler_defaults, mode: "run"};
-  try { Object.assign(profilerDraft, JSON.parse(localStorage.getItem(`${draftKey(name)}-profiling`) || "{}")); } catch (_) { /* use defaults */ }
+  try {
+    const saved = JSON.parse(draft.profiling || "{}");
+    for (const mode of Object.keys(config.profiler_defaults)) {
+      if (typeof saved?.[mode] === "string") profilerDraft[mode] = saved[mode];
+    }
+    if (Object.hasOwn(config.profiler_defaults, saved?.mode)) profilerDraft.mode = saved.mode;
+  } catch (_) { /* use defaults */ }
   // Upgrade the old default without changing any custom filters or profiler options.
   if (profilerDraft.ncu.trim().replace(/\s+/g, " ") === "--set detailed --launch-count 1") {
     profilerDraft.ncu = config.profiler_defaults.ncu;
@@ -188,6 +265,7 @@ function setProfile(name, code, argumentsText) {
   setMode(profilerDraft.mode in config.profiler_defaults ? profilerDraft.mode : "run");
   updateArguments();
   highlight(); updateCursor(); choices.sync();
+  rememberProfile(name);
 }
 function setMode(mode) {
   currentMode = mode; $("mode").value = mode;
@@ -202,9 +280,16 @@ function updateProfiler() {
   $("profiling-hint").textContent = currentMode === "ncu" ? "Filter kernels with --kernel-name 'regex:Sm100SimpleCopyKernel'. The default regex:.* matches all names; --launch-count 1 captures the first match." : "CUDA / NVTX timeline collection. Text statistics are saved locally.";
 }
 function restoreProfiling(run) {
-  const mode = run.mode || "run";
+  const mode = Object.hasOwn(config.profiler_defaults, run.mode) ? run.mode : "run";
   profilerDraft[mode] = run.profiler_arguments ?? config.profiler_defaults[mode];
   setMode(mode);
+}
+function loadRunDraft(run, code) {
+  saveDraft();
+  const profile = config.profiles.length === 1 ? config.profiles[0].name
+    : config.profiles.some(profile => profile.name === run.profile) ? run.profile : currentProfile;
+  setProfile(profile, code, run.arguments || "");
+  restoreProfiling(run);
 }
 function resetResults() {
   reportKey = ""; options($("result-view"), [["console", "Console"]]);
@@ -468,9 +553,7 @@ function renderHistory() {
     b.onclick = () => action(async () => {
       selectedRun = r.id; cursor = 0; clearConsole(); resetResults();
       const saved = await api(`/api/runs/${r.id}/code`);
-      if (config.profiles.some(p => p.name === r.profile)) { saveDraft(); setProfile(r.profile, saved.code, r.arguments || ""); }
-      else { $("code").value = saved.code; $("arguments").value = r.arguments || ""; updateArguments(); highlight(); }
-      restoreProfiling(r); renderHistory(); await readEvents();
+      loadRunDraft(r, saved.code); renderHistory(); await readEvents();
     });
     return b;
   }));
@@ -730,8 +813,7 @@ async function init() {
   try {
     config = await api("/api/config");
     options($("cluster"),config.clusters.map(c => [c.name,c.name]));
-    options($("profile"),config.profiles.map(p => [p.name,p.label]));
-    setProfile(config.profiles[0].name);
+    initializeProfiles();
     state = await api("/api/state"); renderHistory();
     await action(() => loadNodes({reset: true})); setInterval(poll,800); setInterval(updateHistoryTimes,15000);
   } catch (e) { error(e.message); }

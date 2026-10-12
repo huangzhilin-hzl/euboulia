@@ -1,0 +1,15 @@
+import torch
+
+# One environment supports PyTorch, CuTe DSL, TileLang, and TIRx.
+# To author TIRx kernels: from tvm.script import tirx as T
+# Run TIRx and TileLang in separate scripts; their TVM imports cannot be mixed.
+# The image's CUDA toolkit and GPU architecture must match your kernel.
+
+a = torch.arange(1024, device="cuda", dtype=torch.float32)
+b = torch.ones_like(a)
+c = a + b
+torch.cuda.synchronize()
+torch.testing.assert_close(c, a + 1)
+print("GPU:", torch.cuda.get_device_name(0))
+print("PyTorch:", torch.__version__)
+print("Vector add passed:", c[:8].tolist())
