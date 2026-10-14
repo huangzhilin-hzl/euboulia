@@ -697,8 +697,10 @@ class KubernetesTargetSupervisor:
         """Delete exactly one retained Pod recorded as owned by this executor."""
 
         selected_uid = normalize_run_uid(run_uid)
-        pod = self._owned_pod_from_run_record(selected_uid)
-        self._delete_owned_pod(pod)
+        pod = self._owned_pod_from_run_record(selected_uid, verify=False)
+        # A missing Pod in a mutable current context does not prove the original Pod is gone.
+        self._delete_owned_pod(pod, allow_missing=self.executor.context is not None)
+        self._wait_owned_pod_deleted(pod)
         record_path = self.storage.runs_dir / selected_uid / "run.json"
         record = dict(_mapping(json.loads(record_path.read_text(encoding="utf-8")), "run record"))
         cleanup_at = utc_now()
@@ -984,7 +986,7 @@ if any(destination.iterdir()):
                 f"(local tar={local_returncode}, Pod tar={remote_returncode})"
             )
 
-    def _owned_pod_from_run_record(self, run_uid: str) -> OwnedPod:
+    def _owned_pod_from_run_record(self, run_uid: str, *, verify: bool = True) -> OwnedPod:
         path = self.storage.runs_dir / run_uid / "run.json"
         try:
             payload: object = json.loads(path.read_text(encoding="utf-8"))
@@ -1009,14 +1011,22 @@ if any(destination.iterdir()):
             run_uid=run_uid,
             node_name=cast(str, node_name),
         )
-        self._assert_owned_pod(pod)
+        if verify:
+            self._assert_owned_pod(pod)
         return pod
 
     def _assert_owned_pod(self, pod: OwnedPod) -> None:
         self._inspect_owned_pod(pod)
 
     def _inspect_owned_pod(self, pod: OwnedPod) -> Mapping[str, object]:
+        payload = self._find_owned_pod(pod)
+        if payload is None:
+            raise RemoteExecutionError(f"owned Pod {pod.name} no longer exists")
+        return payload
+
+    def _find_owned_pod(self, pod: OwnedPod) -> Mapping[str, object] | None:
         argv = [*self._kubectl_prefix(), "get", "pod", pod.name, "--output=json"]
+        argv.append("--ignore-not-found")
         try:
             completed = subprocess.run(
                 argv,
@@ -1030,6 +1040,8 @@ if any(destination.iterdir()):
         if completed.returncode != 0:
             detail = completed.stderr.decode("utf-8", errors="replace").strip()
             raise RemoteExecutionError(f"cannot verify Pod ownership: {detail}")
+        if not completed.stdout.strip():
+            return None
         try:
             payload = json.loads(completed.stdout)
         except (json.JSONDecodeError, UnicodeDecodeError) as exc:
@@ -1074,8 +1086,20 @@ if any(destination.iterdir()):
             node_name=cast(str, node_name),
         )
 
-    def _delete_owned_pod(self, pod: OwnedPod) -> None:
-        self._assert_owned_pod(pod)
+    def _delete_owned_pod(self, pod: OwnedPod, *, allow_missing: bool = False) -> None:
+        if allow_missing:
+            if self._find_owned_pod(pod) is None:
+                return
+        else:
+            if self._find_owned_pod(pod) is None:
+                message = f"owned Pod {pod.name} no longer exists"
+                if self.executor.context is None:
+                    message += (
+                        " in the current context; cannot confirm cleanup without an explicit "
+                        "Kubernetes context. Set executor.context to the original cluster "
+                        "and retry cleanup."
+                    )
+                raise RemoteExecutionError(message)
         uri = f"/api/v1/namespaces/{self.executor.namespace}/pods/{pod.name}"
         delete_options = {
             "apiVersion": "v1",
@@ -1101,7 +1125,19 @@ if any(destination.iterdir()):
             raise RemoteExecutionError(f"cannot delete owned Pod {pod.name}: {exc}") from exc
         if completed.returncode != 0:
             detail = completed.stderr.decode("utf-8", errors="replace").strip()
+            if allow_missing and "(NotFound)" in detail:
+                return
             raise RemoteExecutionError(f"cannot delete owned Pod {pod.name}: {detail}")
+
+    def _wait_owned_pod_deleted(self, pod: OwnedPod) -> None:
+        deadline = time.monotonic() + 60
+        while self._find_owned_pod(pod) is not None:
+            if time.monotonic() >= deadline:
+                raise RemoteExecutionError(
+                    f"Pod {pod.name} is still terminating; its ownership record was kept. "
+                    "Retry cleanup once termination finishes."
+                )
+            time.sleep(0.5)
 
     def _kubectl_prefix(self, *, namespaced: bool = True) -> tuple[str, ...]:
         argv = [self.executor.kubectl]

@@ -21,6 +21,7 @@ def _executor(
     tmp_path: Path,
     *,
     local_project_dir: Path | None = None,
+    context: str | None = None,
 ) -> remote.KubernetesExecutorConfig:
     template = tmp_path / "pod-template.yaml"
     if not template.exists():
@@ -39,6 +40,7 @@ def _executor(
         namespace="inference",
         pod_template=template,
         container="runtime",
+        context=context,
         project_dir=PurePosixPath("/workspace/euboulia"),
         scratch_dir=PurePosixPath("/home/admin/.cache/euboulia"),
         local_project_dir=local_project_dir or tmp_path,
@@ -165,7 +167,7 @@ def test_delete_uses_exact_owned_pod_uid_as_api_precondition(
         run_uid="run-01HF7YAT000000000000000000",
         node_name="worker-8",
     )
-    monkeypatch.setattr(supervisor, "_assert_owned_pod", lambda candidate: None)
+    monkeypatch.setattr(supervisor, "_find_owned_pod", lambda candidate: {})
     observed: dict[str, object] = {}
 
     def fake_run(argv: list[str], **kwargs: object) -> object:
@@ -282,8 +284,9 @@ def test_cleanup_records_the_deleted_pod_state(
         encoding="utf-8",
     )
     deleted: list[remote.OwnedPod] = []
-    monkeypatch.setattr(supervisor, "_owned_pod_from_run_record", lambda selected: pod)
-    monkeypatch.setattr(supervisor, "_delete_owned_pod", deleted.append)
+    monkeypatch.setattr(supervisor, "_owned_pod_from_run_record", lambda selected, **kw: pod)
+    monkeypatch.setattr(supervisor, "_delete_owned_pod", lambda pod, **kw: deleted.append(pod))
+    monkeypatch.setattr(supervisor, "_wait_owned_pod_deleted", lambda pod: None)
     monkeypatch.setattr(remote, "utc_now", lambda: "2026-09-04T08:00:00+00:00")
 
     cleaned = supervisor.cleanup(run_uid)
@@ -295,6 +298,146 @@ def test_cleanup_records_the_deleted_pod_state(
     assert record["infrastructure_state"] == "pod_deleted"
     assert record["cleanup_at"] == "2026-09-04T08:00:00+00:00"
     assert record["updated_at"] == record["cleanup_at"]
+
+
+@pytest.mark.parametrize("present", [True, False])
+@pytest.mark.parametrize("context", [None, "gpu-lab"])
+def test_cleanup_accepts_an_already_missing_pod_only_with_an_explicit_context(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, present: bool, context: str | None
+) -> None:
+    run_uid = "run-01HF7YAT000000000000000000"
+    storage = remote.LocalStorageConfig(root=tmp_path / "results")
+    supervisor = remote.KubernetesTargetSupervisor(_executor(tmp_path, context=context), storage)
+    record = {
+        "run_uid": run_uid,
+        "executor": "h20-pod",
+        "namespace": "inference",
+        "pod": "euboulia-run-01hf7yat000000000000000000",
+        "pod_uid": "original-pod-uid",
+        "node": "worker-8",
+        "status": "failed",
+        "cleanup": "retained",
+    }
+    run_dir = storage.runs_dir / run_uid
+    run_dir.mkdir(parents=True)
+    record_path = run_dir / "run.json"
+    record_path.write_text(json.dumps(record))
+    pod = {
+        "metadata": {
+            "name": record["pod"],
+            "uid": record["pod_uid"],
+            "namespace": "inference",
+            "labels": {
+                "app.kubernetes.io/managed-by": "euboulia",
+                "euboulia.io/run": hashlib.sha256(run_uid.encode()).hexdigest()[:24],
+            },
+            "annotations": {"euboulia.io/run-uid": run_uid, "euboulia.io/executor": "h20-pod"},
+        },
+        "spec": {"nodeName": "worker-8"},
+    }
+    deletes = []
+
+    def fake_run(argv, **kwargs):
+        nonlocal present
+        if context is None:
+            assert "--context" not in argv
+        else:
+            assert argv[argv.index("--context") + 1] == context
+        if "get" in argv:
+            assert "--ignore-not-found" in argv
+            return subprocess.CompletedProcess(
+                argv, 0, stdout=json.dumps(pod).encode() if present else b"", stderr=b""
+            )
+        assert "delete" in argv
+        assert json.loads(kwargs["input"])["preconditions"] == {"uid": record["pod_uid"]}
+        deletes.append(argv)
+        present = False
+        return subprocess.CompletedProcess(argv, 0, stdout=b"{}", stderr=b"")
+
+    initially_present = present
+    monkeypatch.setattr(remote.subprocess, "run", fake_run)
+    if not initially_present and context is None:
+        with pytest.raises(remote.RemoteExecutionError, match=r"Set executor\.context"):
+            supervisor.cleanup(run_uid)
+        assert json.loads(record_path.read_text()) == record
+        assert deletes == []
+        return
+    supervisor.cleanup(run_uid)
+    if context is not None:
+        supervisor.cleanup(run_uid)
+    else:
+        with pytest.raises(remote.RemoteExecutionError, match="explicit Kubernetes context"):
+            supervisor.cleanup(run_uid)
+    assert len(deletes) == int(initially_present)
+    assert json.loads(record_path.read_text())["cleanup"] == "deleted"
+
+
+@pytest.mark.parametrize("mismatch", ["uid", "owner"])
+def test_cleanup_refuses_replaced_or_foreign_pod(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mismatch: str
+) -> None:
+    run_uid = "run-01HF7YAT000000000000000000"
+    storage = remote.LocalStorageConfig(root=tmp_path / "results")
+    supervisor = remote.KubernetesTargetSupervisor(_executor(tmp_path), storage)
+    record = {
+        "run_uid": run_uid,
+        "executor": "h20-pod",
+        "namespace": "inference",
+        "pod": "euboulia-run-01hf7yat000000000000000000",
+        "pod_uid": "original",
+        "node": "worker-8",
+        "status": "failed",
+        "cleanup": "retained",
+    }
+    run_dir = storage.runs_dir / run_uid
+    run_dir.mkdir(parents=True)
+    record_path = run_dir / "run.json"
+    record_path.write_text(json.dumps(record))
+    payload = {
+        "metadata": {
+            "name": record["pod"],
+            "uid": "replacement" if mismatch == "uid" else "original",
+            "namespace": "inference",
+            "labels": {
+                "app.kubernetes.io/managed-by": "other" if mismatch == "owner" else "euboulia",
+                "euboulia.io/run": hashlib.sha256(run_uid.encode()).hexdigest()[:24],
+            },
+            "annotations": {"euboulia.io/run-uid": run_uid, "euboulia.io/executor": "h20-pod"},
+        },
+        "spec": {"nodeName": "worker-8"},
+    }
+
+    def fake_run(argv, **kwargs):
+        assert "get" in argv  # A mismatch must never reach DELETE.
+        return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(payload).encode(), stderr=b"")
+
+    monkeypatch.setattr(remote.subprocess, "run", fake_run)
+    expected = "immutable Pod identity changed" if mismatch == "uid" else "not labelled"
+    with pytest.raises(remote.RemoteExecutionError, match=expected):
+        supervisor.cleanup(run_uid)
+    assert json.loads(record_path.read_text())["cleanup"] == "retained"
+
+
+def test_cleanup_keeps_ownership_record_when_pod_is_still_terminating(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    run_uid = "run-01HF7YAT000000000000000000"
+    storage = remote.LocalStorageConfig(root=tmp_path / "results")
+    supervisor = remote.KubernetesTargetSupervisor(_executor(tmp_path), storage)
+    pod = remote.OwnedPod("owned-pod", "original-uid", run_uid, "worker-8")
+    run_dir = storage.runs_dir / run_uid
+    run_dir.mkdir(parents=True)
+    record = {"run_uid": run_uid, "cleanup": "retained", "infrastructure_state": "pod_retained"}
+    record_path = run_dir / "run.json"
+    record_path.write_text(json.dumps(record))
+    monkeypatch.setattr(supervisor, "_owned_pod_from_run_record", lambda uid, **kw: pod)
+    monkeypatch.setattr(supervisor, "_delete_owned_pod", lambda pod, **kw: None)
+    monkeypatch.setattr(supervisor, "_find_owned_pod", lambda pod: {"status": {"phase": "Running"}})
+    clock = iter([0, 61])
+    monkeypatch.setattr(remote.time, "monotonic", lambda: next(clock))
+    with pytest.raises(remote.RemoteExecutionError, match="still terminating"):
+        supervisor.cleanup(run_uid)
+    assert json.loads(record_path.read_text()) == record
 
 
 def test_create_uses_unique_name_and_only_the_configured_namespace(

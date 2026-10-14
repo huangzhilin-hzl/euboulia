@@ -5,10 +5,12 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import signal
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import threading
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -25,6 +27,7 @@ from euboulia.optimization.contracts import utc_now
 from euboulia.progress import RUN_PHASES, read_run_progress
 from euboulia.remote import (
     HostRuntimeConfig,
+    KubernetesTargetSupervisor,
     default_runtime_config_path,
     load_host_runtime_config,
 )
@@ -446,6 +449,24 @@ class ControlStore:
             raise ControlError(f"updated run disappeared: {selected_uid}")
         return ControlRun.from_row(updated_row)
 
+    def delete_failed(self, run_uid: str) -> None:
+        """Remove a failed run and its indexed events after infrastructure cleanup."""
+
+        selected_uid = normalize_run_uid(run_uid)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT status, infrastructure_state FROM control_runs WHERE run_uid = ?",
+                (selected_uid,),
+            ).fetchone()
+            if row is None:
+                raise KeyError(selected_uid)
+            if row["status"] != "failed":
+                raise ControlError("only failed experiments can be deleted")
+            if row["infrastructure_state"] not in {"not_created", "pod_deleted"}:
+                raise ControlError("clean up the experiment's Pod before deleting its record")
+            connection.execute("DELETE FROM control_runs WHERE run_uid = ?", (selected_uid,))
+
     def events(self, run_uid: str, *, limit: int = 500) -> tuple[dict[str, JSONValue], ...]:
         selected_uid = normalize_run_uid(run_uid)
         if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0 or limit > 5000:
@@ -554,6 +575,7 @@ class TaskManager:
         self._thread: threading.Thread | None = None
         self._children: dict[str, subprocess.Popen[bytes]] = {}
         self._children_lock = threading.Lock()
+        self._maintenance_lock = threading.RLock()
 
     def start(self) -> None:
         if self._thread is not None and self._thread.is_alive():
@@ -654,11 +676,89 @@ class TaskManager:
         self._wake.set()
         return task
 
+    def _terminal_task(self, run_uid: str, *, failed_only: bool = False) -> ControlRun:
+        task = self.store.get(normalize_run_uid(run_uid))
+        if task is None:
+            raise KeyError(run_uid)
+        if failed_only and task.status != "failed":
+            raise ControlError("only failed experiments can be deleted")
+        if task.status not in _TERMINAL_STATUSES:
+            raise ControlError("stop the experiment before deleting its Pod")
+        if self._child_exit_code(task.run_uid, task.pid) is None:
+            raise ControlError("the experiment controller is still exiting; retry shortly")
+        return task
+
+    def cleanup_pod(self, run_uid: str) -> ControlRun:
+        """Delete only the terminal experiment's recorded, verified Pod."""
+
+        with self._maintenance_lock:
+            task = self._terminal_task(run_uid)
+            record = _read_json(self.runtime.storage.runs_dir / task.run_uid / "run.json")
+            if record is None:
+                raise ControlError("no readable Pod ownership record; no Pod was deleted")
+            if record.get("status") not in _TERMINAL_STATUSES:
+                raise ControlError("the Pod ownership record is not terminal; no Pod was deleted")
+            KubernetesTargetSupervisor(
+                self.runtime.executor(task.executor), self.runtime.storage
+            ).cleanup(task.run_uid)
+            return self.store.update(
+                task.run_uid,
+                infrastructure_state="pod_deleted",
+                detail="owned Pod deleted after terminal run",
+            )
+
+    def delete_failed(self, run_uid: str) -> None:
+        """Clean up the Pod, then remove this failed run's local data and index."""
+
+        with self._maintenance_lock:
+            task = self._terminal_task(run_uid, failed_only=True)
+            root = self.runtime.storage.root.resolve()
+            paths = (
+                root / "runs" / task.run_uid,
+                root / "submissions" / task.run_uid,
+                controller_log_path(root, task.run_uid),
+            )
+            for path in paths:
+                if path.parent.resolve() != path.parent or path.is_symlink():
+                    raise ControlError(f"refusing to delete a redirected run path: {path}")
+            record = _read_json(paths[0] / "run.json")
+            if record is not None and record.get("status") not in _TERMINAL_STATUSES:
+                raise ControlError("the run record is not terminal; no experiment was deleted")
+            infrastructure = (
+                _infrastructure_state(record) if record is not None else task.infrastructure_state
+            )
+            if infrastructure == "pod_deleted":
+                self.store.update(task.run_uid, infrastructure_state="pod_deleted")
+            elif task.infrastructure_state != "not_created" or (
+                record is not None and record.get("pod")
+            ):
+                self.cleanup_pod(task.run_uid)
+            elif (paths[0] / "run.json").exists() and record is None:
+                raise ControlError("cannot read the run record; no experiment was deleted")
+            # Keep the run recoverable if moving its files or deleting the index fails.
+            staging = Path(tempfile.mkdtemp(prefix=f".delete-{task.run_uid}-", dir=root))
+            moved: list[tuple[Path, Path]] = []
+            try:
+                for path in paths:
+                    if path.exists():
+                        destination = staging / path.parent.name
+                        path.rename(destination)
+                        moved.append((path, destination))
+                self.store.delete_failed(task.run_uid)
+            except Exception:
+                for original, destination in reversed(moved):
+                    destination.rename(original)
+                staging.rmdir()
+                raise
+            shutil.rmtree(staging)
+
     def reconcile(self) -> None:
-        for task in self.store.list(limit=1000, statuses=frozenset({"running", "disconnected"})):
-            self._reconcile_task(task)
-        for task in self.store.list(limit=1000, statuses=_TERMINAL_STATUSES):
-            self._reconcile_terminal_state(task)
+        with self._maintenance_lock:
+            active = self.store.list(limit=1000, statuses=frozenset({"running", "disconnected"}))
+            for task in active:
+                self._reconcile_task(task)
+            for task in self.store.list(limit=1000, statuses=_TERMINAL_STATUSES):
+                self._reconcile_terminal_state(task)
 
     def _loop(self) -> None:
         while not self._stop.is_set():
