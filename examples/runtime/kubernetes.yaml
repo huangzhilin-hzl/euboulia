@@ -3,7 +3,7 @@
 storage:
   root: ~/.local/share/euboulia
   sync:
-    raw_profiles: on_demand
+    raw_profiles: always
 
 executors:
   gpu-worker:

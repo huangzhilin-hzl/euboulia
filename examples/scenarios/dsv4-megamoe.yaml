@@ -249,10 +249,15 @@ optimization:
   profiling:
     provider: sglang_torch
     workload_point: isl16384-osl256-c1-n1
+    workload_points: [isl1024-osl1024-c1-n1, isl262144-osl1024-c16-n16]
+    repetitions: 2
+    request_waves: 4
+    purpose: diagnostic
     warmup_runs: 1
     start_step: 1
     num_steps: 3
-    activities: [GPU]
+    activities: [CPU, GPU]
+    semantic_scopes: true
     merge_profiles: false
     with_stack: false
     record_shapes: false
@@ -261,7 +266,7 @@ optimization:
     max_raw_bytes: 8589934592
     min_free_disk_bytes: 17179869184
     max_summary_rows: 5000
-    keep_raw: false
+    keep_raw: true
     expected_rank_traces: 8
     required_kernel_pattern: fp8_mxfp4_mega_moe
   planner:

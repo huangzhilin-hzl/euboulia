@@ -234,3 +234,16 @@ def test_active_profiler_requires_an_exact_rank_set(tmp_path: Path) -> None:
             endpoint="http://127.0.0.1:30000",
             run_workload=workload,
         )
+
+
+def test_export_timeout_rejects_files_that_have_not_settled(tmp_path: Path, monkeypatch) -> None:
+    from euboulia.optimization import profiling as module
+
+    trace = tmp_path / "rank-0.trace.json.gz"
+    _trace(trace)
+    clock = iter([0.0, 0.0, 2.0])
+    monkeypatch.setattr(module.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(module.time, "sleep", lambda _: None)
+    profiler = _LocalProfiler(_config(expected_rank_traces=1, settle_timeout_seconds=1))
+    with pytest.raises(ProfileCaptureError, match="did not settle"):
+        profiler._wait_for_traces(tmp_path)

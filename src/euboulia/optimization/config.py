@@ -198,6 +198,10 @@ class SGLangProfilingConfig:
 
     provider: ProfileProvider
     workload_point: str
+    workload_points: tuple[str, ...] = ()
+    repetitions: int = 1
+    request_waves: int = 1
+    purpose: str = "diagnostic"
     warmup_runs: int = 1
     start_step: int = 0
     num_steps: int = 3
@@ -205,6 +209,7 @@ class SGLangProfilingConfig:
     merge_profiles: bool = False
     with_stack: bool = False
     record_shapes: bool = False
+    semantic_scopes: bool = False
     timeout_seconds: float = 1800.0
     settle_timeout_seconds: float = 30.0
     max_raw_bytes: int = 8 * 1024 * 1024 * 1024
@@ -1003,6 +1008,10 @@ def _parse_profiling(
         {
             "provider",
             "workload_point",
+            "workload_points",
+            "repetitions",
+            "request_waves",
+            "purpose",
             "warmup_runs",
             "start_step",
             "num_steps",
@@ -1010,6 +1019,7 @@ def _parse_profiling(
             "merge_profiles",
             "with_stack",
             "record_shapes",
+            "semantic_scopes",
             "timeout_seconds",
             "settle_timeout_seconds",
             "max_raw_bytes",
@@ -1032,6 +1042,20 @@ def _parse_profiling(
         raise OptimizationConfigError(
             f"{path}.workload_point references unknown workload point: {workload_point}"
         )
+    workload_points = _string_tuple(raw.get("workload_points", []), f"{path}.workload_points")
+    if len(workload_points) > 12 or len(set(workload_points)) != len(workload_points):
+        raise OptimizationConfigError(
+            f"{path}.workload_points must contain at most 12 unique points"
+        )
+    if set(workload_points) - set(point_names):
+        raise OptimizationConfigError(f"{path}.workload_points contains an unknown workload point")
+    repetitions = _integer(raw.get("repetitions", 1), f"{path}.repetitions", minimum=1)
+    waves = _integer(raw.get("request_waves", 1), f"{path}.request_waves", minimum=1)
+    if repetitions > 10 or waves > 32:
+        raise OptimizationConfigError(f"{path}: repetitions <= 10 and request_waves <= 32 required")
+    purpose = _string(raw.get("purpose", "diagnostic"), f"{path}.purpose")
+    if purpose not in {"diagnostic", "understanding"}:
+        raise OptimizationConfigError(f"{path}.purpose must be diagnostic or understanding")
     activities = tuple(
         item.upper()
         for item in _string_tuple(
@@ -1070,9 +1094,16 @@ def _parse_profiling(
     )
     if min_free_disk_bytes < max_raw_bytes:
         raise OptimizationConfigError(f"{path}.min_free_disk_bytes must be >= max_raw_bytes")
+    semantic_scopes = _boolean(raw.get("semantic_scopes", False), f"{path}.semantic_scopes")
+    if semantic_scopes and not {"CPU", "GPU"}.issubset(activities):
+        raise OptimizationConfigError(f"{path}.semantic_scopes requires CPU and GPU activities")
     return SGLangProfilingConfig(
         provider=provider,
         workload_point=workload_point,
+        workload_points=workload_points,
+        repetitions=repetitions,
+        request_waves=waves,
+        purpose=purpose,
         warmup_runs=_integer(raw.get("warmup_runs", 1), f"{path}.warmup_runs"),
         start_step=_integer(raw.get("start_step", 0), f"{path}.start_step"),
         num_steps=_integer(raw.get("num_steps", 3), f"{path}.num_steps", minimum=1),
@@ -1080,6 +1111,7 @@ def _parse_profiling(
         merge_profiles=merge_profiles,
         with_stack=_boolean(raw.get("with_stack", False), f"{path}.with_stack"),
         record_shapes=_boolean(raw.get("record_shapes", False), f"{path}.record_shapes"),
+        semantic_scopes=semantic_scopes,
         timeout_seconds=_number(
             raw.get("timeout_seconds", 1800), f"{path}.timeout_seconds", minimum=0.001
         ),
