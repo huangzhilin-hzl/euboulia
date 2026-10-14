@@ -258,7 +258,7 @@
     .log-source:disabled { opacity: .32; cursor: not-allowed; }
     .live-indicator { display: inline-flex; align-items: center; gap: 6px; color: var(--cyan); font-family: var(--mono); font-size: 8px; letter-spacing: .08em; }
     .live-indicator::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: var(--cyan); animation: status-breathe 1.8s ease-in-out infinite; }
-    .console pre { min-height: 250px; max-height: 430px; white-space: pre; word-break: normal; color: #c8d2dc; }
+    .console pre { min-height: 250px; max-height: 430px; max-width: 100%; overflow: auto; white-space: pre; word-break: normal; color: #c8d2dc; }
     .console-empty { color: var(--quiet); }
     .kv-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
     .kv { border-bottom: 1px solid var(--line-soft); padding: 10px 0; min-width: 0; }
@@ -497,7 +497,7 @@
     const state = {
       status: null, runs: [], selected: null, detail: null, view: "runs", tab: "activity",
       busy: false, refreshing: false, action: null, revision: 0,
-      logSource: "controller", logOffsets: {}, logContent: {}
+      logSource: "controller", logOffsets: {}, logContent: {}, logViewports: {}
     };
     const terminal = new Set(["completed", "failed", "cancelled"]);
     const phaseGroups = [
@@ -676,9 +676,21 @@
     function renderDetail() {
       const host = $("runDetail");
       updateResultLayout();
-      clear(host);
       const detail = state.detail;
-      if (!detail) return;
+      const previousOutput = $("consoleOutput");
+      rememberLogViewport(previousOutput);
+      const retainedContent = state.tab === "console" && previousOutput && previousOutput.dataset.runUid === detail?.run.run_uid
+        ? previousOutput.closest(".tab-content") : null;
+      if (!retainedContent) clear(host);
+      function updateSection(selector, node) {
+        const previous = retainedContent && host.querySelector(selector);
+        if (previous) previous.replaceWith(node);
+        else host.appendChild(node);
+      }
+      if (!detail) {
+        host.appendChild(element("div", "empty", state.selected ? "Loading experiment…" : "Select a run"));
+        return;
+      }
       const run = detail.run;
       const hero = element("div", "detail-hero");
       const line = element("div", "detail-line");
@@ -723,7 +735,7 @@
       );
       hero.appendChild(grid);
       hero.appendChild(renderPod(detail));
-      host.appendChild(hero);
+      updateSection(".detail-hero", hero);
 
       const timelineWrap = element("div", "timeline-wrap");
       timelineWrap.appendChild(element("div", "section-label", run.detail || "Awaiting progress"));
@@ -737,7 +749,7 @@
         timeline.appendChild(element("div", klass, phaseLabels[index]));
       });
       timelineWrap.appendChild(timeline);
-      host.appendChild(timelineWrap);
+      updateSection(".timeline-wrap", timelineWrap);
 
       const tabs = element("div", "tabs");
       [["activity", "Activity"], ["console", "Console"], ["result", "Result"], ["artifacts", "Artifacts"]].forEach(([key, label]) => {
@@ -750,13 +762,13 @@
         });
         tabs.appendChild(tab);
       });
-      host.appendChild(tabs);
-      const content = element("div", "tab-content");
+      updateSection(".tabs", tabs);
+      const content = retainedContent || element("div", "tab-content");
+      if (!retainedContent) host.appendChild(content);
       if (state.tab === "activity") renderActivity(content, detail);
       if (state.tab === "console") renderConsole(content, detail);
       if (state.tab === "result") renderResult(content, detail);
       if (state.tab === "artifacts") renderArtifacts(content, detail.artifacts);
-      host.appendChild(content);
     }
     function renderPod(detail) {
       const { run, pod } = detail;
@@ -836,7 +848,8 @@
         const first = sources.find(source => source.available);
         if (first) state.logSource = first.source;
       }
-      const consoleNode = element("div", "console");
+      const consoleNode = host.querySelector(".console") || element("div", "console");
+      if (!consoleNode.isConnected) host.appendChild(consoleNode);
       const toolbar = element("div", "console-toolbar");
       const sourceList = element("div", "log-sources");
       sources.forEach(source => {
@@ -851,18 +864,45 @@
       });
       toolbar.appendChild(sourceList);
       if (!terminal.has(detail.run.status)) toolbar.appendChild(element("span", "live-indicator", "LIVE"));
-      consoleNode.appendChild(toolbar);
+      const previousToolbar = consoleNode.querySelector(".console-toolbar");
+      if (previousToolbar) previousToolbar.replaceWith(toolbar);
+      else consoleNode.appendChild(toolbar);
+      const previousOutput = consoleNode.querySelector("pre");
+      if (previousOutput?.dataset.source === state.logSource) return;
+      rememberLogViewport(previousOutput);
       const output = element("pre", state.logContent[state.logSource] ? "" : "console-empty", state.logContent[state.logSource] || "Waiting for output from this source.");
       output.id = "consoleOutput";
-      consoleNode.appendChild(output);
-      host.appendChild(consoleNode);
-      output.scrollTop = output.scrollHeight;
+      output.dataset.runUid = detail.run.run_uid;
+      output.dataset.source = state.logSource;
+      output.tabIndex = 0;
+      output.setAttribute("role", "region");
+      output.setAttribute("aria-label", "Scrollable log output");
+      if (previousOutput) previousOutput.replaceWith(output);
+      else consoleNode.appendChild(output);
+      const viewport = state.logViewports[logViewportKey(output)];
+      output.scrollLeft = viewport?.left || 0;
+      output.scrollTop = !viewport || viewport.followTail ? output.scrollHeight : viewport.top;
+    }
+    function logViewportKey(output) {
+      return `${output.dataset.runUid}:${output.dataset.source}`;
+    }
+    function rememberLogViewport(output) {
+      // A loading placeholder cannot represent the saved scroll position.
+      if (!output || output.classList.contains("console-empty")) return;
+      state.logViewports[logViewportKey(output)] = {
+        left: output.scrollLeft, top: output.scrollTop,
+        followTail: output.scrollHeight - output.clientHeight - output.scrollTop <= 8
+      };
     }
     async function loadLog() {
       if (!state.selected || state.tab !== "console") return;
+      const uid = state.selected;
+      const revision = state.revision;
+      const cache = state.logContent;
       const source = state.logSource;
       const after = state.logOffsets[source] || 0;
-      const payload = await api(`/api/runs/${encodeURIComponent(state.selected)}/logs?source=${encodeURIComponent(source)}&after=${after}`);
+      const payload = await api(`/api/runs/${encodeURIComponent(uid)}/logs?source=${encodeURIComponent(source)}&after=${after}`);
+      if (state.selected !== uid || state.revision !== revision || state.logContent !== cache || (state.logOffsets[source] || 0) !== after) return;
       if (payload.reset) state.logContent[source] = "";
       if (payload.content) {
         state.logContent[source] = (state.logContent[source] || "") + payload.content;
@@ -870,10 +910,15 @@
       }
       state.logOffsets[source] = payload.next_offset;
       const output = $("consoleOutput");
-      if (output && state.tab === "console" && state.logSource === source) {
-        output.textContent = state.logContent[source] || "Waiting for output from this source.";
+      if (output && state.tab === "console" && output.dataset.runUid === uid && output.dataset.source === source) {
+        const text = state.logContent[source] || "Waiting for output from this source.";
+        if (output.textContent === text) return;
+        rememberLogViewport(output);
+        const viewport = state.logViewports[logViewportKey(output)] || { left: 0, top: 0, followTail: true };
+        output.textContent = text;
         output.classList.toggle("console-empty", !state.logContent[source]);
-        output.scrollTop = output.scrollHeight;
+        output.scrollLeft = viewport.left;
+        output.scrollTop = viewport.followTail ? output.scrollHeight : viewport.top;
       }
     }
     function kv(key, value) {
