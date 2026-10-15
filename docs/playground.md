@@ -41,12 +41,22 @@ The server binds only to `127.0.0.1`. Starting it does not create a Pod. In the 
 2. Choose **GPU index** from the Pod's actual `nvidia-smi` inventory. The workbench
    displays memory use and GPU utilization; the refresh button updates them.
 3. Select a profile, edit `solution.py`, and click **Run** or press Cmd/Ctrl+Enter.
-   Click the fixed two-line **Arguments** preview or **Edit** to open a separate
+   Click the **Arguments** preview or **Edit** to open a separate
    editor, for example `--seq_len_k 128 --num_heads 128 --label "test run"`.
    The editor accepts one option per line or pasted shell-style backslash
    continuations. **Apply changes** (Cmd/Ctrl+Enter) saves to the profile draft and
    updates the preview; **Cancel**, the close button, or Esc discards unapplied edits.
    Apply does not run the script; use **Run** from the workbench when ready.
+   Empty arguments use a compact single-line bar; configured arguments retain a
+   two-line preview. The console starts collapsed to a compact header, leaving
+   the rest of the workbench for editing. Starting a run, viewing a history entry,
+   or reloading the page with an active run expands it automatically. Use the
+   console's **Expand** / **Collapse** button to toggle it manually; polling will
+   not reopen it after you collapse it, and completed runs leave it open for review.
+   When expanded, the editor defaults to 80% of the workbench, with at least
+   180 pixels reserved for output. Drag the divider to adjust the split,
+   double-click it to restore the default, or use the editor's **Expand** button
+   for the full workbench.
    Backslash-newline continuations (including CRLF) are
    removed outside single quotes, preserving escaped backslashes and literal quoted
    values. Arguments are split using POSIX quoting and passed directly to Python's

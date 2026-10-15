@@ -50,6 +50,7 @@ function setup(initial = {}, profiles = [gpu], storageOptions = {}) {
     action: async callback => callback(),
     api: async (path, body) => { requests.push({path, body}); return {id: 'new-run'}; },
     clearConsole() {}, resetResults() {}, badge() {}, renderHistory() {},
+    panelLayout: {showOutput() {}},
   });
   vm.runInContext('var currentProfile = "", editorTouched = false, currentMode = "run", profilerDraft = {}, session = {id: "workspace"}, state = {runs: []}, selectedRun = null, cursor = 0;' + draftHelpers + profileFunctions + runFunction, context);
   return {context, elements, values, wrapper, requests};

@@ -371,6 +371,14 @@ function badge(id, value) {
   if ($(id).className !== `badge ${value}`) $(id).className = `badge ${value}`;
 }
 function activeRun() { return state.runs.find((r) => r.session === session?.id && activeStates.has(r.status)); }
+function restoreActiveRun() {
+  // Select an ongoing run once after loading; polling must respect manual collapse.
+  if (selectedRun || busy) return;
+  const running = activeRun();
+  if (!running) return;
+  selectedRun = running.id; cursor = 0; clearConsole(); resetResults();
+  panelLayout.showOutput();
+}
 function controls() {
   const running = activeRun(), ready = session?.status === "ready";
   setDisabled("run", busy || !ready || !!running || !$("gpu").value);
@@ -491,6 +499,7 @@ async function loadNodes({reset = false, force = false} = {}) {
 function selectSession() {
   session = state.sessions.find(s => s.cluster === $("cluster").value && s.node === $("node").value && s.status !== "released") || null;
   renderSession();
+  restoreActiveRun();
 }
 function shellQuote(value) {
   return /^[a-zA-Z0-9_@%+=:,./-]+$/.test(value) ? value : "'" + value.replaceAll("'", "'\"'\"'") + "'";
@@ -552,6 +561,7 @@ function renderHistory() {
     b.title = `${r.cluster} / ${r.node}\nNode IP: ${r.node_ip || "Not recorded"}\nGPU ${r.gpu_index}: ${r.gpu_uuid}\n\n${invocation.detail}`;
     b.onclick = () => action(async () => {
       selectedRun = r.id; cursor = 0; clearConsole(); resetResults();
+      panelLayout.showOutput();
       const saved = await api(`/api/runs/${r.id}/code`);
       loadRunDraft(r, saved.code); renderHistory(); await readEvents();
     });
@@ -588,6 +598,7 @@ async function run() {
   if ($("run").disabled) return;
   await action(async () => {
     saveDraft();
+    panelLayout.showOutput();
     const r = await api("/api/runs", {session:session.id, profile:currentProfile, gpu_index:Number($("gpu").value), code:$("code").value, arguments:$("arguments").value, mode:currentMode, profiler_arguments:currentMode === "run" ? "" : $("profiler-arguments").value});
     state.runs.unshift(r); selectedRun = r.id; cursor = 0; clearConsole(); resetResults(); badge("run-status", "queued"); renderHistory();
   });
@@ -724,7 +735,8 @@ $("download").onclick = () => {
 };
 function initPanelLayout() {
   const workbench = $("workbench"), resizer = $("panel-resizer"), expand = $("expand-editor");
-  const storageKey = "molou-playground-editor-share", defaultShare = 0.7;
+  const outputToggle = $("toggle-output");
+  const storageKey = "molou-playground-editor-share", defaultShare = 0.8;
   let share = defaultShare, drag = null;
   try {
     const saved = Number(localStorage.getItem(storageKey));
@@ -735,7 +747,7 @@ function initPanelLayout() {
     return {total, min: 320, max: Math.max(320, total - 180)};
   };
   function updateAria() {
-    if (workbench.classList.contains("editor-expanded")) return;
+    if (workbench.classList.contains("editor-expanded") || workbench.classList.contains("output-collapsed")) return;
     const {total, min, max} = bounds();
     if (!total) return;
     const percent = Math.round($("editor-panel").offsetHeight / total * 100);
@@ -746,8 +758,10 @@ function initPanelLayout() {
     resizer.setAttribute("aria-valuetext", `Code editor ${percent} percent`);
   }
   function applyShare() {
-    workbench.style.setProperty("--editor-share", `${share}fr`);
-    workbench.style.setProperty("--output-share", `${1 - share}fr`);
+    // Keep the remaining track above 1fr when the other reaches its minimum.
+    // Fractional weights below 1fr would otherwise leave unused workbench space.
+    workbench.style.setProperty("--editor-share", `${share * 100}fr`);
+    workbench.style.setProperty("--output-share", `${(1 - share) * 100}fr`);
     updateAria();
   }
   function resize(height) {
@@ -799,6 +813,21 @@ function initPanelLayout() {
     expand.title = expanded ? "Restore code editor size · Esc" : "Expand code editor";
     updateAria();
   }
+  function setOutputCollapsed(collapsed) {
+    finishDrag(true);
+    workbench.classList.toggle("output-collapsed", collapsed);
+    outputToggle.textContent = collapsed ? "Expand" : "Collapse";
+    outputToggle.setAttribute("aria-expanded", String(!collapsed));
+    const label = collapsed ? "Expand console output" : "Collapse console output";
+    outputToggle.setAttribute("aria-label", label);
+    outputToggle.title = label;
+    updateAria();
+  }
+  function showOutput() {
+    setExpanded(false);
+    setOutputCollapsed(false);
+  }
+  outputToggle.onclick = () => setOutputCollapsed(!workbench.classList.contains("output-collapsed"));
   expand.onclick = () => setExpanded(!workbench.classList.contains("editor-expanded"));
   document.addEventListener("keydown", e => {
     if (e.key !== "Escape" || e.defaultPrevented) return;
@@ -806,9 +835,11 @@ function initPanelLayout() {
     else if (!document.querySelector("dialog[open]") && !choices.isOpen()) setExpanded(false);
   });
   new ResizeObserver(updateAria).observe(workbench);
+  setOutputCollapsed(true);
   applyShare();
+  return {showOutput};
 }
-initPanelLayout();
+const panelLayout = initPanelLayout();
 async function init() {
   try {
     config = await api("/api/config");

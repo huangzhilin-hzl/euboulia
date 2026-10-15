@@ -23,6 +23,7 @@ from euboulia.control import (
 )
 from euboulia.models import JSONValue
 from euboulia.progress import RUN_PHASES, read_run_progress
+from euboulia.remote import RemoteExecutionError
 from euboulia.run_identity import normalize_run_uid
 
 _CONTROL_HEADER = "X-Euboulia-Control"
@@ -88,8 +89,15 @@ class ControlApplication:
         progress = _read_progress(run_dir / "worker-progress.json")
         validation = _read_json(run_dir / "artifacts" / "target-validation" / "validation.json")
         summary = _read_json(run_dir / "summary.json")
+        record = _read_json(run_dir / "run.json")
+        pod: dict[str, JSONValue] | None = None
+        if record is not None and record.get("run_uid") == selected_uid:
+            name, namespace = record.get("pod"), record.get("namespace")
+            if isinstance(name, str) and name and isinstance(namespace, str) and namespace:
+                pod = {"name": name, "namespace": namespace, "uid": record.get("pod_uid")}
         return {
             "run": run.to_dict(),
+            "pod": pod,
             "events": list(self.manager.store.events(selected_uid)),
             "progress": None if progress is None else dict(progress),
             "summary": None if summary is None else dict(summary),
@@ -129,6 +137,14 @@ class ControlApplication:
     def cancel(self, run_uid: str) -> dict[str, JSONValue]:
         run = self.manager.cancel(run_uid)
         return {"run": run.to_dict()}
+
+    def cleanup_pod(self, run_uid: str) -> dict[str, JSONValue]:
+        return {"run": self.manager.cleanup_pod(run_uid).to_dict()}
+
+    def delete_failed(self, run_uid: str) -> dict[str, JSONValue]:
+        selected_uid = normalize_run_uid(run_uid)
+        self.manager.delete_failed(selected_uid)
+        return {"deleted": selected_uid}
 
 
 class EubouliaHTTPServer(ThreadingHTTPServer):
@@ -204,6 +220,29 @@ class EubouliaRequestHandler(BaseHTTPRequestHandler):
         except KeyError:
             self._send_error(HTTPStatus.NOT_FOUND, "run not found")
         except (ControlError, OSError, TypeError, ValueError) as exc:
+            self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
+
+    def do_DELETE(self) -> None:
+        if self.headers.get(_CONTROL_HEADER) != "1":
+            self._send_error(HTTPStatus.FORBIDDEN, "missing local control header")
+            return
+        path = urlsplit(self.path).path
+        try:
+            self._read_empty_body()
+            pod_run_uid = _pod_path(path)
+            if pod_run_uid is not None:
+                self._send_json(HTTPStatus.OK, self.server.application.cleanup_pod(pod_run_uid))
+                return
+            run_uid = _run_path(path)
+            if run_uid is not None:
+                self._send_json(HTTPStatus.OK, self.server.application.delete_failed(run_uid))
+                return
+            self._send_error(HTTPStatus.NOT_FOUND, "route not found")
+        except KeyError:
+            self._send_error(HTTPStatus.NOT_FOUND, "run not found")
+        except (ControlError, RemoteExecutionError) as exc:
+            self._send_error(HTTPStatus.CONFLICT, str(exc))
+        except (OSError, TypeError, ValueError) as exc:
             self._send_error(HTTPStatus.BAD_REQUEST, str(exc))
 
     def _read_json_body(self) -> Mapping[str, object]:
@@ -312,6 +351,13 @@ def _run_path(path: str) -> str | None:
 def _cancel_path(path: str) -> str | None:
     parts = path.strip("/").split("/")
     if len(parts) == 4 and parts[:2] == ["api", "runs"] and parts[3] == "cancel":
+        return unquote(parts[2])
+    return None
+
+
+def _pod_path(path: str) -> str | None:
+    parts = path.strip("/").split("/")
+    if len(parts) == 4 and parts[:2] == ["api", "runs"] and parts[3] == "pod":
         return unquote(parts[2])
     return None
 

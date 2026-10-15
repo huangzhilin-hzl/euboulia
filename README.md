@@ -103,6 +103,14 @@ result synchronization, logs, and historical artifacts. Its queue is durable, an
 running controllers continue independently if the page or server is closed. Canonical
 records remain under `<storage.root>`.
 
+Run details show the recorded Pod namespace and name. For a finished run, **Delete Pod**
+cleans up its owned Pod while keeping local results and logs. **Delete experiment** is
+available for failed runs: after confirmation, it cleans up any retained Pod and removes
+that run's local artifacts, logs, submission copy, and history. Source recipes and other
+runs are kept. If Pod cleanup fails, the experiment remains available for recovery.
+For an already-missing Pod, cleanup requires an explicit `executor.context` pointing
+to its original cluster; otherwise, the ownership record is kept for verification.
+
 ## Documentation
 
 For interactive CuTe DSL, TileLang, and Python kernels, configure the separate local

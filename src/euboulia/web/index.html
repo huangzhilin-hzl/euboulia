@@ -182,6 +182,12 @@
     .detail { min-height: 600px; }
     .detail-hero { padding: 22px 24px 18px; border-bottom: 1px solid var(--line-soft); }
     .detail-line { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
+    .detail-line > :first-child { min-width: 0; }
+    .detail-actions { display: flex; flex-wrap: wrap; gap: 8px; flex-shrink: 0; }
+    .pod-panel { margin-top: 12px; padding: 12px; display: flex; align-items: center; justify-content: space-between; gap: 14px; border: 1px solid var(--line-soft); border-radius: 11px; background: rgba(8,11,15,.42); }
+    .pod-identity { min-width: 0; }
+    .pod-name { color: var(--paper); font: 11px/1.6 var(--mono); overflow-wrap: anywhere; }
+    .pod-hint { margin-top: 4px; color: var(--quiet); font-size: 10px; line-height: 1.5; }
     .detail-name { margin: 5px 0 0; font-size: clamp(20px, 2vw, 29px); line-height: 1.2; font-weight: 560; letter-spacing: -.02em; }
     .uid-row { margin-top: 9px; display: flex; align-items: center; gap: 8px; min-width: 0; }
     .uid { color: var(--quiet); font-family: var(--mono); font-size: 10px; word-break: break-all; }
@@ -252,7 +258,7 @@
     .log-source:disabled { opacity: .32; cursor: not-allowed; }
     .live-indicator { display: inline-flex; align-items: center; gap: 6px; color: var(--cyan); font-family: var(--mono); font-size: 8px; letter-spacing: .08em; }
     .live-indicator::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: var(--cyan); animation: status-breathe 1.8s ease-in-out infinite; }
-    .console pre { min-height: 250px; max-height: 430px; white-space: pre; word-break: normal; color: #c8d2dc; }
+    .console pre { min-height: 250px; max-height: 430px; max-width: 100%; overflow: auto; white-space: pre; word-break: normal; color: #c8d2dc; }
     .console-empty { color: var(--quiet); }
     .kv-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
     .kv { border-bottom: 1px solid var(--line-soft); padding: 10px 0; min-width: 0; }
@@ -389,6 +395,7 @@
       .state-grid { grid-template-columns: repeat(2, 1fr); }
     }
     @media (max-width: 760px) {
+      .detail-line, .pod-panel { flex-wrap: wrap; }
       .shell { display: block; }
       .rail { position: fixed; top: auto; bottom: 0; width: 100%; height: 65px; padding: 8px 16px; border: 0; border-top: 1px solid var(--line); flex-direction: row; }
       .brand, .rail-foot { display: none; }
@@ -489,7 +496,8 @@
   <script>
     const state = {
       status: null, runs: [], selected: null, detail: null, view: "runs", tab: "activity",
-      busy: false, refreshing: false, logSource: "controller", logOffsets: {}, logContent: {}
+      busy: false, refreshing: false, action: null, revision: 0,
+      logSource: "controller", logOffsets: {}, logContent: {}, logViewports: {}
     };
     const terminal = new Set(["completed", "failed", "cancelled"]);
     const phaseGroups = [
@@ -591,10 +599,15 @@
       });
     }
     async function loadRuns({ keepSelection = true } = {}) {
+      const revision = state.revision;
       const payload = await api("/api/runs");
+      if (revision !== state.revision) return;
       state.runs = payload.runs;
       if (!keepSelection || !state.runs.some(run => run.run_uid === state.selected)) {
         state.selected = state.runs.length ? state.runs[0].run_uid : null;
+        state.detail = null;
+        state.logOffsets = {}; state.logContent = {};
+        renderDetail();
       }
       renderSummary();
       renderRuns();
@@ -604,8 +617,9 @@
     async function loadDetail(uid) {
       if (!uid) return;
       const requested = uid;
+      const revision = state.revision;
       const payload = await api(`/api/runs/${encodeURIComponent(uid)}`);
-      if (state.selected !== requested) return;
+      if (state.selected !== requested || state.revision !== revision) return;
       const unchangedResult = state.tab === "result" && JSON.stringify(state.detail) === JSON.stringify(payload);
       state.detail = payload;
       if (!unchangedResult) renderDetail();
@@ -662,9 +676,21 @@
     function renderDetail() {
       const host = $("runDetail");
       updateResultLayout();
-      clear(host);
       const detail = state.detail;
-      if (!detail) return;
+      const previousOutput = $("consoleOutput");
+      rememberLogViewport(previousOutput);
+      const retainedContent = state.tab === "console" && previousOutput && previousOutput.dataset.runUid === detail?.run.run_uid
+        ? previousOutput.closest(".tab-content") : null;
+      if (!retainedContent) clear(host);
+      function updateSection(selector, node) {
+        const previous = retainedContent && host.querySelector(selector);
+        if (previous) previous.replaceWith(node);
+        else host.appendChild(node);
+      }
+      if (!detail) {
+        host.appendChild(element("div", "empty", state.selected ? "Loading experiment…" : "Select a run"));
+        return;
+      }
       const run = detail.run;
       const hero = element("div", "detail-hero");
       const line = element("div", "detail-line");
@@ -678,12 +704,21 @@
       uidRow.append(element("div", "uid", run.run_uid), copyUid);
       identity.append(element("div", "eyebrow", `${run.recipe_name} · ${run.executor}`), element("h1", "detail-name", displayName(run)), uidRow);
       line.appendChild(identity);
+      const actions = element("div", "detail-actions");
       if (["queued", "running", "disconnected"].includes(run.status)) {
         const cancel = element("button", "button danger", run.cancel_requested ? "Cancel requested" : "Cancel run");
         cancel.disabled = run.cancel_requested;
         cancel.addEventListener("click", () => cancelRun(run));
-        line.appendChild(cancel);
+        actions.appendChild(cancel);
       }
+      if (run.status === "failed") {
+        const deleting = state.action === `run:${run.run_uid}`;
+        const remove = element("button", "button danger", deleting ? "Deleting…" : "Delete experiment");
+        remove.disabled = state.busy;
+        remove.addEventListener("click", () => deleteExperiment(detail));
+        actions.appendChild(remove);
+      }
+      line.appendChild(actions);
       hero.appendChild(line);
       const grid = element("div", "state-grid");
       const elapsed = stateCard("elapsed", elapsedTime(run.started_at || run.submitted_at, run.finished_at));
@@ -699,7 +734,8 @@
         stateCard("last signal", relativeTime(run.updated_at))
       );
       hero.appendChild(grid);
-      host.appendChild(hero);
+      hero.appendChild(renderPod(detail));
+      updateSection(".detail-hero", hero);
 
       const timelineWrap = element("div", "timeline-wrap");
       timelineWrap.appendChild(element("div", "section-label", run.detail || "Awaiting progress"));
@@ -713,7 +749,7 @@
         timeline.appendChild(element("div", klass, phaseLabels[index]));
       });
       timelineWrap.appendChild(timeline);
-      host.appendChild(timelineWrap);
+      updateSection(".timeline-wrap", timelineWrap);
 
       const tabs = element("div", "tabs");
       [["activity", "Activity"], ["console", "Console"], ["result", "Result"], ["artifacts", "Artifacts"]].forEach(([key, label]) => {
@@ -726,14 +762,52 @@
         });
         tabs.appendChild(tab);
       });
-      host.appendChild(tabs);
-      const content = element("div", "tab-content");
+      updateSection(".tabs", tabs);
+      const content = retainedContent || element("div", "tab-content");
+      if (!retainedContent) host.appendChild(content);
       if (state.tab === "activity") renderActivity(content, detail);
       if (state.tab === "console") renderConsole(content, detail);
       if (state.tab === "result") renderResult(content, detail);
       if (state.tab === "artifacts") renderArtifacts(content, detail.artifacts);
-      host.appendChild(content);
     }
+    function renderPod(detail) {
+      const { run, pod } = detail;
+      const panel = element("div", "pod-panel");
+      const identity = element("div", "pod-identity");
+      identity.appendChild(element("div", "state-label", "Pod"));
+      if (pod) {
+        const fullName = `${pod.namespace}/${pod.name}`;
+        const nameRow = element("div", "uid-row");
+        const copy = element("button", "copy-uid");
+        copy.type = "button";
+        copy.title = "Copy Pod name";
+        copy.setAttribute("aria-label", "Copy Pod name");
+        copy.addEventListener("click", async () => {
+          try { await copyText(fullName); toast("Pod name copied"); }
+          catch (_) { toast("Could not copy Pod name", true); }
+        });
+        nameRow.append(element("div", "pod-name", fullName), copy);
+        identity.appendChild(nameRow);
+      } else {
+        identity.appendChild(element("div", "pod-name", run.infrastructure_state === "not_created" ? "Not created" : "Pod identity unavailable"));
+      }
+      const hints = {
+        pod_retained: "Retained after the run. Deleting the Pod keeps local results and logs; files stored only in the Pod will be lost.",
+        pod_deleted: "Pod cleaned up. Local results and logs are still available.",
+        pod_lost: "Pod was lost. Cleanup will verify whether it still exists.",
+      };
+      if (hints[run.infrastructure_state]) identity.appendChild(element("div", "pod-hint", hints[run.infrastructure_state]));
+      panel.appendChild(identity);
+      if (pod && terminal.has(run.status) && run.infrastructure_state !== "pod_deleted") {
+        const deleting = state.action === `pod:${run.run_uid}`;
+        const remove = element("button", "button danger", deleting ? "Deleting…" : "Delete Pod");
+        remove.disabled = state.busy;
+        remove.addEventListener("click", () => deletePod(detail));
+        panel.appendChild(remove);
+      }
+      return panel;
+    }
+
     function renderActivity(host, detail) {
       const run = detail.run;
       const metadata = run.metadata || {};
@@ -774,7 +848,8 @@
         const first = sources.find(source => source.available);
         if (first) state.logSource = first.source;
       }
-      const consoleNode = element("div", "console");
+      const consoleNode = host.querySelector(".console") || element("div", "console");
+      if (!consoleNode.isConnected) host.appendChild(consoleNode);
       const toolbar = element("div", "console-toolbar");
       const sourceList = element("div", "log-sources");
       sources.forEach(source => {
@@ -789,18 +864,45 @@
       });
       toolbar.appendChild(sourceList);
       if (!terminal.has(detail.run.status)) toolbar.appendChild(element("span", "live-indicator", "LIVE"));
-      consoleNode.appendChild(toolbar);
+      const previousToolbar = consoleNode.querySelector(".console-toolbar");
+      if (previousToolbar) previousToolbar.replaceWith(toolbar);
+      else consoleNode.appendChild(toolbar);
+      const previousOutput = consoleNode.querySelector("pre");
+      if (previousOutput?.dataset.source === state.logSource) return;
+      rememberLogViewport(previousOutput);
       const output = element("pre", state.logContent[state.logSource] ? "" : "console-empty", state.logContent[state.logSource] || "Waiting for output from this source.");
       output.id = "consoleOutput";
-      consoleNode.appendChild(output);
-      host.appendChild(consoleNode);
-      output.scrollTop = output.scrollHeight;
+      output.dataset.runUid = detail.run.run_uid;
+      output.dataset.source = state.logSource;
+      output.tabIndex = 0;
+      output.setAttribute("role", "region");
+      output.setAttribute("aria-label", "Scrollable log output");
+      if (previousOutput) previousOutput.replaceWith(output);
+      else consoleNode.appendChild(output);
+      const viewport = state.logViewports[logViewportKey(output)];
+      output.scrollLeft = viewport?.left || 0;
+      output.scrollTop = !viewport || viewport.followTail ? output.scrollHeight : viewport.top;
+    }
+    function logViewportKey(output) {
+      return `${output.dataset.runUid}:${output.dataset.source}`;
+    }
+    function rememberLogViewport(output) {
+      // A loading placeholder cannot represent the saved scroll position.
+      if (!output || output.classList.contains("console-empty")) return;
+      state.logViewports[logViewportKey(output)] = {
+        left: output.scrollLeft, top: output.scrollTop,
+        followTail: output.scrollHeight - output.clientHeight - output.scrollTop <= 8
+      };
     }
     async function loadLog() {
       if (!state.selected || state.tab !== "console") return;
+      const uid = state.selected;
+      const revision = state.revision;
+      const cache = state.logContent;
       const source = state.logSource;
       const after = state.logOffsets[source] || 0;
-      const payload = await api(`/api/runs/${encodeURIComponent(state.selected)}/logs?source=${encodeURIComponent(source)}&after=${after}`);
+      const payload = await api(`/api/runs/${encodeURIComponent(uid)}/logs?source=${encodeURIComponent(source)}&after=${after}`);
+      if (state.selected !== uid || state.revision !== revision || state.logContent !== cache || (state.logOffsets[source] || 0) !== after) return;
       if (payload.reset) state.logContent[source] = "";
       if (payload.content) {
         state.logContent[source] = (state.logContent[source] || "") + payload.content;
@@ -808,10 +910,15 @@
       }
       state.logOffsets[source] = payload.next_offset;
       const output = $("consoleOutput");
-      if (output && state.tab === "console" && state.logSource === source) {
-        output.textContent = state.logContent[source] || "Waiting for output from this source.";
+      if (output && state.tab === "console" && output.dataset.runUid === uid && output.dataset.source === source) {
+        const text = state.logContent[source] || "Waiting for output from this source.";
+        if (output.textContent === text) return;
+        rememberLogViewport(output);
+        const viewport = state.logViewports[logViewportKey(output)] || { left: 0, top: 0, followTail: true };
+        output.textContent = text;
         output.classList.toggle("console-empty", !state.logContent[source]);
-        output.scrollTop = output.scrollHeight;
+        output.scrollLeft = viewport.left;
+        output.scrollTop = viewport.followTail ? output.scrollHeight : viewport.top;
       }
     }
     function kv(key, value) {
@@ -1276,6 +1383,40 @@
         await api(`/api/runs/${encodeURIComponent(run.run_uid)}/cancel`, { method: "POST", headers: { "X-Euboulia-Control": "1" } });
         toast("Cancellation requested"); await loadRuns();
       } catch (error) { toast(error.message, true); }
+    }
+    async function deletePod(detail) {
+      if (state.busy || !detail.pod) return;
+      const { run, pod } = detail;
+      const message = `Delete Pod ${pod.namespace}/${pod.name}?\n\nLocal experiment results and logs will be kept. Files stored only in the Pod will be lost.`;
+      if (!window.confirm(message)) return;
+      await deleteResource(run.run_uid, "pod");
+    }
+    async function deleteExperiment(detail) {
+      if (state.busy) return;
+      const { run, pod } = detail;
+      let message = `Delete failed experiment “${displayName(run)}”?\n${run.run_uid}\n\nThis permanently removes this run's local results, logs and submission copy.`;
+      if (pod && run.infrastructure_state !== "pod_deleted") message += `\n\nIts Pod ${pod.namespace}/${pod.name} will be deleted first, including files stored only in that Pod.`;
+      message += "\n\nThe source experiment recipe and other runs will be kept.";
+      if (!window.confirm(message)) return;
+      await deleteResource(run.run_uid, "run");
+    }
+    async function deleteResource(uid, kind) {
+      state.busy = true; state.action = `${kind}:${uid}`;
+      renderDetail();
+      try {
+        await api(`/api/runs/${encodeURIComponent(uid)}${kind === "pod" ? "/pod" : ""}`, {
+          method: "DELETE", headers: { "X-Euboulia-Control": "1" }
+        });
+        state.revision++;
+        if (kind === "run" && state.selected === uid) {
+          state.selected = null; state.detail = null; state.tab = "activity";
+          state.logOffsets = {}; state.logContent = {};
+          renderDetail();
+        }
+        toast(kind === "pod" ? "Pod cleaned up; local results kept" : "Failed experiment deleted");
+        await loadRuns();
+      } catch (error) { toast(error.message, true); }
+      finally { state.busy = false; state.action = null; renderDetail(); }
     }
     function switchView(view) {
       state.view = view;
